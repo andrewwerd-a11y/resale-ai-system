@@ -1,0 +1,56 @@
+# ─── Resale AI System — Runtime Settings ─────────────────────────────────────
+# These are defaults. Override with environment variables in .env
+
+system:
+  name: "Resale AI System"
+  version: "0.1.0"
+  environment: "development"
+
+paths:
+  intake_root: "./intake"
+  db_path: "./data/app.db"
+  export_dir: "./data/exports"
+  import_dir: "./data/imports"
+  log_dir: "./data/logs"
+
+vision:
+  ollama_base_url: "http://localhost:11434"
+  default_model: "qwen2.5vl:7b"
+  fallback_model: "minicpm-v"
+  premium_model: "llama3.2-vision:11b"
+  timeout_seconds: 120
+  max_retries: 3
+  schema_version: "v1"
+
+extraction:
+  confidence_review_threshold: 0.72
+  high_value_review_threshold: 75.00
+  max_images_per_item: 24
+  image_max_dimension: 1600
+  image_quality: 85
+
+triage:
+  single_min_estimated_value: 5.00
+  lot_max_individual_value: 12.00
+  reject_max_estimated_value: 2.00
+
+pricing:
+  ai_suggest_list_price: true
+  stale_days_threshold: 60
+  price_drop_percent_at_stale: 10
+
+ebay:
+  default_shipping_policy: "Standard Shipping"
+  default_return_policy: "30 day returns"
+  default_payment_policy: "Immediate payment"
+  bulk_upload_format: "SellerHubReports"
+
+api:
+  host: "127.0.0.1"
+  port: 8000
+  reload: true
+
+logging:
+  level: "INFO"
+  max_bytes: 10485760
+  backup_count: 5

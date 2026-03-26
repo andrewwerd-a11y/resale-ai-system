@@ -1,0 +1,61 @@
+{
+  "_comment": "Business rules for triage, review routing, and pricing logic.",
+
+  "review_triggers": {
+    "global": [
+      "low_confidence",
+      "missing_required_fields",
+      "conflicting_extracted_values",
+      "high_value_estimate",
+      "unusual_defects"
+    ],
+    "books": [
+      "antique", "signed", "inscribed", "first_edition",
+      "rare_binding", "collectible_edition"
+    ],
+    "clothing": ["luxury_brand", "unclear_brand", "possible_counterfeit"],
+    "collectibles": ["antique", "signed", "rare", "unclear_authenticity", "possible_counterfeit"],
+    "shoes": ["luxury_brand", "unclear_brand", "possible_counterfeit"],
+    "toys": ["rare", "vintage", "unclear_brand"]
+  },
+
+  "luxury_brands": {
+    "clothing": [
+      "Gucci", "Louis Vuitton", "Prada", "Chanel", "Hermes", "Burberry",
+      "Versace", "Armani", "Balenciaga", "Off-White", "Supreme",
+      "Moncler", "Canada Goose", "Stone Island"
+    ],
+    "shoes": [
+      "Gucci", "Louis Vuitton", "Christian Louboutin", "Manolo Blahnik",
+      "Jimmy Choo", "Ferragamo", "Prada", "Balenciaga", "Yeezy", "Jordan"
+    ]
+  },
+
+  "triage": {
+    "single_min_estimated_value_usd": 5.00,
+    "lot_max_individual_value_usd": 12.00,
+    "reject_max_estimated_value_usd": 2.00,
+    "high_value_review_threshold_usd": 75.00,
+    "confidence_review_threshold": 0.72,
+    "min_images_required": 1,
+    "image_insufficiency_threshold": 0
+  },
+
+  "lot_grouping": {
+    "max_lot_size": 10,
+    "min_lot_size": 2,
+    "books_group_by": ["author", "topic", "publisher", "era", "subject"],
+    "clothing_group_by": ["brand", "size", "type", "department"],
+    "toys_group_by": ["franchise", "theme", "brand", "character"],
+    "collectibles_group_by": ["franchise", "theme", "brand", "era"],
+    "shoes_group_by": []
+  },
+
+  "pricing": {
+    "ai_suggest_list_price": true,
+    "ai_suggest_estimated_price": true,
+    "stale_listing_days": 60,
+    "stale_price_drop_percent": 10,
+    "minimum_profit_margin": 0.30
+  }
+}

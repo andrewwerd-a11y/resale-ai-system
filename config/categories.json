@@ -1,0 +1,133 @@
+{
+  "_comment": "Category profiles. Each key maps to a SKU prefix category_key.",
+
+  "clothing": {
+    "category_key": "clothing",
+    "label": "Clothing",
+    "prefix": "CL",
+    "ebay_category_id": "11450",
+    "lot_eligible": true,
+    "required_fields": [
+      "brand", "type", "department", "size", "color", "condition_label", "condition_id"
+    ],
+    "optional_fields": [
+      "size_type", "material", "pattern", "style", "fit", "features",
+      "occasion", "season", "measurements", "defects", "subcategory"
+    ],
+    "allowed_values": {
+      "department": ["Men", "Women", "Boys", "Girls", "Unisex", "Baby"],
+      "condition_label": ["New with tags", "New without tags", "Pre-owned - Excellent", "Pre-owned - Good", "Pre-owned - Fair"],
+      "condition_id": ["1000", "1500", "3000", "5000", "7000"]
+    },
+    "review_triggers": [
+      "luxury_brand", "unclear_brand", "possible_counterfeit", "low_confidence", "missing_required_fields"
+    ],
+    "title_template": "{brand} {type} {department} {size} {color}",
+    "description_template": "Up for sale is a {brand} {type}.\n\nSize: {size}\nColor: {color}\nMaterial: {material}\nCondition: {condition_label}\n\n{condition_notes}\n\n{defects}\n\nMeasurements:\n{measurements}\n\nPlease see all photos. Questions welcome.",
+    "lot_grouping_keys": ["brand", "size", "type", "department"]
+  },
+
+  "books": {
+    "category_key": "books",
+    "label": "Books",
+    "prefix": "BK",
+    "ebay_category_id": "267",
+    "lot_eligible": true,
+    "required_fields": [
+      "title_final", "author", "format", "condition_label", "condition_id"
+    ],
+    "optional_fields": [
+      "publisher", "edition", "era", "language", "topic", "isbn",
+      "subject", "defects", "measurements"
+    ],
+    "allowed_values": {
+      "format": ["Hardcover", "Paperback", "Mass Market Paperback", "Spiral", "Other"],
+      "condition_label": ["Like New", "Very Good", "Good", "Acceptable", "Poor"],
+      "condition_id": ["3000", "4000", "5000", "6000", "7000"]
+    },
+    "review_triggers": [
+      "antique", "signed", "inscribed", "first_edition", "rare_binding",
+      "collectible_edition", "low_confidence", "high_value_estimate"
+    ],
+    "title_template": "{title_final} by {author} {format}",
+    "description_template": "Title: {title_final}\nAuthor: {author}\nFormat: {format}\nPublisher: {publisher}\nEdition: {edition}\nLanguage: {language}\nCondition: {condition_label}\n\n{condition_notes}\n\n{defects}\n\nPlease see all photos.",
+    "lot_grouping_keys": ["author", "topic", "publisher", "era", "subject"]
+  },
+
+  "collectibles": {
+    "category_key": "collectibles",
+    "label": "Collectibles",
+    "prefix": "CO",
+    "ebay_category_id": "1",
+    "lot_eligible": true,
+    "required_fields": [
+      "title_final", "type", "condition_label", "condition_id"
+    ],
+    "optional_fields": [
+      "brand", "era", "material", "artist", "franchise", "subject",
+      "country_region", "theme", "character", "defects", "measurements"
+    ],
+    "allowed_values": {
+      "condition_label": ["New", "Like New", "Very Good", "Good", "Acceptable", "Poor"],
+      "condition_id": ["1000", "3000", "4000", "5000", "6000", "7000"]
+    },
+    "review_triggers": [
+      "antique", "signed", "rare", "unclear_authenticity",
+      "high_value_estimate", "low_confidence", "possible_counterfeit"
+    ],
+    "title_template": "{brand} {type} {character} {era}",
+    "description_template": "Up for sale is a {type}.\n\nBrand: {brand}\nEra: {era}\nCondition: {condition_label}\n\n{condition_notes}\n\n{defects}\n\nPlease see all photos.",
+    "lot_grouping_keys": ["franchise", "theme", "brand", "subject", "era"]
+  },
+
+  "shoes": {
+    "category_key": "shoes",
+    "label": "Shoes",
+    "prefix": "SH",
+    "ebay_category_id": "63889",
+    "lot_eligible": false,
+    "required_fields": [
+      "brand", "type", "department", "size", "color", "condition_label", "condition_id"
+    ],
+    "optional_fields": [
+      "style", "material", "pattern", "occasion", "features",
+      "measurements", "defects", "subcategory"
+    ],
+    "allowed_values": {
+      "department": ["Men", "Women", "Boys", "Girls", "Unisex"],
+      "condition_label": ["New with box", "New without box", "Pre-owned - Excellent", "Pre-owned - Good", "Pre-owned - Fair"],
+      "condition_id": ["1000", "1500", "3000", "5000", "7000"]
+    },
+    "review_triggers": [
+      "luxury_brand", "unclear_brand", "possible_counterfeit", "low_confidence", "high_value_estimate"
+    ],
+    "title_template": "{brand} {type} {department} Size {size} {color}",
+    "description_template": "Up for sale is a pair of {brand} {type}.\n\nSize: {size}\nColor: {color}\nCondition: {condition_label}\n\n{condition_notes}\n\n{defects}\n\nPlease see all photos.",
+    "lot_grouping_keys": []
+  },
+
+  "toys": {
+    "category_key": "toys",
+    "label": "Toys",
+    "prefix": "TO",
+    "ebay_category_id": "220",
+    "lot_eligible": true,
+    "required_fields": [
+      "title_final", "type", "condition_label", "condition_id"
+    ],
+    "optional_fields": [
+      "brand", "franchise", "character", "theme", "age_range",
+      "material", "features", "defects", "measurements", "mpn", "upc"
+    ],
+    "allowed_values": {
+      "condition_label": ["New", "Like New", "Very Good", "Good", "Acceptable"],
+      "condition_id": ["1000", "3000", "4000", "5000", "6000"]
+    },
+    "review_triggers": [
+      "rare", "vintage", "high_value_estimate", "low_confidence", "unclear_brand"
+    ],
+    "title_template": "{brand} {character} {type} {franchise}",
+    "description_template": "Up for sale is a {brand} {type}.\n\nFranchise: {franchise}\nCharacter: {character}\nCondition: {condition_label}\n\n{condition_notes}\n\n{defects}\n\nPlease see all photos.",
+    "lot_grouping_keys": ["franchise", "theme", "brand", "character"]
+  }
+}

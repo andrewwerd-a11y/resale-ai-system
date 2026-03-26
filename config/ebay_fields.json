@@ -1,0 +1,64 @@
+{
+  "_comment": "Maps internal field names to eBay Seller Hub bulk upload column headers.",
+
+  "bulk_upload_columns": [
+    "Action",
+    "Custom label (SKU)",
+    "Title",
+    "Description",
+    "Category ID",
+    "Condition ID",
+    "Condition description",
+    "Price",
+    "Quantity",
+    "Format",
+    "Duration",
+    "Photo URL 1",
+    "Photo URL 2",
+    "Photo URL 3",
+    "Photo URL 4",
+    "Photo URL 5",
+    "Photo URL 6",
+    "Brand",
+    "Size",
+    "Color",
+    "Type",
+    "Style",
+    "Material",
+    "Department",
+    "Features",
+    "Shipping service",
+    "Shipping cost",
+    "Shipping policy name",
+    "Return policy name",
+    "Payment policy name"
+  ],
+
+  "field_map": {
+    "sku":               "Custom label (SKU)",
+    "title_final":       "Title",
+    "description_final": "Description",
+    "ebay_category_id":  "Category ID",
+    "condition_id":      "Condition ID",
+    "condition_notes":   "Condition description",
+    "list_price":        "Price",
+    "brand":             "Brand",
+    "size":              "Size",
+    "color":             "Color",
+    "type":              "Type",
+    "style":             "Style",
+    "material":          "Material",
+    "department":        "Department",
+    "features":          "Features"
+  },
+
+  "defaults": {
+    "Action":                "Add",
+    "Quantity":              "1",
+    "Format":                "FixedPrice",
+    "Duration":              "GTC",
+    "Shipping policy name":  "Standard Shipping",
+    "Return policy name":    "30 day returns",
+    "Payment policy name":   "Immediate payment"
+  }
+}

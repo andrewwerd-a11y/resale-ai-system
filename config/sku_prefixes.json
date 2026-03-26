@@ -1,0 +1,40 @@
+{
+  "_comment": "SKU prefix registry. Add new categories here — no code changes needed.",
+  "_format": "PREFIX: { label, category_key, ebay_category_id (optional placeholder) }",
+
+  "BK": {
+    "label": "Books",
+    "category_key": "books",
+    "ebay_category_id": "267",
+    "lot_eligible": true,
+    "active": true
+  },
+  "CL": {
+    "label": "Clothing",
+    "category_key": "clothing",
+    "ebay_category_id": "11450",
+    "lot_eligible": true,
+    "active": true
+  },
+  "CO": {
+    "label": "Collectibles",
+    "category_key": "collectibles",
+    "ebay_category_id": "1",
+    "lot_eligible": true,
+    "active": true
+  },
+  "SH": {
+    "label": "Shoes",
+    "category_key": "shoes",
+    "ebay_category_id": "63889",
+    "lot_eligible": false,
+    "active": true
+  },
+  "TO": {
+    "label": "Toys",
+    "category_key": "toys",
+    "ebay_category_id": "220",
+    "lot_eligible": true,
+    "active": true
+  }
+}
