@@ -1,0 +1,28 @@
+{
+  "condition_map": {
+    "New": "1000",
+    "Like New": "1500",
+    "Excellent": "2000",
+    "Very Good": "2500",
+    "Good": "3000",
+    "Acceptable": "4000",
+    "Fair": "5000",
+    "Poor": "6000",
+    "For Parts": "7000"
+  },
+  "condition_descriptions": {
+    "1000": "New",
+    "1500": "Like New",
+    "2000": "Excellent",
+    "2500": "Very Good",
+    "3000": "Good",
+    "4000": "Acceptable",
+    "5000": "Fair",
+    "6000": "Poor",
+    "7000": "For Parts or Not Working"
+  },
+  "currency": "USD",
+  "country": "US",
+  "listing_duration": "GTC",
+  "listing_format": "FIXED_PRICE"
+}

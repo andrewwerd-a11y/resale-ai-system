@@ -1,0 +1,33 @@
+{
+  "review_triggers": {
+    "low_confidence": {
+      "threshold": 0.72,
+      "description": "AI confidence below threshold"
+    },
+    "high_value": {
+      "threshold": 75.00,
+      "description": "Estimated value above high-value threshold"
+    },
+    "missing_fields": {
+      "fields": ["title", "condition"],
+      "description": "Required fields missing from extraction"
+    },
+    "condition_concern": {
+      "keywords": ["damaged", "stained", "torn", "broken", "cracked", "missing"],
+      "description": "Potential condition issue detected"
+    },
+    "price_outlier": {
+      "min": 0.50,
+      "max": 500.00,
+      "description": "Estimated price outside normal range"
+    }
+  },
+  "auto_approve": {
+    "min_confidence": 0.85,
+    "max_value": 50.00
+  },
+  "auto_reject": {
+    "keywords": ["garbage", "trash", "worthless"],
+    "max_confidence": 0.10
+  }
+}

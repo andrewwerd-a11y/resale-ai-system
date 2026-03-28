@@ -1,0 +1,37 @@
+{
+  "Books": {
+    "sku_prefix": "BK",
+    "ebay_category_id": "267",
+    "required_fields": ["title", "author", "format", "condition"],
+    "optional_fields": ["isbn", "publisher", "year", "genre", "edition"],
+    "condition_ids": ["1000", "2750", "3000", "4000", "5000", "6000"]
+  },
+  "Clothing": {
+    "sku_prefix": "CL",
+    "ebay_category_id": "11450",
+    "required_fields": ["title", "brand", "size", "color", "department"],
+    "optional_fields": ["material", "style", "type", "pattern", "sleeve_length"],
+    "condition_ids": ["1000", "1500", "2000", "2500", "3000", "4000", "5000", "6000"]
+  },
+  "Collectibles": {
+    "sku_prefix": "CO",
+    "ebay_category_id": "1",
+    "required_fields": ["title", "condition"],
+    "optional_fields": ["franchise", "character", "brand", "year", "material"],
+    "condition_ids": ["1000", "2000", "2500", "3000", "4000", "5000", "6000"]
+  },
+  "Shoes": {
+    "sku_prefix": "SH",
+    "ebay_category_id": "63889",
+    "required_fields": ["title", "brand", "size", "color", "department"],
+    "optional_fields": ["style", "material", "width", "heel_height"],
+    "condition_ids": ["1000", "1500", "2000", "2500", "3000", "4000", "5000", "6000"]
+  },
+  "Toys": {
+    "sku_prefix": "TO",
+    "ebay_category_id": "220",
+    "required_fields": ["title", "condition"],
+    "optional_fields": ["brand", "franchise", "character", "age_range", "material"],
+    "condition_ids": ["1000", "2000", "2500", "3000", "4000", "5000", "6000"]
+  }
+}

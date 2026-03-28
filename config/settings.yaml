@@ -1,0 +1,16 @@
+vision:
+  default_model: minicpm-v
+  num_ctx: 8192
+  timeout: 600
+
+triage:
+  confidence_review_threshold: 0.72
+  high_value_review_threshold: 75.00
+
+pricing:
+  default_margin: 0.35
+  ebay_fee_rate: 0.1325
+  shipping_cost: 4.99
+
+export:
+  max_photos_per_listing: 12
