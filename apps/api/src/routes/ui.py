@@ -278,6 +278,14 @@ let items = [];
 let current = null;
 let currentPhotos = [];
 
+// Normalize image_paths/hosted_photo_urls: accepts JSON array OR pipe-separated string
+function normPaths(val) {
+  if (!val) return [];
+  if (typeof val === 'string') return val.split('|').filter(Boolean);
+  if (Array.isArray(val)) return val.filter(Boolean);
+  return [];
+}
+
 async function load() {
   const r = await fetch('/api/review/queue');
   items = await r.json();
@@ -331,7 +339,9 @@ function renderDetail(item) {
   const confPct = (conf*100).toFixed(0);
   const confCls = confClass(conf);
 
-  const rawPaths = (item.hosted_photo_urls?.length ? item.hosted_photo_urls : item.image_paths) || [];
+  const hostedPaths = normPaths(item.hosted_photo_urls);
+  const localPaths  = normPaths(item.image_paths);
+  const rawPaths = hostedPaths.length ? hostedPaths : localPaths;
   // Build resolved src URLs and store in module-level array so openModal can reference by index
   currentPhotos = rawPaths.map(p =>
     p.startsWith('http') ? p : `/api/items/${item.sku}/image?path=${encodeURIComponent(p)}`

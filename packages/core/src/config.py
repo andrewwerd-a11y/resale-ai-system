@@ -60,29 +60,29 @@ class Settings(BaseSettings):
 
     @property
     def is_sandbox(self) -> bool:
-        return self.ebay_environment.lower() == "sandbox"
+        return self.ebay_environment != "production"
 
     @property
     def ebay_app_id(self) -> str:
-        return self.ebay_sandbox_app_id if self.is_sandbox else self.ebay_prod_app_id
+        return self.ebay_prod_app_id if self.ebay_environment == "production" else self.ebay_sandbox_app_id
 
     @property
     def ebay_cert_id(self) -> str:
-        return self.ebay_sandbox_cert_id if self.is_sandbox else self.ebay_prod_cert_id
+        return self.ebay_prod_cert_id if self.ebay_environment == "production" else self.ebay_sandbox_cert_id
 
     @property
     def ebay_dev_id(self) -> str:
-        return self.ebay_sandbox_dev_id if self.is_sandbox else self.ebay_prod_dev_id
+        return self.ebay_prod_dev_id if self.ebay_environment == "production" else self.ebay_sandbox_dev_id
 
     @property
     def ebay_user_token(self) -> str:
-        return self.ebay_sandbox_user_token if self.is_sandbox else self.ebay_prod_user_token
+        return self.ebay_prod_user_token if self.ebay_environment == "production" else self.ebay_sandbox_user_token
 
     @property
     def ebay_api_base(self) -> str:
-        if self.is_sandbox:
-            return "https://api.sandbox.ebay.com"
-        return "https://api.ebay.com"
+        if self.ebay_environment == "production":
+            return "https://api.ebay.com"
+        return "https://api.sandbox.ebay.com"
 
     @property
     def config_dir(self) -> Path:
