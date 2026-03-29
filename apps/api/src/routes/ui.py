@@ -193,9 +193,12 @@ function renderDetail(it) {{
   const reasons = (it.review_reasons || []).map(r =>
     `<span class="reason-tag">${{r.replace(/_/g,' ')}}</span>`).join('');
 
-  // Build image paths — try to show them
-  const imgPaths = (it.image_paths || '').split('|').filter(Boolean);
-  const imgs = imgPaths.slice(0,6).map(p =>
+  // Build image paths — API returns an array; guard against legacy pipe-string just in case
+  console.log('image_paths raw:', it.image_paths, 'type:', typeof it.image_paths);
+  const normPaths = Array.isArray(it.image_paths)
+    ? it.image_paths
+    : (it.image_paths || '').split('|').filter(Boolean);
+  const imgs = normPaths.slice(0,6).map(p =>
     `<img src="/api/items/${{it.sku}}/image?path=${{encodeURIComponent(p)}}"
           onerror="this.style.display='none'"
           alt="item photo">`

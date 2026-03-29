@@ -17,7 +17,7 @@ from fastapi.responses import HTMLResponse
 
 from packages.core.src.config import get_settings
 from packages.data.src.db.sqlite import init_db
-from apps.api.src.routes import items, review, export, health, ui
+from apps.api.src.routes import items, review, export, health, ui, ebay
 
 
 @asynccontextmanager
@@ -47,6 +47,7 @@ app.include_router(health.router, prefix="/api")
 app.include_router(items.router, prefix="/api/items", tags=["items"])
 app.include_router(review.router, prefix="/api/review", tags=["review"])
 app.include_router(export.router, prefix="/api/export", tags=["export"])
+app.include_router(ebay.router, prefix="/api/ebay", tags=["ebay"])
 app.include_router(ui.router, tags=["ui"])
 
 
