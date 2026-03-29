@@ -102,11 +102,23 @@ def delete_item(sku: str):
 
 @router.get("/{sku}/image")
 def serve_image(sku: str, path: str = Query(...)):
-    """Serve a local image file by path."""
+    """Serve a local image file by path. Falls back from .jpg to .jpeg if needed."""
+    _MIME = {".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+             ".png": "image/png", ".webp": "image/webp",
+             ".gif": "image/gif", ".bmp": "image/bmp"}
+
     p = Path(path)
+
+    # .jpg ↔ .jpeg fallback: DB may store .jpg but file is .jpeg, or vice versa
     if not p.exists():
-        raise HTTPException(status_code=404, detail="Image not found")
-    return FileResponse(str(p))
+        alt = p.with_suffix(".jpeg") if p.suffix.lower() == ".jpg" else p.with_suffix(".jpg")
+        if alt.exists():
+            p = alt
+        else:
+            raise HTTPException(status_code=404, detail=f"Image not found: {path}")
+
+    media_type = _MIME.get(p.suffix.lower(), "image/jpeg")
+    return FileResponse(str(p), media_type=media_type)
 
 
 def _item_dict(item: Item) -> dict:

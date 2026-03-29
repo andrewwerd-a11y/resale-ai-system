@@ -276,6 +276,7 @@ _REVIEW_CSS = """
 _REVIEW_JS = """
 let items = [];
 let current = null;
+let currentPhotos = [];
 
 async function load() {
   const r = await fetch('/api/review/queue');
@@ -330,11 +331,14 @@ function renderDetail(item) {
   const confPct = (conf*100).toFixed(0);
   const confCls = confClass(conf);
 
-  const photos = (item.hosted_photo_urls?.length ? item.hosted_photo_urls : item.image_paths) || [];
-  const photoHtml = photos.map(p => {
-    const src = p.startsWith('http') ? p : `/api/items/${item.sku}/image?path=${encodeURIComponent(p)}`;
-    return `<img src="${src}" onclick="openModal('${src}')" alt="" loading="lazy">`;
-  }).join('');
+  const rawPaths = (item.hosted_photo_urls?.length ? item.hosted_photo_urls : item.image_paths) || [];
+  // Build resolved src URLs and store in module-level array so openModal can reference by index
+  currentPhotos = rawPaths.map(p =>
+    p.startsWith('http') ? p : `/api/items/${item.sku}/image?path=${encodeURIComponent(p)}`
+  );
+  const photoHtml = currentPhotos.map((src, idx) =>
+    `<img src="${src}" onclick="openModal(${idx})" alt="" loading="lazy">`
+  ).join('');
 
   const reasons = (item.review_reasons||[]).map(r =>
     `<span class="reason-tag">${r}</span>`).join('');
@@ -457,7 +461,8 @@ async function publishItem() {
   }
 }
 
-function openModal(src) {
+function openModal(idx) {
+  const src = typeof idx === 'number' ? currentPhotos[idx] : idx;
   document.getElementById('modal-img').src = src;
   document.getElementById('modal').classList.add('open');
 }
