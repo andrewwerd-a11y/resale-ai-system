@@ -21,10 +21,8 @@ dependencies = [
     "aiofiles>=23.2.1",
     "pyyaml>=6.0.1",
     "jinja2>=3.1.4",
+    "cloudinary>=1.36.0",
 ]
-
-[tool.uv.workspace]
-members = ["apps/*", "packages/*"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["apps", "packages"]

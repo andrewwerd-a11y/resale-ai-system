@@ -26,14 +26,18 @@ def ebay_status():
     """Return eBay configuration and connectivity status."""
     settings = get_settings()
     configured = auth.is_configured()
-    imgur_configured = bool(settings.imgur_client_id)
+    cloudinary_configured = bool(
+        settings.cloudinary_cloud_name
+        and settings.cloudinary_api_key
+        and settings.cloudinary_api_secret
+    )
 
     return {
         "configured": configured,
         "environment": auth.environment_name(),
         "marketplace_id": settings.ebay_marketplace_id,
-        "photo_hosting": "imgur" if imgur_configured else "none",
-        "photo_hosting_configured": imgur_configured,
+        "photo_host": "cloudinary" if cloudinary_configured else "none",
+        "photo_hosting_configured": cloudinary_configured,
         "sandbox": settings.is_sandbox,
         "app_id_set": bool(settings.ebay_app_id),
         "user_token_set": bool(settings.ebay_user_token),

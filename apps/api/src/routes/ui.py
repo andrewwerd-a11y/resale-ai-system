@@ -632,7 +632,7 @@ async function loadStatus() {
   document.getElementById('ebay-env').textContent = d.environment;
   document.getElementById('ebay-conf').textContent = d.configured ? 'Configured' : 'Not configured';
   document.getElementById('ebay-conf').style.color = d.configured ? '#22c55e' : '#ef4444';
-  document.getElementById('photo-host').textContent = d.photo_hosting_configured ? 'Imgur' : 'Not set';
+  document.getElementById('photo-host').textContent = d.photo_hosting_configured ? 'Cloudinary' : 'Not set';
   document.getElementById('photo-host').style.color = d.photo_hosting_configured ? '#22c55e' : '#f59e0b';
   const r2 = await fetch('/api/export/ready-count');
   const d2 = await r2.json();

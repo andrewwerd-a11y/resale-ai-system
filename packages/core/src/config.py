@@ -53,8 +53,13 @@ class Settings(BaseSettings):
     ebay_environment: str = "sandbox"
     ebay_marketplace_id: str = "EBAY_US"
 
-    # Imgur
+    # Imgur (deprecated — replaced by Cloudinary)
     imgur_client_id: str = ""
+
+    # Cloudinary
+    cloudinary_cloud_name: str = ""
+    cloudinary_api_key: str = ""
+    cloudinary_api_secret: str = ""
 
     # ---- computed helpers ----
 

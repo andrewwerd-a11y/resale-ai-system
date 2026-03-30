@@ -1,110 +1,107 @@
 """
-Photo hosting via Imgur anonymous upload.
+Photo hosting via Cloudinary.
 
-To get a free Imgur Client ID:
-1. Go to https://api.imgur.com/oauth2/addclient
-2. Select "OAuth 2 authorization without a callback URL"
-3. Fill in application name (e.g. "ResaleAI")
-4. Copy the Client ID and add it to .env as: IMGUR_CLIENT_ID=your_client_id_here
+To set up Cloudinary:
+1. Sign up for a free account at https://cloudinary.com (25 GB storage, 25 GB bandwidth/month free)
+2. From your Cloudinary dashboard, copy:
+   - Cloud Name
+   - API Key
+   - API Secret
+3. Add to .env:
+   CLOUDINARY_CLOUD_NAME=your_cloud_name
+   CLOUDINARY_API_KEY=your_api_key
+   CLOUDINARY_API_SECRET=your_api_secret
 
-The uploader falls back gracefully — if IMGUR_CLIENT_ID is not set,
-upload_item_photos() returns an empty list and photos_already_hosted() is used
-to detect pre-hosted URLs. The system never crashes without Imgur configured.
+If credentials are not set, upload_image() returns a file:/// fallback URL so
+the rest of the publish flow never crashes — eBay will simply have no photo URL.
 """
 from __future__ import annotations
-from pathlib import Path
 
-import httpx
+import cloudinary
+import cloudinary.uploader
+
+from pathlib import Path
 
 from packages.core.src.config import get_settings
 from packages.core.src.result import Result
 
-IMGUR_UPLOAD_URL = "https://api.imgur.com/3/image"
 MAX_PHOTOS = 12
 
 
-def _imgur_configured() -> bool:
-    return bool(get_settings().imgur_client_id)
+class PhotoUploader:
+    def __init__(self):
+        settings = get_settings()
+        cloudinary.config(
+            cloud_name=settings.cloudinary_cloud_name,
+            api_key=settings.cloudinary_api_key,
+            api_secret=settings.cloudinary_api_secret,
+            secure=True,
+        )
+        self.configured = bool(
+            settings.cloudinary_cloud_name
+            and settings.cloudinary_api_key
+            and settings.cloudinary_api_secret
+        )
+
+    def is_configured(self) -> bool:
+        return self.configured
+
+    def upload_image(self, image_path: Path) -> Result[str]:
+        """Upload a single image. Returns https:// URL or file:// fallback."""
+        if not self.configured:
+            return Result.success(f"file:///{image_path}")
+        if not image_path.exists():
+            return Result.failure(f"Image not found: {image_path}")
+        try:
+            result = cloudinary.uploader.upload(
+                str(image_path),
+                folder="resale-ai",
+                use_filename=True,
+                unique_filename=True,
+                overwrite=False,
+            )
+            return Result.success(result["secure_url"])
+        except Exception as e:
+            return Result.failure(f"Cloudinary upload failed: {e}")
+
+    def upload_item_photos(self, image_paths: list[Path], max_photos: int = MAX_PHOTOS) -> list[str]:
+        """Upload up to max_photos images, skipping failures. Returns list of URLs."""
+        urls = []
+        for path in image_paths[:max_photos]:
+            result = self.upload_image(path)
+            if result.is_ok:
+                urls.append(result.value)
+        return urls
+
+    def photos_already_hosted(self, image_paths: list[str]) -> bool:
+        """Return True if all non-empty paths are already https:// URLs."""
+        non_empty = [p for p in image_paths if p]
+        if not non_empty:
+            return False
+        return all(p.startswith("https://") for p in non_empty)
+
+
+# ---------------------------------------------------------------------------
+# Module-level convenience functions (backwards-compatible with inventory_client)
+# ---------------------------------------------------------------------------
+
+_uploader: PhotoUploader | None = None
+
+
+def _get_uploader() -> PhotoUploader:
+    global _uploader
+    if _uploader is None:
+        _uploader = PhotoUploader()
+    return _uploader
 
 
 def upload_image(path: str | Path) -> Result[str]:
-    """Upload a single image to Imgur. Returns the https:// URL."""
-    if not _imgur_configured():
-        return Result.failure("IMGUR_CLIENT_ID not set")
-
-    p = Path(path)
-    if not p.exists():
-        return Result.failure(f"Image not found: {path}")
-
-    client_id = get_settings().imgur_client_id
-
-    try:
-        with open(p, "rb") as f:
-            image_data = f.read()
-
-        with httpx.Client(timeout=60) as client:
-            resp = client.post(
-                IMGUR_UPLOAD_URL,
-                headers={"Authorization": f"Client-ID {client_id}"},
-                files={"image": (p.name, image_data, _mime_type(p))},
-            )
-            resp.raise_for_status()
-            data = resp.json()
-
-        link = data.get("data", {}).get("link", "")
-        if not link:
-            return Result.failure(f"Imgur returned no link: {data}")
-
-        # Force HTTPS
-        if link.startswith("http://"):
-            link = "https://" + link[7:]
-
-        return Result.success(link)
-
-    except httpx.HTTPStatusError as e:
-        return Result.failure(f"Imgur HTTP error {e.response.status_code}: {e.response.text[:200]}")
-    except Exception as e:
-        return Result.failure(f"Imgur upload failed: {e}")
+    return _get_uploader().upload_image(Path(path))
 
 
 def upload_item_photos(paths: list[str], max_photos: int = MAX_PHOTOS) -> list[str]:
-    """
-    Upload up to max_photos images. Skips already-hosted URLs and failures.
-    Returns list of https:// URLs (may be empty if Imgur not configured).
-    """
-    if not _imgur_configured():
-        return []
-
-    urls: list[str] = []
-    for path in paths[:max_photos]:
-        if _is_url(path):
-            urls.append(path)
-            continue
-        result = upload_image(path)
-        if result.is_ok:
-            urls.append(result.value)
-        # Skip failures silently
-
-    return urls
+    return _get_uploader().upload_item_photos([Path(p) for p in paths], max_photos)
 
 
 def photos_already_hosted(paths: list[str]) -> bool:
-    """Return True if all paths are already https:// URLs."""
-    if not paths:
-        return False
-    return all(_is_url(p) for p in paths)
-
-
-def _is_url(s: str) -> bool:
-    return s.startswith("http://") or s.startswith("https://")
-
-
-def _mime_type(p: Path) -> str:
-    ext = p.suffix.lower()
-    return {
-        ".jpg": "image/jpeg",
-        ".jpeg": "image/jpeg",
-        ".png": "image/png",
-        ".gif": "image/gif",
-        ".webp": "image/webp",
-    }.get(ext, "image/jpeg")
+    return _get_uploader().photos_already_hosted(paths)
