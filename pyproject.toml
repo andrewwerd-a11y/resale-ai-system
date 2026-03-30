@@ -34,6 +34,9 @@ dependencies = [
     "httpx>=0.27.0",
     "ollama>=0.2.1",
 
+    # Photo hosting
+    "cloudinary>=1.36.0",
+
     # Utilities
     "rich>=13.7.1",
     "typer>=0.12.3",

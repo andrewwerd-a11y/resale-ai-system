@@ -23,7 +23,7 @@ def ebay_status():
         "environment": settings.ebay_environment,
         "marketplace": settings.ebay_marketplace_id,
         "photo_hosting": uploader.is_configured(),
-        "photo_host": "imgur" if uploader.is_configured() else "local_paths_only",
+        "photo_host": "cloudinary" if uploader.is_configured() else "local_paths_only",
     }
 
 @router.post("/publish/{sku}")

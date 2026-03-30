@@ -70,6 +70,9 @@ class Settings(BaseSettings):
 
     # Photo hosting
     imgur_client_id: str = ""
+    cloudinary_cloud_name: str = ""
+    cloudinary_api_key: str = ""
+    cloudinary_api_secret: str = ""
 
     @property
     def ebay_app_id(self) -> str:
