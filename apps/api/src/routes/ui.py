@@ -30,11 +30,17 @@ async def intake_page():
     return HTMLResponse(_intake_html())
 
 
+@router.get("/bulk-approve", response_class=HTMLResponse)
+async def bulk_approve_page():
+    return HTMLResponse(_bulk_approve_html())
+
+
 def _nav(active: str) -> str:
     pages = [
         ("Dashboard", "/", "dashboard"),
         ("Intake Queue", "/intake", "intake"),
         ("Review Queue", "/review-queue", "review"),
+        ("Bulk Approve", "/bulk-approve", "bulk"),
         ("Inventory", "/inventory", "inventory"),
         ("Export", "/export", "export"),
     ]
@@ -109,6 +115,7 @@ def _review_queue_html() -> str:
 <head><meta charset="UTF-8"><title>Review Queue — Resale AI</title>
 {_base_style()}
 <style>
+body {{ position: relative; }}
 .review-layout {{ display: grid; grid-template-columns: 1fr 380px; gap: 20px; height: calc(100vh - 120px); }}
 .item-list {{ overflow-y: auto; }}
 .item-card {{ background: #222220; border: 1px solid #2c2c2a; border-radius: 8px;
@@ -123,13 +130,32 @@ def _review_queue_html() -> str:
                  overflow-y: auto; padding: 16px; }}
 .images {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-bottom: 16px; }}
 .images img {{ width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 4px;
-               border: 1px solid #2c2c2a; cursor: pointer; }}
+               border: 1px solid #2c2c2a; cursor: pointer; transition: border-color .15s; }}
 .images img:hover {{ border-color: #7f77dd; }}
 .reason-tag {{ display: inline-block; background: #412402; color: #fac775;
                padding: 2px 8px; border-radius: 4px; font-size: 11px; margin: 2px; }}
-.actions {{ display: flex; gap: 8px; margin-top: 16px; }}
+.actions {{ display: flex; gap: 8px; margin-top: 16px; flex-wrap: wrap; }}
 .conf-bar {{ height: 4px; background: #2c2c2a; border-radius: 2px; margin-top: 4px; }}
 .conf-fill {{ height: 100%; border-radius: 2px; }}
+/* Lightbox — position:absolute so it works correctly inside an iframe */
+#lightbox {{
+  display: none; position: absolute; top: 0; left: 0; width: 100%; min-height: 100vh;
+  background: rgba(0,0,0,0.92); z-index: 1000;
+  align-items: center; justify-content: center;
+}}
+#lightbox.open {{ display: flex; }}
+.lb-arrow {{
+  position: absolute; top: 50%; transform: translateY(-50%);
+  background: rgba(255,255,255,0.14); border: none; color: #fff;
+  font-size: 22px; padding: 10px 15px; border-radius: 6px; cursor: pointer;
+}}
+.lb-arrow:hover {{ background: rgba(255,255,255,0.28); }}
+#lb-close {{
+  position: absolute; top: 18px; right: 20px;
+  background: rgba(255,255,255,0.14); border: none; color: #fff;
+  font-size: 18px; padding: 6px 12px; border-radius: 6px; cursor: pointer;
+}}
+#lb-close:hover {{ background: rgba(255,255,255,0.28); }}
 </style>
 </head>
 <body>
@@ -137,6 +163,7 @@ def _review_queue_html() -> str:
 <main>
 <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
   <h2>Review Queue <span id="review-count" style="color:#888780;font-weight:400"></span></h2>
+  <button class="btn btn-green" onclick="approveAll()" style="font-size:12px">Approve all</button>
 </div>
 <div class="review-layout">
   <div class="item-list" id="item-list">
@@ -149,15 +176,35 @@ def _review_queue_html() -> str:
   </div>
 </div>
 </main>
+
+<!-- Fullscreen lightbox -->
+<div id="lightbox" onclick="closeLightboxBg(event)">
+  <div style="position:relative;display:inline-block">
+    <img id="lb-img" src="" style="max-width:90vw;max-height:85vh;object-fit:contain;display:block;border-radius:4px">
+    <div id="lb-counter" style="position:absolute;top:10px;right:10px;background:rgba(0,0,0,0.7);color:#fff;padding:4px 10px;border-radius:10px;font-size:13px">1 / 1</div>
+    <button class="lb-arrow" style="left:-58px" onclick="event.stopPropagation();lbNav(-1)">&#8592;</button>
+    <button class="lb-arrow" style="right:-58px" onclick="event.stopPropagation();lbNav(1)">&#8594;</button>
+  </div>
+  <button id="lb-close" onclick="event.stopPropagation();closeLightbox()">&#10005;</button>
+</div>
+
 <script>
 let items = [];
 let selected = null;
+let currentItemPaths = [];
+let currentItemSku = '';
+let lbIdx = 0;
 
 async function loadQueue() {{
   const r = await fetch('/api/review');
   items = await r.json();
-  document.getElementById('review-count').textContent = `(${{items.length}})`;
+  renderList();
+  if (items.length > 0 && selected === null) selectItem(0);
+}}
+
+function renderList() {{
   const list = document.getElementById('item-list');
+  document.getElementById('review-count').textContent = `(${{items.length}})`;
   if (!items.length) {{
     list.innerHTML = '<div style="color:#5dcaa5;font-size:13px;padding:20px;text-align:center">No items need review. All clear!</div>';
     return;
@@ -165,7 +212,8 @@ async function loadQueue() {{
   list.innerHTML = items.map((it, i) => {{
     const conf = it.confidence_score != null ? (it.confidence_score * 100).toFixed(0) + '%' : '?';
     const reasons = (it.review_reasons || []).join(', ') || 'flagged';
-    return `<div class="item-card" id="card-${{i}}" onclick="selectItem(${{i}})">
+    const isSel = selected !== null && i === selected;
+    return `<div class="item-card${{isSel ? ' selected' : ''}}" id="card-${{i}}" onclick="selectItem(${{i}})">
       <div class="sku">${{it.sku}}</div>
       <div class="title">${{it.title_final || it.title_raw || 'No title yet'}}</div>
       <div class="meta">
@@ -180,10 +228,12 @@ async function loadQueue() {{
 
 function selectItem(i) {{
   selected = i;
-  document.querySelectorAll('.item-card').forEach(c => c.classList.remove('selected'));
-  const card = document.getElementById('card-' + i);
-  if (card) card.classList.add('selected');
+  renderList();
   renderDetail(items[i]);
+  setTimeout(() => {{
+    const card = document.getElementById('card-' + i);
+    if (card) card.scrollIntoView({{behavior: 'smooth', block: 'nearest'}});
+  }}, 40);
 }}
 
 function renderDetail(it) {{
@@ -193,14 +243,19 @@ function renderDetail(it) {{
   const reasons = (it.review_reasons || []).map(r =>
     `<span class="reason-tag">${{r.replace(/_/g,' ')}}</span>`).join('');
 
-  // Build image paths — API returns an array; guard against legacy pipe-string just in case
-  console.log('image_paths raw:', it.image_paths, 'type:', typeof it.image_paths);
   const normPaths = Array.isArray(it.image_paths)
     ? it.image_paths
     : (it.image_paths || '').split('|').filter(Boolean);
-  const imgs = normPaths.slice(0,6).map(p =>
+
+  // Store globally so lightbox can access them
+  currentItemPaths = normPaths.slice(0, 6);
+  currentItemSku = it.sku;
+
+  const imgs = currentItemPaths.map((p, idx) =>
     `<img src="/api/items/${{it.sku}}/image?path=${{encodeURIComponent(p)}}"
           onerror="this.style.display='none'"
+          onclick="openLightbox(${{idx}})"
+          title="Click to enlarge"
           alt="item photo">`
   ).join('');
 
@@ -229,27 +284,21 @@ function renderDetail(it) {{
   document.getElementById('detail-panel').innerHTML = `
     <div style="font-family:monospace;font-size:14px;color:#f1efe8;margin-bottom:4px">${{it.sku}}</div>
     <div style="font-size:12px;color:#888780;margin-bottom:12px">${{it.category_label || it.category_key}}</div>
-
     <div style="margin-bottom:10px">${{reasons}}</div>
-
     <div style="margin-bottom:8px">
       <span style="font-size:12px;color:#888780">Confidence: </span>
       <span style="font-size:12px;color:${{confColor}}">${{confPct}}%</span>
       <div class="conf-bar"><div class="conf-fill" style="width:${{confPct}}%;background:${{confColor}}"></div></div>
     </div>
-
     <div class="images">${{imgs}}</div>
-
     <div id="edit-fields">${{fieldRows}}</div>
-
     <div class="field-row">
       <label>Notes</label>
       <textarea id="field-notes" rows="2" onchange="markEdited('notes', this.value)">${{it.notes || ''}}</textarea>
     </div>
-
     <div class="actions">
       <button class="btn btn-green" onclick="approve('${{it.sku}}')">Approve</button>
-      <button class="btn btn-purple" onclick="editAndApprove('${{it.sku}}')">Save edits + approve</button>
+      <button class="btn btn-purple" onclick="editAndApprove('${{it.sku}}')">Save + approve</button>
       <button class="btn btn-red" onclick="reject('${{it.sku}}')">Reject</button>
     </div>
     <div id="action-msg"></div>
@@ -258,13 +307,12 @@ function renderDetail(it) {{
 
 let edits = {{}};
 function markEdited(key, val) {{
-  // Strip leading $ for price fields
   edits[key] = val.replace(/^\\$/, '');
 }}
 
 async function approve(sku) {{
   const r = await fetch(`/api/review/${{sku}}/approve`, {{method: 'POST'}});
-  if (r.ok) {{ showMsg('Approved — moved to export queue.', 'ok'); removeItem(sku); }}
+  if (r.ok) {{ showMsg('Approved.', 'ok'); removeItem(sku); }}
   else showMsg('Error approving.', 'err');
 }}
 
@@ -285,20 +333,81 @@ async function editAndApprove(sku) {{
   else showMsg('Error saving.', 'err');
 }}
 
+async function approveAll() {{
+  if (!items.length) return;
+  if (!confirm(`Approve all ${{items.length}} items in the review queue?`)) return;
+  for (const it of [...items]) {{
+    await fetch(`/api/review/${{it.sku}}/approve`, {{method: 'POST'}});
+  }}
+  items = [];
+  selected = null;
+  renderList();
+  document.getElementById('detail-panel').innerHTML =
+    '<div style="color:#5dcaa5;font-size:13px;margin-top:40px;text-align:center">All items approved!</div>';
+}}
+
 function showMsg(text, type) {{
   const el = document.getElementById('action-msg');
   if (el) {{ el.className = 'msg ' + type; el.textContent = text; }}
 }}
 
 function removeItem(sku) {{
+  const prevIdx = selected || 0;
   items = items.filter(i => i.sku !== sku);
-  document.getElementById('review-count').textContent = `(${{items.length}})`;
-  setTimeout(() => {{
-    loadQueue();
+  if (items.length === 0) {{
+    selected = null;
+    renderList();
     document.getElementById('detail-panel').innerHTML =
-      '<div style="color:#888780;font-size:13px;margin-top:40px;text-align:center">Select an item to review</div>';
-  }}, 1200);
+      '<div style="color:#5dcaa5;font-size:13px;margin-top:40px;text-align:center">All caught up!</div>';
+    return;
+  }}
+  const nextIdx = Math.min(prevIdx, items.length - 1);
+  selected = nextIdx;
+  renderList();
+  renderDetail(items[nextIdx]);
+  setTimeout(() => {{
+    const card = document.getElementById('card-' + nextIdx);
+    if (card) card.scrollIntoView({{behavior: 'smooth', block: 'nearest'}});
+  }}, 40);
 }}
+
+// ── Lightbox ──────────────────────────────────────────────────────────────────
+function openLightbox(idx) {{
+  if (!currentItemPaths.length) return;
+  lbIdx = idx;
+  updateLightbox();
+  document.getElementById('lightbox').classList.add('open');
+  document.body.style.overflow = 'hidden';
+}}
+
+function closeLightbox() {{
+  document.getElementById('lightbox').classList.remove('open');
+  document.body.style.overflow = '';
+}}
+
+function closeLightboxBg(e) {{
+  if (e.target === document.getElementById('lightbox')) closeLightbox();
+}}
+
+function lbNav(dir) {{
+  if (!currentItemPaths.length) return;
+  lbIdx = (lbIdx + dir + currentItemPaths.length) % currentItemPaths.length;
+  updateLightbox();
+}}
+
+function updateLightbox() {{
+  const p = currentItemPaths[lbIdx];
+  document.getElementById('lb-img').src =
+    `/api/items/${{currentItemSku}}/image?path=${{encodeURIComponent(p)}}`;
+  document.getElementById('lb-counter').textContent = `${{lbIdx + 1}} / ${{currentItemPaths.length}}`;
+}}
+
+document.addEventListener('keydown', e => {{
+  if (!document.getElementById('lightbox').classList.contains('open')) return;
+  if (e.key === 'ArrowLeft')  lbNav(-1);
+  else if (e.key === 'ArrowRight') lbNav(1);
+  else if (e.key === 'Escape') closeLightbox();
+}});
 
 loadQueue();
 </script>
@@ -314,11 +423,11 @@ def _inventory_html() -> str:
 <body>
 {_nav("inventory")}
 <main>
-<div style="display:flex;gap:10px;margin-bottom:16px;align-items:center">
+<div style="display:flex;gap:8px;margin-bottom:16px;align-items:center;flex-wrap:wrap">
   <h2 style="margin:0">Inventory</h2>
   <input type="text" id="search" placeholder="Search SKU, title, brand..."
-         style="width:280px" oninput="filterItems()">
-  <select id="status-filter" onchange="filterItems()" style="width:160px">
+         style="width:240px" oninput="filterItems()">
+  <select id="status-filter" onchange="filterItems()" style="width:150px">
     <option value="">All statuses</option>
     <option value="pending_intake">Pending intake</option>
     <option value="analyzed">Analyzed</option>
@@ -330,6 +439,15 @@ def _inventory_html() -> str:
     <option value="sold">Sold</option>
     <option value="rejected">Rejected</option>
   </select>
+  <select id="conf-filter" onchange="filterItems()" style="width:170px">
+    <option value="">All confidence</option>
+    <option value="high">High (&ge;85%)</option>
+    <option value="medium">Medium (72&#8209;84%)</option>
+    <option value="low">Low (&lt;72%)</option>
+  </select>
+  <button class="btn btn-green" onclick="bulkApproveHighConf()" style="font-size:12px;padding:5px 12px">
+    Bulk approve high confidence
+  </button>
   <span id="count" style="font-size:12px;color:#888780"></span>
 </div>
 <table>
@@ -346,21 +464,36 @@ let allItems = [];
 async function load() {{
   const r = await fetch('/api/items?limit=500');
   allItems = await r.json();
+  // Apply URL params on first load
+  const params = new URLSearchParams(window.location.search);
+  const initStatus = params.get('status') || '';
+  const initConf = params.get('conf') || '';
+  if (initStatus) document.getElementById('status-filter').value = initStatus;
+  if (initConf) document.getElementById('conf-filter').value = initConf;
   filterItems();
 }}
 function filterItems() {{
   const q = document.getElementById('search').value.toLowerCase();
   const st = document.getElementById('status-filter').value;
+  const cf = document.getElementById('conf-filter').value;
   const filtered = allItems.filter(it => {{
     const matchQ = !q || (it.sku||'').toLowerCase().includes(q)
       || (it.title_final||'').toLowerCase().includes(q)
       || (it.brand||'').toLowerCase().includes(q);
     const matchSt = !st || it.status === st;
-    return matchQ && matchSt;
+    const conf = it.confidence_score || 0;
+    const matchCf = !cf
+      || (cf === 'high'   && conf >= 0.85)
+      || (cf === 'medium' && conf >= 0.72 && conf < 0.85)
+      || (cf === 'low'    && conf < 0.72);
+    return matchQ && matchSt && matchCf;
   }});
   document.getElementById('count').textContent = filtered.length + ' items';
-  document.getElementById('inv-body').innerHTML = filtered.map(it => `
-    <tr>
+  document.getElementById('inv-body').innerHTML = filtered.map(it => {{
+    const conf = it.confidence_score;
+    const confPct = conf != null ? (conf * 100).toFixed(0) + '%' : '-';
+    const confColor = conf == null ? '' : conf >= 0.85 ? 'color:#5dcaa5' : conf >= 0.72 ? 'color:#fac775' : 'color:#f09595';
+    return `<tr>
       <td style="font-family:monospace">${{it.sku||'-'}}</td>
       <td style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
         ${{(it.title_final||it.title_raw||'-').slice(0,60)}}</td>
@@ -369,10 +502,27 @@ function filterItems() {{
       <td>${{it.size||'-'}}</td>
       <td>${{it.condition_label||'-'}}</td>
       <td><span class="badge ${{it.status||''}}">${{it.status||'-'}}</span></td>
-      <td>${{it.confidence_score!=null?(it.confidence_score*100).toFixed(0)+'%':'-'}}</td>
+      <td style="${{confColor}}">${{confPct}}</td>
       <td>${{it.estimated_price!=null?'$'+it.estimated_price.toFixed(2):'-'}}</td>
       <td>${{it.list_price!=null?'$'+it.list_price.toFixed(2):'-'}}</td>
-    </tr>`).join('');
+    </tr>`;
+  }}).join('');
+}}
+async function bulkApproveHighConf() {{
+  const targets = allItems.filter(it =>
+    (it.confidence_score || 0) >= 0.85 &&
+    ['analyzed','approved','needs_review'].includes(it.status)
+  );
+  if (!targets.length) {{ alert('No high confidence items found to approve.'); return; }}
+  if (!confirm(`Approve ${{targets.length}} high confidence items?`)) return;
+  const r = await fetch('/api/items/bulk-approve', {{
+    method: 'POST',
+    headers: {{'Content-Type': 'application/json'}},
+    body: JSON.stringify({{skus: targets.map(it => it.sku)}})
+  }});
+  const d = await r.json();
+  alert(`Approved ${{d.updated}} items.`);
+  load();
 }}
 load();
 </script>
@@ -501,6 +651,166 @@ async function analyzeOne(sku, btn) {{
   btn.textContent = d.status || 'Done';
   load();
 }}
+load();
+</script>
+</body></html>"""
+
+
+def _bulk_approve_html() -> str:
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Bulk Approve — Resale AI</title>
+{_base_style()}
+<style>
+.filter-bar {{ display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:14px; }}
+.filter-bar label {{ display:inline; margin:0; color:#888780; font-size:12px; }}
+.slider-wrap {{ display:flex; align-items:center; gap:6px; }}
+input[type=range] {{ width:130px; accent-color:#7f77dd; cursor:pointer; }}
+th input[type=checkbox], td input[type=checkbox] {{ width:auto; cursor:pointer; }}
+.conf-high   {{ color:#5dcaa5; }}
+.conf-medium {{ color:#fac775; }}
+.conf-low    {{ color:#f09595; }}
+.action-bar {{ display:flex; gap:8px; align-items:center; margin-bottom:12px; flex-wrap:wrap; }}
+</style>
+</head>
+<body>
+{_nav("bulk")}
+<main>
+<h2 style="margin-bottom:14px">Bulk Approve</h2>
+
+<div class="filter-bar">
+  <div class="slider-wrap">
+    <label>Min confidence:</label>
+    <input type="range" id="conf-slider" min="0" max="100" value="72"
+           oninput="document.getElementById('conf-val').textContent=this.value+'%'; applyFilters()">
+    <span id="conf-val" style="font-size:12px;color:#f1efe8;min-width:38px">72%</span>
+  </div>
+  <select id="cat-filter" onchange="applyFilters()" style="width:170px">
+    <option value="">All categories</option>
+  </select>
+  <select id="status-filter" onchange="applyFilters()" style="width:160px">
+    <option value="">All statuses</option>
+    <option value="pending_intake">Pending intake</option>
+    <option value="analyzed">Analyzed</option>
+    <option value="needs_review">Needs review</option>
+    <option value="approved">Approved</option>
+    <option value="export_ready">Export ready</option>
+    <option value="exported">Exported</option>
+    <option value="rejected">Rejected</option>
+  </select>
+  <span id="filter-count" style="font-size:12px;color:#888780"></span>
+</div>
+
+<div class="action-bar">
+  <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:#d4d2c8;cursor:pointer">
+    <input type="checkbox" id="select-all" onchange="toggleSelectAll(this)"> Select all visible
+  </label>
+  <span id="sel-count" style="font-size:12px;color:#888780"></span>
+  <button class="btn btn-green" onclick="bulkAction('bulk-approve')">Approve selected</button>
+  <button class="btn btn-gray"  onclick="bulkAction('bulk-review')">Send to review</button>
+  <button class="btn btn-red"   onclick="bulkAction('bulk-reject')">Reject selected</button>
+  <div id="bulk-msg" style="font-size:13px"></div>
+</div>
+
+<table>
+  <thead><tr>
+    <th style="width:32px"></th>
+    <th>SKU</th><th>Title</th><th>Category</th>
+    <th>Confidence</th><th>Est. Price</th><th>List Price</th><th>Status</th>
+  </tr></thead>
+  <tbody id="bulk-body"><tr><td colspan="8" style="color:#888780">Loading...</td></tr></tbody>
+</table>
+</main>
+<script>
+let allItems = [];
+let filteredItems = [];
+
+async function load() {{
+  const r = await fetch('/api/items?limit=500');
+  allItems = await r.json();
+  const cats = [...new Set(allItems.map(it => it.category_label).filter(Boolean))].sort();
+  const catSel = document.getElementById('cat-filter');
+  // Clear existing options beyond "All categories"
+  while (catSel.options.length > 1) catSel.remove(1);
+  cats.forEach(c => {{
+    const o = document.createElement('option');
+    o.value = c; o.textContent = c;
+    catSel.appendChild(o);
+  }});
+  applyFilters();
+}}
+
+function applyFilters() {{
+  const threshold = parseFloat(document.getElementById('conf-slider').value) / 100;
+  const cat    = document.getElementById('cat-filter').value;
+  const status = document.getElementById('status-filter').value;
+  filteredItems = allItems.filter(it => {{
+    const conf = it.confidence_score || 0;
+    return conf >= threshold
+      && (!cat    || it.category_label === cat)
+      && (!status || it.status === status);
+  }});
+  document.getElementById('filter-count').textContent = filteredItems.length + ' items match';
+  renderTable();
+}}
+
+function confClass(conf) {{
+  if (conf >= 0.85) return 'conf-high';
+  if (conf >= 0.72) return 'conf-medium';
+  return 'conf-low';
+}}
+
+function renderTable() {{
+  document.getElementById('select-all').checked = false;
+  document.getElementById('bulk-body').innerHTML = filteredItems.map(it => {{
+    const conf = it.confidence_score || 0;
+    const confPct = (conf * 100).toFixed(0) + '%';
+    return `<tr>
+      <td><input type="checkbox" class="item-cb" value="${{it.sku}}" onchange="updateSelCount()"></td>
+      <td style="font-family:monospace;font-size:12px">${{it.sku||'-'}}</td>
+      <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
+        ${{(it.title_final||it.title_raw||'-').slice(0,55)}}</td>
+      <td>${{it.category_label||'-'}}</td>
+      <td class="${{confClass(conf)}}">${{confPct}}</td>
+      <td>${{it.estimated_price!=null?'$'+it.estimated_price.toFixed(2):'-'}}</td>
+      <td>${{it.list_price!=null?'$'+it.list_price.toFixed(2):'-'}}</td>
+      <td><span class="badge ${{it.status||''}}">${{it.status||'-'}}</span></td>
+    </tr>`;
+  }}).join('') || '<tr><td colspan="8" style="color:#888780">No items match filters.</td></tr>';
+  updateSelCount();
+}}
+
+function updateSelCount() {{
+  const checked = document.querySelectorAll('.item-cb:checked').length;
+  const total   = filteredItems.length;
+  document.getElementById('sel-count').textContent = `${{checked}} of ${{total}} selected`;
+}}
+
+function toggleSelectAll(cb) {{
+  document.querySelectorAll('.item-cb').forEach(c => c.checked = cb.checked);
+  updateSelCount();
+}}
+
+async function bulkAction(action) {{
+  const skus = [...document.querySelectorAll('.item-cb:checked')].map(c => c.value);
+  if (!skus.length) {{ showMsg('No items selected.', 'err'); return; }}
+  const r = await fetch(`/api/items/${{action}}`, {{
+    method: 'POST',
+    headers: {{'Content-Type': 'application/json'}},
+    body: JSON.stringify({{skus}})
+  }});
+  const d = await r.json();
+  showMsg(`Updated ${{d.updated}} items.`, 'ok');
+  load();
+}}
+
+function showMsg(text, type) {{
+  const el = document.getElementById('bulk-msg');
+  el.className = 'msg ' + type;
+  el.textContent = text;
+  setTimeout(() => {{ el.textContent = ''; el.className = ''; }}, 3000);
+}}
+
 load();
 </script>
 </body></html>"""

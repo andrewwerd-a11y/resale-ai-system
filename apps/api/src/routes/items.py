@@ -4,6 +4,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from fastapi.responses import FileResponse
+from pydantic import BaseModel
 from sqlmodel import Session
 
 from packages.data.src.db.sqlite import get_session
@@ -14,9 +15,21 @@ router = APIRouter()
 
 @router.get("/stats")
 def get_stats(session: Session = Depends(get_session)):
-    repo = ItemRepository(session)
-    counts = repo.count_by_status()
-    counts["_total"] = sum(counts.values())
+    from collections import Counter
+    from sqlmodel import select
+    from packages.data.src.models.item_record import ItemRecord
+    all_items = session.exec(select(ItemRecord)).all()
+    counts = Counter(i.status for i in all_items)
+    counts["_total"] = sum(v for k, v in counts.items() if not k.startswith("_"))
+    counts["_high_confidence_pending"] = sum(
+        1 for i in all_items
+        if (i.confidence_score or 0) >= 0.85
+        and i.status in ("analyzed", "approved", "needs_review")
+    )
+    counts["_ready_to_publish"] = sum(
+        1 for i in all_items
+        if i.status in ("approved", "export_ready")
+    )
     return counts
 
 
@@ -146,3 +159,52 @@ def trigger_worker(background_tasks: BackgroundTasks):
         subprocess.run([sys.executable, "apps/worker/src/main.py"])
     background_tasks.add_task(_run)
     return {"message": "Worker started — check console for progress."}
+
+
+class BulkSkuRequest(BaseModel):
+    skus: list[str]
+
+
+@router.post("/bulk-approve")
+def bulk_approve(body: BulkSkuRequest, session: Session = Depends(get_session)):
+    """Approve multiple items at once."""
+    from packages.core.src.constants import ItemStatus
+    repo = ItemRepository(session)
+    updated = []
+    for sku in body.skus:
+        item = repo.get_by_sku(sku)
+        if item:
+            item.status = ItemStatus.APPROVED
+            repo.upsert(item)
+            updated.append(sku)
+    return {"updated": len(updated), "skus": updated}
+
+
+@router.post("/bulk-review")
+def bulk_review(body: BulkSkuRequest, session: Session = Depends(get_session)):
+    """Send multiple items back to review queue."""
+    from packages.core.src.constants import ItemStatus
+    repo = ItemRepository(session)
+    updated = []
+    for sku in body.skus:
+        item = repo.get_by_sku(sku)
+        if item:
+            item.status = ItemStatus.NEEDS_REVIEW
+            repo.upsert(item)
+            updated.append(sku)
+    return {"updated": len(updated), "skus": updated}
+
+
+@router.post("/bulk-reject")
+def bulk_reject(body: BulkSkuRequest, session: Session = Depends(get_session)):
+    """Reject multiple items at once."""
+    from packages.core.src.constants import ItemStatus
+    repo = ItemRepository(session)
+    updated = []
+    for sku in body.skus:
+        item = repo.get_by_sku(sku)
+        if item:
+            item.status = ItemStatus.REJECTED
+            repo.upsert(item)
+            updated.append(sku)
+    return {"updated": len(updated), "skus": updated}

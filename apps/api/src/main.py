@@ -77,13 +77,17 @@ def _dashboard_html() -> str:
           text-decoration: none; border-bottom: 2px solid transparent; }
   nav a:hover, nav a.active { color: #f1efe8; border-bottom-color: #7f77dd; }
   main { padding: 24px; max-width: 1200px; }
-  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; margin-bottom: 28px; }
-  .card { background: #2c2c2a; border: 1px solid #3a3a38; border-radius: 8px; padding: 16px; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(175px, 1fr)); gap: 12px; margin-bottom: 28px; }
+  .card { background: #2c2c2a; border: 1px solid #3a3a38; border-radius: 8px; padding: 16px;
+          cursor: pointer; text-decoration: none; display: block; transition: border-color .15s; }
+  .card:hover { border-color: #7f77dd; }
   .card .num { font-size: 28px; font-weight: 500; color: #f1efe8; }
   .card .label { font-size: 12px; color: #888780; margin-top: 4px; }
   .card.review .num { color: #ef9f27; }
-  .card.ready .num { color: #5dcaa5; }
-  .card.sold .num { color: #7f77dd; }
+  .card.ready  .num { color: #5dcaa5; }
+  .card.sold   .num { color: #7f77dd; }
+  .card.hconf  .num { color: #5dcaa5; }
+  .card.pub    .num { color: #afa9ec; }
   h2 { font-size: 14px; font-weight: 500; color: #f1efe8; margin-bottom: 12px; }
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
   th { text-align: left; padding: 8px 10px; color: #888780; font-weight: 400;
@@ -91,11 +95,13 @@ def _dashboard_html() -> str:
   td { padding: 8px 10px; border-bottom: 1px solid #1e1e1c; color: #d4d2c8; }
   tr:hover td { background: #2c2c2a; }
   .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; }
-  .badge.pending   { background: #2c2c2a; color: #888780; }
-  .badge.review    { background: #412402; color: #fac775; }
-  .badge.approved  { background: #085041; color: #9fe1cb; }
-  .badge.exported  { background: #26215c; color: #afa9ec; }
-  .badge.rejected  { background: #501313; color: #f09595; }
+  .badge.pending_intake { background: #2c2c2a; color: #888780; }
+  .badge.needs_review   { background: #412402; color: #fac775; }
+  .badge.approved       { background: #085041; color: #9fe1cb; }
+  .badge.export_ready   { background: #085041; color: #9fe1cb; }
+  .badge.exported       { background: #26215c; color: #afa9ec; }
+  .badge.rejected       { background: #501313; color: #f09595; }
+  .badge.analyzed       { background: #042c53; color: #85b7eb; }
   .btn { display: inline-block; padding: 7px 16px; border-radius: 6px; font-size: 13px;
          cursor: pointer; border: none; font-family: inherit; }
   .btn-primary { background: #534ab7; color: #eeedfe; }
@@ -112,17 +118,28 @@ def _dashboard_html() -> str:
   <a href="/" class="active">Dashboard</a>
   <a href="/intake">Intake Queue</a>
   <a href="/review-queue">Review Queue</a>
+  <a href="/bulk-approve">Bulk Approve</a>
   <a href="/inventory">Inventory</a>
   <a href="/export">Export</a>
 </nav>
 <main>
   <div class="cards" id="stats-cards">
-    <div class="card"><div class="num" id="stat-pending">...</div><div class="label">Pending intake</div></div>
-    <div class="card review"><div class="num" id="stat-review">...</div><div class="label">Needs review</div></div>
-    <div class="card ready"><div class="num" id="stat-ready">...</div><div class="label">Export ready</div></div>
-    <div class="card"><div class="num" id="stat-listed">...</div><div class="label">Listed</div></div>
-    <div class="card sold"><div class="num" id="stat-sold">...</div><div class="label">Sold</div></div>
-    <div class="card"><div class="num" id="stat-total">...</div><div class="label">Total items</div></div>
+    <a class="card" href="/inventory?status=pending_intake">
+      <div class="num" id="stat-pending">...</div><div class="label">Pending intake</div></a>
+    <a class="card review" href="/review-queue">
+      <div class="num" id="stat-review">...</div><div class="label">Needs review</div></a>
+    <a class="card ready" href="/inventory?status=export_ready">
+      <div class="num" id="stat-ready">...</div><div class="label">Export ready</div></a>
+    <a class="card" href="/inventory?status=listed">
+      <div class="num" id="stat-listed">...</div><div class="label">Listed</div></a>
+    <a class="card sold" href="/inventory?status=sold">
+      <div class="num" id="stat-sold">...</div><div class="label">Sold</div></a>
+    <a class="card" href="/inventory">
+      <div class="num" id="stat-total">...</div><div class="label">Total items</div></a>
+    <a class="card hconf" href="/bulk-approve">
+      <div class="num" id="stat-hconf">...</div><div class="label">High confidence pending</div></a>
+    <a class="card pub" href="/inventory?status=approved">
+      <div class="num" id="stat-pub">...</div><div class="label">Ready to publish</div></a>
   </div>
 
   <div class="section">
@@ -146,12 +163,14 @@ async function loadStats() {
   try {
     const r = await fetch('/api/items/stats');
     const d = await r.json();
-    document.getElementById('stat-pending').textContent  = d.pending_intake  || 0;
-    document.getElementById('stat-review').textContent   = d.needs_review    || 0;
-    document.getElementById('stat-ready').textContent    = d.export_ready    || 0;
-    document.getElementById('stat-listed').textContent   = d.listed          || 0;
-    document.getElementById('stat-sold').textContent     = d.sold            || 0;
-    document.getElementById('stat-total').textContent    = d._total          || 0;
+    document.getElementById('stat-pending').textContent = d.pending_intake  || 0;
+    document.getElementById('stat-review').textContent  = d.needs_review    || 0;
+    document.getElementById('stat-ready').textContent   = d.export_ready    || 0;
+    document.getElementById('stat-listed').textContent  = d.listed          || 0;
+    document.getElementById('stat-sold').textContent    = d.sold            || 0;
+    document.getElementById('stat-total').textContent   = d._total          || 0;
+    document.getElementById('stat-hconf').textContent   = d._high_confidence_pending || 0;
+    document.getElementById('stat-pub').textContent     = d._ready_to_publish || 0;
   } catch(e) { console.error(e); }
 }
 
@@ -184,6 +203,8 @@ async function runWorker() {
 }
 
 loadStats(); loadRecent();
+// Auto-refresh every 30 seconds
+setInterval(() => { loadStats(); loadRecent(); }, 30000);
 </script>
 </body>
 </html>"""
