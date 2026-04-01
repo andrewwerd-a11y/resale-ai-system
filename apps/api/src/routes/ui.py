@@ -259,6 +259,13 @@ function renderDetail(it) {{
           alt="item photo">`
   ).join('');
 
+  const enrichBadge = it.enrichment_done
+    ? '<span style="background:#085041;color:#9fe1cb;padding:2px 8px;border-radius:10px;font-size:11px;margin-left:8px">AI Enriched</span>'
+    : '';
+  const enrichNotes = it.enrichment_notes
+    ? `<div style="background:#1a2a20;border:1px solid #2c4a30;border-radius:6px;padding:10px;margin-bottom:12px;font-size:12px;color:#9fe1cb;white-space:pre-wrap">${{it.enrichment_notes}}</div>`
+    : '';
+
   const fields = [
     ['Title', 'title_final'], ['Brand', 'brand'], ['Type', 'type'],
     ['Department', 'department'], ['Size', 'size'], ['Color', 'color'],
@@ -288,8 +295,10 @@ function renderDetail(it) {{
     <div style="margin-bottom:8px">
       <span style="font-size:12px;color:#888780">Confidence: </span>
       <span style="font-size:12px;color:${{confColor}}">${{confPct}}%</span>
+      ${{enrichBadge}}
       <div class="conf-bar"><div class="conf-fill" style="width:${{confPct}}%;background:${{confColor}}"></div></div>
     </div>
+    ${{enrichNotes}}
     <div class="images">${{imgs}}</div>
     <div id="edit-fields">${{fieldRows}}</div>
     <div class="field-row">
@@ -612,9 +621,9 @@ def _intake_html() -> str:
 <div id="worker-msg" style="margin-bottom:12px;font-size:13px"></div>
 <table>
   <thead><tr>
-    <th>SKU</th><th>Category</th><th>Images</th><th>Status</th><th>Action</th>
+    <th>SKU</th><th>Category</th><th>Images</th><th>Cost ($)</th><th>Status</th><th>Action</th>
   </tr></thead>
-  <tbody id="intake-body"><tr><td colspan="5" style="color:#888780">Loading...</td></tr></tbody>
+  <tbody id="intake-body"><tr><td colspan="6" style="color:#888780">Loading...</td></tr></tbody>
 </table>
 </main>
 <script>
@@ -625,16 +634,26 @@ async function load() {{
   document.getElementById('intake-body').innerHTML = items.length
     ? items.map(it => {{
         const imgs = (it.image_paths||'').split('|').filter(Boolean).length;
+        const margin = it.estimated_price && it.cost
+          ? ' (~' + Math.round((it.estimated_price - it.cost) / it.estimated_price * 100) + '% margin)'
+          : '';
         return `<tr>
           <td style="font-family:monospace">${{it.sku}}</td>
           <td>${{it.category_label||it.category_key||'-'}}</td>
           <td>${{imgs}}</td>
+          <td><input type="number" min="0" step="0.01"
+              style="width:72px;padding:3px 6px;background:#2c2c2a;border:1px solid #3a3a38;color:#f1efe8;border-radius:4px;font-size:12px"
+              value="${{it.cost||''}}"
+              placeholder="0.00"
+              onblur="saveCost('${{it.sku}}', this)"
+              onkeydown="if(event.key==='Enter')this.blur()">
+            <span style="font-size:11px;color:#888780">${{margin}}</span></td>
           <td><span class="badge pending_intake">pending_intake</span></td>
           <td><button class="btn btn-gray" style="font-size:11px;padding:4px 10px"
               onclick="analyzeOne('${{it.sku}}', this)">Analyze</button></td>
         </tr>`;
       }}).join('')
-    : '<tr><td colspan="5" style="color:#5dcaa5">No pending items.</td></tr>';
+    : '<tr><td colspan="6" style="color:#5dcaa5">No pending items.</td></tr>';
 }}
 async function runWorker() {{
   document.getElementById('worker-msg').innerHTML = '<span style="color:#fac775">Starting worker...</span>';
@@ -642,6 +661,18 @@ async function runWorker() {{
   const d = await r.json();
   document.getElementById('worker-msg').innerHTML = `<span style="color:#5dcaa5">${{d.message}}</span>`;
   setTimeout(load, 3000);
+}}
+async function saveCost(sku, input) {{
+  const val = parseFloat(input.value);
+  if (isNaN(val) || val < 0) return;
+  input.style.borderColor = '#fac775';
+  await fetch(`/api/items/${{sku}}/cost`, {{
+    method: 'PATCH',
+    headers: {{'Content-Type': 'application/json'}},
+    body: JSON.stringify({{cost: val}})
+  }});
+  input.style.borderColor = '#5dcaa5';
+  setTimeout(() => {{ input.style.borderColor = ''; }}, 1500);
 }}
 async function analyzeOne(sku, btn) {{
   btn.textContent = 'Running...';

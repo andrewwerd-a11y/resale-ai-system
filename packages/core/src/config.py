@@ -74,6 +74,11 @@ class Settings(BaseSettings):
     cloudinary_api_key: str = ""
     cloudinary_api_secret: str = ""
 
+    # Enrichment (Phase 4 — Claude API)
+    anthropic_api_key: str = ""
+    enrichment_model: str = "claude-sonnet-4-20250514"
+    enrichment_enabled: bool = True
+
     @property
     def ebay_app_id(self) -> str:
         return self.ebay_prod_app_id if self.ebay_environment == "production" else self.ebay_sandbox_app_id

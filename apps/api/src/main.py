@@ -16,7 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 
 from packages.core.src.config import get_settings
-from packages.data.src.db.sqlite import init_db
+from packages.data.src.db.sqlite import init_db, migrate_add_columns
 from apps.api.src.routes import items, review, export, health, ui, ebay
 
 
@@ -25,6 +25,7 @@ async def lifespan(app: FastAPI):
     settings = get_settings()
     settings.ensure_dirs()
     init_db()
+    migrate_add_columns()
     yield
 
 
@@ -140,6 +141,8 @@ def _dashboard_html() -> str:
       <div class="num" id="stat-hconf">...</div><div class="label">High confidence pending</div></a>
     <a class="card pub" href="/inventory?status=approved">
       <div class="num" id="stat-pub">...</div><div class="label">Ready to publish</div></a>
+    <a class="card" href="/inventory?status=listed" style="border-color:#501313">
+      <div class="num" id="stat-stale" style="color:#f09595">...</div><div class="label">Stale listings (60d+)</div></a>
   </div>
 
   <div class="section">
@@ -171,6 +174,7 @@ async function loadStats() {
     document.getElementById('stat-total').textContent   = d._total          || 0;
     document.getElementById('stat-hconf').textContent   = d._high_confidence_pending || 0;
     document.getElementById('stat-pub').textContent     = d._ready_to_publish || 0;
+    document.getElementById('stat-stale').textContent   = d._stale_count || 0;
   } catch(e) { console.error(e); }
 }
 

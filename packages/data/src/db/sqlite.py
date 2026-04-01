@@ -35,3 +35,27 @@ def get_session() -> Generator[Session, None, None]:
     """FastAPI dependency — yields a database session."""
     with Session(engine) as session:
         yield session
+
+
+def migrate_add_columns() -> None:
+    """
+    Safely add new columns to existing tables without Alembic.
+    Safe to call on every startup — ALTER TABLE is a no-op if column exists.
+    """
+    import sqlite3
+
+    settings = get_settings()
+    conn = sqlite3.connect(settings.db_path)
+    cursor = conn.cursor()
+    new_columns = [
+        ("enrichment_done", "INTEGER DEFAULT 0"),
+        ("enrichment_notes", "TEXT"),
+        ("cost_manual", "INTEGER DEFAULT 0"),
+    ]
+    for col_name, col_def in new_columns:
+        try:
+            cursor.execute(f"ALTER TABLE items ADD COLUMN {col_name} {col_def}")
+        except sqlite3.OperationalError:
+            pass  # Column already exists
+    conn.commit()
+    conn.close()

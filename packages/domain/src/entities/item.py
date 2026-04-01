@@ -131,6 +131,11 @@ class Item(BaseModel):
     manual_override: bool = False
     notes: str | None = None
 
+    # Enrichment (Phase 4 — Claude API second pass)
+    enrichment_done: bool = False
+    enrichment_notes: str | None = None
+    cost_manual: bool = False  # True if cost was manually entered
+
     # Extra item specifics (catch-all for category-specific fields)
     item_specifics: dict[str, Any] = Field(default_factory=dict)
 

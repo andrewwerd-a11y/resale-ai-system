@@ -113,6 +113,12 @@ class ItemRepository:
             for field in protected:
                 if existing.manual_override and data.get(field) is None:
                     data[field] = getattr(existing, field)
+            # Never reset once-set enrichment and cost flags
+            for flag in ("enrichment_done", "cost_manual"):
+                if getattr(existing, flag, False):
+                    data[flag] = True
+            if getattr(existing, "enrichment_notes", None) and not data.get("enrichment_notes"):
+                data["enrichment_notes"] = existing.enrichment_notes
             data["updated_at"] = datetime.utcnow()
             for k, v in data.items():
                 if hasattr(existing, k):

@@ -118,6 +118,11 @@ class ItemRecord(SQLModel, table=True):
     manual_override: bool = False
     notes: Optional[str] = None
 
+    # Enrichment (Phase 4 — Claude API second pass)
+    enrichment_done: bool = Field(default=False)
+    enrichment_notes: Optional[str] = None
+    cost_manual: bool = Field(default=False)  # True if cost was manually entered
+
     # Extra specifics (JSON)
     item_specifics: Optional[str] = None
 

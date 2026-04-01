@@ -30,7 +30,41 @@ def get_stats(session: Session = Depends(get_session)):
         1 for i in all_items
         if i.status in ("approved", "export_ready")
     )
+    from packages.core.src.config import get_rules
+    rules = get_rules()
+    stale_days = int(rules.get("pricing", {}).get("stale_listing_days", 60))
+    counts["_stale_count"] = sum(
+        1 for i in all_items
+        if i.status == "listed" and (i.days_listed or 0) >= stale_days
+    )
     return counts
+
+
+@router.get("/stale")
+def get_stale(session: Session = Depends(get_session)):
+    """Return all listed items that have been active longer than stale_listing_days."""
+    from packages.sync.src.stale_checker import StaleChecker
+    checker = StaleChecker()
+    records = checker.get_stale_items(session)
+    return [
+        {
+            "sku": r.sku,
+            "title": r.title_final or r.title_raw,
+            "list_price": r.list_price,
+            "days_listed": r.days_listed,
+            "suggested_price": checker.suggest_price_drop(r),
+        }
+        for r in records
+    ]
+
+
+@router.post("/apply-stale-drops")
+def apply_stale_drops(session: Session = Depends(get_session)):
+    """Apply configured price drop to all stale listings."""
+    from packages.sync.src.stale_checker import StaleChecker
+    checker = StaleChecker()
+    count = checker.apply_price_drops(session)
+    return {"updated": count, "drop_percent": checker.stale_drop}
 
 
 @router.get("")
@@ -65,6 +99,21 @@ def update_item(sku: str, updates: dict, session: Session = Depends(get_session)
     item.manual_override = True
     saved = repo.upsert(item)
     return saved.model_dump()
+
+
+@router.patch("/{sku}/cost")
+def update_cost(sku: str, updates: dict, session: Session = Depends(get_session)):
+    """Set cost for an item. Sets cost_manual=True but does NOT set manual_override."""
+    repo = ItemRepository(session)
+    item = repo.get_by_sku(sku)
+    if not item:
+        raise HTTPException(status_code=404, detail=f"Item {sku} not found")
+    if "cost" not in updates:
+        raise HTTPException(status_code=422, detail="Request body must contain 'cost'")
+    item.cost = updates["cost"]
+    item.cost_manual = True
+    saved = repo.upsert(item)
+    return {"sku": sku, "cost": saved.cost, "cost_manual": saved.cost_manual}
 
 
 @router.get("/{sku}/image")

@@ -1,0 +1,164 @@
+"""
+Two-stage enrichment pipeline.
+Stage 1: minicpm-v (already done) — vision extraction from photos
+Stage 2: Claude API — description writing, title optimization, pricing context
+"""
+from __future__ import annotations
+
+import json
+import logging
+
+from packages.core.src.config import get_settings
+from packages.core.src.result import Result
+from packages.domain.src.entities.item import Item
+
+logger = logging.getLogger(__name__)
+
+SYSTEM_PROMPT = """You are an expert eBay reseller with deep knowledge of secondhand market pricing \
+and listing optimization. You will receive structured data about a resale item \
+extracted from photos by a vision model. Your job is to:
+
+1. Write a compelling, accurate eBay listing description (3-4 paragraphs)
+2. Optimize the listing title for eBay search (max 80 chars, keywords first)
+3. Fill in any missing item specifics based on your knowledge of the brand/item
+4. Suggest a realistic list price based on current eBay sold prices for this item
+5. Flag any concerns about authenticity, condition assessment, or pricing
+
+Return ONLY valid JSON matching this schema:
+{
+  "title_final": "optimized title max 80 chars",
+  "description_final": "full listing description",
+  "brand_normalized": "standardized brand name",
+  "estimated_price": 0.00,
+  "list_price": 0.00,
+  "minimum_price": 0.00,
+  "item_specifics": {},
+  "enrichment_notes": "any concerns or flags",
+  "enrichment_confidence": 0.00
+}"""
+
+_PROTECTED = frozenset({
+    "sku", "status", "batch_id", "photo_folder", "image_paths",
+    "category_key", "category_label", "ebay_category_id",
+    "internal_id", "enrichment_done", "cost_manual",
+    "created_at", "updated_at",
+})
+
+_DROP_FROM_PROMPT = frozenset({
+    "internal_id", "photo_folder", "image_paths", "created_at", "updated_at",
+})
+
+
+class ItemEnricher:
+    """Uses Claude API to enrich item data after vision extraction."""
+
+    def __init__(self):
+        self.settings = get_settings()
+        self._client = None
+
+    def is_available(self) -> bool:
+        return bool(
+            self.settings.anthropic_api_key
+            and self.settings.enrichment_enabled
+        )
+
+    def _get_client(self):
+        if self._client is None:
+            try:
+                import anthropic
+                self._client = anthropic.Anthropic(
+                    api_key=self.settings.anthropic_api_key
+                )
+            except ImportError:
+                raise RuntimeError(
+                    "anthropic package not installed — run: uv sync"
+                )
+        return self._client
+
+    def enrich(self, item: Item) -> Result[dict]:
+        """
+        Call Claude API to enrich an item's extracted data.
+        Returns Result containing a dict of enriched fields plus
+        details["estimated_cost"] in USD.
+        """
+        if not self.is_available():
+            return Result.failure(
+                "Enrichment not available: check ANTHROPIC_API_KEY and ENRICHMENT_ENABLED"
+            )
+
+        # Build the user-message payload — exclude noise fields
+        item_data = {
+            k: v for k, v in item.model_dump().items()
+            if k not in _DROP_FROM_PROMPT
+            and v is not None
+            and v != []
+            and v != {}
+        }
+        user_message = json.dumps(item_data, indent=2, default=str)
+
+        try:
+            import anthropic
+
+            client = self._get_client()
+            response = client.messages.create(
+                model=self.settings.enrichment_model,
+                max_tokens=2048,
+                system=SYSTEM_PROMPT,
+                messages=[{"role": "user", "content": user_message}],
+            )
+
+            raw_text = response.content[0].text.strip()
+
+            # Strip markdown code fences if present
+            if raw_text.startswith("```"):
+                lines = raw_text.splitlines()
+                inner = []
+                for line in lines[1:]:
+                    if line.strip() == "```":
+                        break
+                    inner.append(line)
+                raw_text = "\n".join(inner)
+
+            enriched = json.loads(raw_text)
+
+            # Rough cost estimate: Sonnet ~$3/M input, ~$15/M output tokens
+            input_tokens = response.usage.input_tokens
+            output_tokens = response.usage.output_tokens
+            cost_usd = (input_tokens * 3 + output_tokens * 15) / 1_000_000
+
+            logger.info(
+                "Enriched %s — %d+%d tokens, ~$%.4f",
+                item.sku, input_tokens, output_tokens, cost_usd,
+            )
+
+            return Result.success(enriched, estimated_cost=round(cost_usd, 4))
+
+        except json.JSONDecodeError as e:
+            return Result.failure(f"Failed to parse Claude response as JSON: {e}")
+        except Exception as e:
+            module = getattr(type(e), "__module__", "")
+            if "anthropic" in module:
+                return Result.failure(f"Anthropic API error: {e}")
+            return Result.failure(f"Enrichment error: {e}")
+
+    def apply_to_item(self, item: Item, enriched: dict) -> Item:
+        """
+        Apply enriched fields to an Item entity.
+        Respects manual_override. Never touches protected identity fields.
+        """
+        if not item.manual_override:
+            for key, val in enriched.items():
+                if key in _PROTECTED or not hasattr(item, key):
+                    continue
+                if key == "item_specifics" and isinstance(val, dict):
+                    # Merge: existing non-null values win over Claude suggestions
+                    existing = item.item_specifics or {}
+                    merged = {**val, **{k: v for k, v in existing.items() if v is not None}}
+                    item.item_specifics = merged
+                else:
+                    setattr(item, key, val)
+
+        # Enrichment metadata — always written, even on manual_override
+        item.enrichment_done = True
+        item.enrichment_notes = enriched.get("enrichment_notes")
+        return item
