@@ -12,9 +12,14 @@ router = APIRouter()
 
 @router.get("")
 def list_review_queue(session: Session = Depends(get_session)):
-    repo = ItemRepository(session)
-    items = repo.list_needs_review()
-    return [i.model_dump() for i in items]
+    from sqlmodel import select
+    from packages.data.src.models.item_record import ItemRecord
+    from packages.data.src.repositories.item_repo import _from_record
+    stmt = select(ItemRecord).where(
+        (ItemRecord.status == "needs_review") | (ItemRecord.needs_review == True)
+    )
+    records = session.exec(stmt).all()
+    return [_from_record(r).model_dump() for r in records]
 
 
 @router.post("/{sku}/approve")

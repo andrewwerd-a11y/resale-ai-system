@@ -28,6 +28,11 @@ engine = _make_engine()
 
 def init_db() -> None:
     """Create all tables. Safe to call on every startup — idempotent."""
+    # Import models so SQLModel registers them before create_all
+    import packages.data.src.models.item_record  # noqa: F401
+    import packages.data.src.models.review_record  # noqa: F401
+    import packages.data.src.models.sale_record  # noqa: F401
+    import packages.data.src.models.sourcing_batch  # noqa: F401
     SQLModel.metadata.create_all(engine)
 
 
@@ -51,6 +56,9 @@ def migrate_add_columns() -> None:
         ("enrichment_done", "INTEGER DEFAULT 0"),
         ("enrichment_notes", "TEXT"),
         ("cost_manual", "INTEGER DEFAULT 0"),
+        ("sourcing_location", "TEXT"),
+        ("sourcing_date", "TEXT"),
+        ("sourcing_batch", "TEXT"),
     ]
     for col_name, col_def in new_columns:
         try:

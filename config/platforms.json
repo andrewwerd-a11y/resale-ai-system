@@ -1,0 +1,31 @@
+{
+  "ebay": {
+    "label": "eBay",
+    "active": true,
+    "end_listing_supported": true
+  },
+  "poshmark": {
+    "label": "Poshmark",
+    "active": false,
+    "end_listing_supported": false,
+    "note": "Manual takedown required — no API"
+  },
+  "mercari": {
+    "label": "Mercari",
+    "active": false,
+    "end_listing_supported": false,
+    "note": "Manual takedown required — no API"
+  },
+  "depop": {
+    "label": "Depop",
+    "active": false,
+    "end_listing_supported": false,
+    "note": "Manual takedown required — no API"
+  },
+  "facebook": {
+    "label": "Facebook Marketplace",
+    "active": false,
+    "end_listing_supported": false,
+    "note": "Manual takedown required — no API"
+  }
+}

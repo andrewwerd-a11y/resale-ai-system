@@ -50,6 +50,16 @@ api:
   port: 8000
   reload: true
 
+capture:
+  watch_folder: "./intake/pending"
+  time_window_seconds: 90
+  min_photos_per_item: 3
+  ideal_photos_per_item: 5
+  blur_threshold: 100.0
+  auto_analyze: true
+  label_printer_enabled: false
+  camera_auto_trigger: false
+
 logging:
   level: "INFO"
   max_bytes: 10485760

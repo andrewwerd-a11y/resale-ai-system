@@ -79,6 +79,14 @@ class Settings(BaseSettings):
     enrichment_model: str = "claude-sonnet-4-20250514"
     enrichment_enabled: bool = True
 
+    # Notifications (Phase 5)
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_user: str = ""
+    smtp_password: str = ""
+    notify_email: str = ""
+    notifications_enabled: bool = False
+
     @property
     def ebay_app_id(self) -> str:
         return self.ebay_prod_app_id if self.ebay_environment == "production" else self.ebay_sandbox_app_id

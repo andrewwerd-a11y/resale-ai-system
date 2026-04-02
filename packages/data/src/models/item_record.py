@@ -123,6 +123,11 @@ class ItemRecord(SQLModel, table=True):
     enrichment_notes: Optional[str] = None
     cost_manual: bool = Field(default=False)  # True if cost was manually entered
 
+    # Sourcing (Phase 5)
+    sourcing_location: Optional[str] = None
+    sourcing_date: Optional[datetime] = None
+    sourcing_batch: Optional[str] = None      # batch_id from sourcing_batches table
+
     # Extra specifics (JSON)
     item_specifics: Optional[str] = None
 

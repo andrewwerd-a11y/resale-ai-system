@@ -136,6 +136,11 @@ class Item(BaseModel):
     enrichment_notes: str | None = None
     cost_manual: bool = False  # True if cost was manually entered
 
+    # Sourcing (Phase 5)
+    sourcing_location: str | None = None
+    sourcing_date: datetime | None = None
+    sourcing_batch: str | None = None
+
     # Extra item specifics (catch-all for category-specific fields)
     item_specifics: dict[str, Any] = Field(default_factory=dict)
 

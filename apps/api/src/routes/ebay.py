@@ -86,6 +86,30 @@ def sync_sold(session: Session = Depends(get_session)):
     stats = sync.reconcile(session)
     return stats
 
+@router.post("/mark-sold/{sku}")
+def mark_sold_manual(
+    sku: str,
+    sold_price: float,
+    fees: float = 0.0,
+    platform: str = "ebay",
+    session: Session = Depends(get_session),
+):
+    """Manually mark an item as sold with price and fees. Creates a SaleRecord."""
+    from packages.sync.src.cross_platform_sync import CrossPlatformSync
+    sync = CrossPlatformSync()
+    result = sync.mark_sold(sku, platform, sold_price, fees, session)
+    if not result.ok:
+        status = 404 if "not found" in (result.error or "") else 500
+        raise HTTPException(status_code=status, detail=result.error)
+    # Notify
+    try:
+        from packages.notifications.src.notifier import Notifier
+        Notifier().notify_sale(sku, sold_price, platform)
+    except Exception:
+        pass
+    return result.value
+
+
 @router.get("/listings")
 def get_active_listings(session: Session = Depends(get_session)):
     repo = ItemRepository(session)

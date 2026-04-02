@@ -37,6 +37,9 @@ dependencies = [
     # Photo hosting
     "cloudinary>=1.36.0",
 
+    # Live capture framework (Phase 5)
+    "watchdog>=4.0.0",
+
     # AI enrichment (Phase 4)
     "anthropic>=0.25.0",
 

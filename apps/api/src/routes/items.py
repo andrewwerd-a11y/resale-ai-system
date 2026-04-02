@@ -239,6 +239,7 @@ def bulk_review(body: BulkSkuRequest, session: Session = Depends(get_session)):
         item = repo.get_by_sku(sku)
         if item:
             item.status = ItemStatus.NEEDS_REVIEW
+            item.needs_review = True
             repo.upsert(item)
             updated.append(sku)
     return {"updated": len(updated), "skus": updated}

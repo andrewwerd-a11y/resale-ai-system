@@ -17,7 +17,10 @@ from fastapi.responses import HTMLResponse
 
 from packages.core.src.config import get_settings
 from packages.data.src.db.sqlite import init_db, migrate_add_columns
-from apps.api.src.routes import items, review, export, health, ui, ebay
+from apps.api.src.routes import (
+    items, review, export, health, ui, ebay,
+    reports, sourcing, capture, sync, settings, lots,
+)
 
 
 @asynccontextmanager
@@ -49,6 +52,12 @@ app.include_router(items.router, prefix="/api/items", tags=["items"])
 app.include_router(review.router, prefix="/api/review", tags=["review"])
 app.include_router(export.router, prefix="/api/export", tags=["export"])
 app.include_router(ebay.router, prefix="/api/ebay", tags=["ebay"])
+app.include_router(reports.router, prefix="/api/reports", tags=["reports"])
+app.include_router(sourcing.router, prefix="/api/sourcing", tags=["sourcing"])
+app.include_router(capture.router, prefix="/api/capture", tags=["capture"])
+app.include_router(sync.router, prefix="/api/sync", tags=["sync"])
+app.include_router(settings.router, prefix="/api/settings", tags=["settings"])
+app.include_router(lots.router, prefix="/api/lots", tags=["lots"])
 app.include_router(ui.router, tags=["ui"])
 
 
@@ -117,11 +126,16 @@ def _dashboard_html() -> str:
 </header>
 <nav>
   <a href="/" class="active">Dashboard</a>
-  <a href="/intake">Intake Queue</a>
+  <a href="/intake">Intake</a>
   <a href="/review-queue">Review Queue</a>
   <a href="/bulk-approve">Bulk Approve</a>
   <a href="/inventory">Inventory</a>
+  <a href="/lots">Lots</a>
+  <a href="/reports">Reports</a>
+  <a href="/sourcing">Sourcing</a>
+  <a href="/capture">Capture</a>
   <a href="/export">Export</a>
+  <a href="/settings">Settings</a>
 </nav>
 <main>
   <div class="cards" id="stats-cards">
