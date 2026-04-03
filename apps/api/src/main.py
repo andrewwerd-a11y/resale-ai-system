@@ -4,6 +4,7 @@ Serves the browser interface at http://localhost:8000
 """
 from __future__ import annotations
 
+import logging
 import sys
 from pathlib import Path
 
@@ -11,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 
@@ -22,14 +23,28 @@ from apps.api.src.routes import (
     reports, sourcing, capture, sync, settings, lots,
 )
 
+logger = logging.getLogger(__name__)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    settings = get_settings()
-    settings.ensure_dirs()
+    cfg = get_settings()
+    cfg.ensure_dirs()
+    # Configure file logging once dirs exist
+    log_file = cfg.log_dir / "app.log"
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        handlers=[
+            logging.StreamHandler(),
+            logging.FileHandler(log_file, encoding="utf-8"),
+        ],
+    )
     init_db()
     migrate_add_columns()
+    logger.info("Resale AI System started — %s", cfg.ebay_environment)
     yield
+    logger.info("Resale AI System shutting down cleanly")
 
 
 app = FastAPI(
@@ -45,6 +60,40 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ── Error handlers ────────────────────────────────────────────────────────────
+
+@app.exception_handler(404)
+async def not_found(request: Request, exc):
+    return HTMLResponse(
+        "<html><body style='font-family:sans-serif;background:#1a1a18;color:#d4d2c8;"
+        "display:flex;align-items:center;justify-content:center;height:100vh;margin:0'>"
+        "<div style='text-align:center'>"
+        "<div style='font-size:48px;color:#3a3a38;margin-bottom:16px'>404</div>"
+        "<div style='font-size:16px;color:#888780'>Page not found</div>"
+        "<a href='/' style='display:inline-block;margin-top:20px;color:#7f77dd;"
+        "text-decoration:none;font-size:13px'>← Back to dashboard</a>"
+        "</div></body></html>",
+        status_code=404,
+    )
+
+
+@app.exception_handler(500)
+async def server_error(request: Request, exc):
+    logger.error("500 error on %s: %s", request.url.path, exc)
+    return HTMLResponse(
+        "<html><body style='font-family:sans-serif;background:#1a1a18;color:#d4d2c8;"
+        "display:flex;align-items:center;justify-content:center;height:100vh;margin:0'>"
+        "<div style='text-align:center'>"
+        "<div style='font-size:48px;color:#501313;margin-bottom:16px'>500</div>"
+        "<div style='font-size:16px;color:#f09595'>Server error — check data/logs/app.log</div>"
+        "<a href='/' style='display:inline-block;margin-top:20px;color:#7f77dd;"
+        "text-decoration:none;font-size:13px'>← Back to dashboard</a>"
+        "</div></body></html>",
+        status_code=500,
+    )
+
 
 # Routers
 app.include_router(health.router, prefix="/api")

@@ -1,0 +1,212 @@
+"""
+Integration tests for eBay publish flow.
+ALL eBay and Cloudinary API calls are mocked — no real network requests.
+"""
+from __future__ import annotations
+
+import pytest
+from unittest.mock import patch, MagicMock
+from packages.ebay.src.inventory_client import EbayInventoryClient
+from packages.core.src.result import Result
+from packages.data.src.repositories.item_repo import ItemRepository
+from packages.core.src.constants import ItemStatus
+from tests.fixtures.sample_items import make_clothing_item
+from tests.fixtures.mock_ebay import (
+    OFFER_CREATE_SUCCESS,
+    PUBLISH_SUCCESS,
+)
+
+
+# ── helpers ───────────────────────────────────────────────────────────────────
+
+def _make_mock_client(
+    listing_id: str = "test-listing-456",
+    listing_url: str = "https://www.sandbox.ebay.com/itm/test-listing-456",
+    photo_urls: list | None = None,
+    fail: bool = False,
+    fail_message: str = "api_error",
+) -> EbayInventoryClient:
+    """Return an EbayInventoryClient with _publish_via_api mocked."""
+    client = EbayInventoryClient.__new__(EbayInventoryClient)
+
+    mock_auth = MagicMock()
+    mock_auth.is_configured.return_value = True
+    mock_auth.api_base = "https://api.sandbox.ebay.com"
+    mock_auth.user_token = "fake-token"
+    mock_auth.marketplace_id = "EBAY_US"
+    mock_auth.settings = MagicMock()
+    mock_auth.settings.ebay_environment = "sandbox"
+    client.auth = mock_auth
+
+    mock_uploader = MagicMock()
+    mock_uploader.is_configured.return_value = True
+    mock_uploader.upload_all.return_value = photo_urls or []
+    client.uploader = mock_uploader
+
+    if fail:
+        client._publish_via_api = MagicMock(side_effect=Exception(fail_message))
+    else:
+        client._publish_via_api = MagicMock(return_value=(listing_id, listing_url))
+
+    return client
+
+
+# ── publish_item flow ─────────────────────────────────────────────────────────
+
+def test_publish_item_returns_success(test_session):
+    client = _make_mock_client(
+        listing_id="test-listing-456",
+        listing_url="https://www.sandbox.ebay.com/itm/test-listing-456",
+        photo_urls=["https://cdn.example.com/photo1.jpg"],
+    )
+    item = make_clothing_item(sku="CL-000001", status="approved")
+    result = client.publish_item(item)
+
+    assert result.ok
+    assert result.value["listing_id"] == "test-listing-456"
+    assert result.value["listing_url"] == "https://www.sandbox.ebay.com/itm/test-listing-456"
+
+
+def test_publish_item_returns_photo_urls(test_session):
+    expected_photos = ["https://cdn.example.com/01.jpg", "https://cdn.example.com/02.jpg"]
+    client = _make_mock_client(photo_urls=expected_photos)
+    item = make_clothing_item(sku="CL-000002")
+    result = client.publish_item(item)
+
+    assert result.ok
+    assert result.value["photo_urls"] == expected_photos
+
+
+def test_unconfigured_client_returns_failure():
+    client = EbayInventoryClient.__new__(EbayInventoryClient)
+    mock_auth = MagicMock()
+    mock_auth.is_configured.return_value = False
+    client.auth = mock_auth
+    client.uploader = MagicMock()
+
+    item = make_clothing_item(sku="CL-000003")
+    result = client.publish_item(item)
+
+    assert not result.ok
+    assert result.error_code == "NOT_CONFIGURED"
+
+
+def test_failed_inventory_creation_returns_failure():
+    client = _make_mock_client(fail=True, fail_message="inventory_item_error")
+    item = make_clothing_item(sku="CL-000004")
+    result = client.publish_item(item)
+
+    assert not result.ok
+    assert result.error_code == "API_ERROR"
+
+
+def test_publish_failure_does_not_update_db(test_session):
+    repo = ItemRepository(test_session)
+    item = make_clothing_item(sku="CL-000005", status="approved")
+    repo.upsert(item)
+
+    client = _make_mock_client(fail=True, fail_message="timeout")
+    result = client.publish_item(item)
+    assert not result.ok
+
+    # Status must remain unchanged
+    fetched = repo.get_by_sku("CL-000005")
+    assert fetched.status == "approved"
+    assert fetched.listing_id is None
+
+
+# ── item status updated after publish ─────────────────────────────────────────
+
+def test_item_status_updated_to_listed_after_publish(test_session):
+    import datetime
+    repo = ItemRepository(test_session)
+    item = make_clothing_item(sku="CL-000010", status="approved")
+    repo.upsert(item)
+
+    client = _make_mock_client(
+        listing_id="listing-010",
+        listing_url="https://www.sandbox.ebay.com/itm/listing-010",
+    )
+    result = client.publish_item(item)
+    assert result.ok
+
+    # Manually apply the status update (as the route does)
+    data = result.value
+    fetched = repo.get_by_sku("CL-000010")
+    fetched.listing_id = data["listing_id"]
+    fetched.listing_url = data["listing_url"]
+    fetched.status = ItemStatus.LISTED
+    fetched.platform = "ebay"
+    fetched.date_listed = datetime.datetime.utcnow()
+    repo.upsert(fetched)
+
+    final = repo.get_by_sku("CL-000010")
+    assert final.status == ItemStatus.LISTED
+    assert final.listing_id == "listing-010"
+    assert final.listing_url is not None
+
+
+def test_listing_id_and_url_saved_to_db(test_session):
+    import datetime
+    repo = ItemRepository(test_session)
+    item = make_clothing_item(sku="CL-000011", status="approved")
+    repo.upsert(item)
+
+    client = _make_mock_client(
+        listing_id="specific-id-789",
+        listing_url="https://www.sandbox.ebay.com/itm/specific-id-789",
+    )
+    result = client.publish_item(item)
+    assert result.ok
+
+    fetched = repo.get_by_sku("CL-000011")
+    fetched.listing_id = result.value["listing_id"]
+    fetched.listing_url = result.value["listing_url"]
+    fetched.status = ItemStatus.LISTED
+    repo.upsert(fetched)
+
+    final = repo.get_by_sku("CL-000011")
+    assert final.listing_id == "specific-id-789"
+    assert "specific-id-789" in final.listing_url
+
+
+# ── batch publishing ──────────────────────────────────────────────────────────
+
+def test_batch_publish_counts_successes(test_session):
+    repo = ItemRepository(test_session)
+    for i in range(3):
+        repo.upsert(make_clothing_item(sku=f"CL-0002{i}", status="approved"))
+
+    items = repo.list_by_status("approved")
+    published = 0
+    failed = 0
+
+    for item in items:
+        client = _make_mock_client(listing_id=f"lst-{item.sku}")
+        result = client.publish_item(item)
+        if result.ok:
+            published += 1
+        else:
+            failed += 1
+
+    assert published == 3
+    assert failed == 0
+
+
+def test_batch_publish_partial_failure_counts_correctly(test_session):
+    repo = ItemRepository(test_session)
+    repo.upsert(make_clothing_item(sku="CL-000030", status="approved"))
+    repo.upsert(make_clothing_item(sku="CL-000031", status="approved"))
+
+    results = []
+    clients = [
+        _make_mock_client(listing_id="ok-listing"),
+        _make_mock_client(fail=True, fail_message="rate_limit"),
+    ]
+    items = repo.list_by_status("approved")
+
+    for item, client in zip(items, clients):
+        results.append(client.publish_item(item))
+
+    assert sum(1 for r in results if r.ok) == 1
+    assert sum(1 for r in results if not r.ok) == 1

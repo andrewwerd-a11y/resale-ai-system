@@ -120,7 +120,11 @@ class ItemRepository:
             if getattr(existing, "enrichment_notes", None) and not data.get("enrichment_notes"):
                 data["enrichment_notes"] = existing.enrichment_notes
             data["updated_at"] = datetime.utcnow()
+            # Immutable fields — never overwrite PK or creation timestamp
+            _immutable = {"internal_id", "created_at"}
             for k, v in data.items():
+                if k in _immutable:
+                    continue
                 if hasattr(existing, k):
                     setattr(existing, k, v)
             self.session.add(existing)

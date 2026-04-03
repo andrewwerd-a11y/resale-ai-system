@@ -6,11 +6,14 @@ Never raises — logging failure must never break the pipeline.
 from __future__ import annotations
 
 import json
+import logging
 import traceback
 from datetime import datetime
 from pathlib import Path
 
 from packages.core.src.config import get_settings
+
+logger = logging.getLogger("resale.audit")
 
 
 class AuditLog:
@@ -27,6 +30,8 @@ class AuditLog:
             entry["ts"] = datetime.utcnow().isoformat()
             with open(self.log_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(entry) + "\n")
+            # Mirror to structured Python logger for console/app.log
+            logger.info("[audit] %s", json.dumps({k: v for k, v in entry.items() if k != "ts"}))
         except Exception:
             pass  # Never let logging break the pipeline
 
