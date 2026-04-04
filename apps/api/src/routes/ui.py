@@ -1149,9 +1149,8 @@ async function load() {{
 }}
 
 async function loadExistingLots() {{
-  const r = await fetch('/api/items?limit=500');
-  const items = await r.json();
-  const lots = items.filter(it => it.item_mode === 'lot');
+  const r = await fetch('/api/lots');
+  const lots = await r.json();
   const div = document.getElementById('lots-list');
   if (!lots.length) {{ div.textContent = 'No lots yet.'; return; }}
   div.innerHTML = lots.map(lot => `

@@ -45,10 +45,11 @@ def enrich_all(limit: int | None = None, sku_filter: str | None = None) -> None:
 
     console.print(f"Model: [cyan]{enricher.settings.enrichment_model}[/cyan]\n")
 
-    # Collect candidates: approved or needs_review, not yet enriched
+    # Collect candidates: approved, needs_review, export_ready, or exported — not yet enriched
+    eligible_statuses = ["approved", "needs_review", "export_ready", "exported"]
     with Session(engine) as session:
         stmt = select(ItemRecord).where(
-            or_(ItemRecord.status == "approved", ItemRecord.status == "needs_review"),
+            ItemRecord.status.in_(eligible_statuses),
             or_(
                 ItemRecord.enrichment_done == False,  # noqa: E712
                 ItemRecord.enrichment_done == None,   # noqa: E711
