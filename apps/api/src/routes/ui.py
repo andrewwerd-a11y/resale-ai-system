@@ -697,7 +697,7 @@ function filterItems() {{
     const ep = it.estimated_price != null ? '$' + parseFloat(it.estimated_price).toFixed(2) : '-';
     const lp = it.list_price != null ? '$' + parseFloat(it.list_price).toFixed(2) : '-';
     return `<tr style="cursor:pointer" onclick="openDetail(itemMap['${{it.sku}}'])">
-      <td style="font-family:monospace">${{it.sku||'-'}}</td>
+      <td style="font-family:monospace">${{it.sku||'-'}}${{it.lot_group_id ? '<span style="background:#412402;color:#fac775;padding:2px 6px;border-radius:4px;font-size:10px;margin-left:4px">LOT</span>' : ''}}</td>
       <td style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
         ${{(it.title_final||it.title_raw||'-').slice(0,60)}}</td>
       <td>${{it.category_label||'-'}}</td>
@@ -1012,7 +1012,7 @@ function renderTable() {{
     const lp = it.list_price != null ? '$' + parseFloat(it.list_price).toFixed(2) : '-';
     return `<tr style="cursor:pointer">
       <td onclick="event.stopPropagation()"><input type="checkbox" class="item-cb" value="${{it.sku}}" onchange="updateSelCount()"></td>
-      <td style="font-family:monospace;font-size:12px" onclick="openDetail(itemMap['${{it.sku}}'])">${{it.sku||'-'}}</td>
+      <td style="font-family:monospace;font-size:12px" onclick="openDetail(itemMap['${{it.sku}}'])">${{it.sku||'-'}}${{it.lot_group_id ? '<span style="background:#412402;color:#fac775;padding:2px 6px;border-radius:4px;font-size:10px;margin-left:4px">LOT</span>' : ''}}</td>
       <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" onclick="openDetail(itemMap['${{it.sku}}'])">
         ${{(it.title_final||it.title_raw||'-').slice(0,55)}}</td>
       <td onclick="openDetail(itemMap['${{it.sku}}'])">${{it.category_label||'-'}}</td>
@@ -1166,23 +1166,26 @@ async function loadExistingLots() {{
 function filterItems() {{
   const q = document.getElementById('search').value.toLowerCase();
   const cat = document.getElementById('cat-filter').value;
+  // Show ALL items except sold/rejected — lot grouping is metadata, not a location
   const eligible = allItems.filter(it =>
-    !['lot','lot_member','sold','rejected'].includes(it.status) &&
-    it.item_mode !== 'lot' &&
+    !['sold','rejected'].includes(it.status) &&
     (!q || (it.sku||'').toLowerCase().includes(q) || (it.title_final||'').toLowerCase().includes(q)) &&
     (!cat || it.category_label === cat)
   );
   document.getElementById('item-list').innerHTML = eligible.length
     ? eligible.map(it => {{
         const isSel = selectedSkus.has(it.sku);
+        const lotBadge = it.lot_group_id
+          ? `<span style="background:#412402;color:#fac775;padding:1px 5px;border-radius:3px;font-size:10px;margin-left:4px" title="In lot: ${{it.lot_group_id}}">LOT</span>`
+          : '';
         return `<div class="lot-item${{isSel ? ' selected' : ''}}" onclick="toggleSelect('${{it.sku}}')">
           <input type="checkbox" style="width:auto" ${{isSel ? 'checked' : ''}} onclick="event.stopPropagation();toggleSelect('${{it.sku}}')">
-          <span style="font-family:monospace;font-size:12px;color:#f1efe8;min-width:100px">${{it.sku}}</span>
+          <span style="font-family:monospace;font-size:12px;color:#f1efe8;min-width:100px">${{it.sku}}${{lotBadge}}</span>
           <span style="font-size:12px;color:#888780;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${{it.title_final||it.title_raw||'-'}}</span>
           <span style="font-size:12px;color:#5dcaa5;min-width:60px;text-align:right">${{it.estimated_price ? '$' + parseFloat(it.estimated_price).toFixed(2) : '-'}}</span>
         </div>`;
       }}).join('')
-    : '<div style="color:#888780;font-size:13px">No eligible items.</div>';
+    : '<div style="color:#888780;font-size:13px">No items found.</div>';
   updateSelectionUI();
 }}
 

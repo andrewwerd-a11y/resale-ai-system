@@ -69,6 +69,7 @@ class LotBuilder:
         for item in items:
             item.status = "lot_member"
             item.lot_group_id = lot_sku
+            item.item_mode = "lot"
             repo.upsert(item)
 
         logger.info("Created lot %s with %d items: %s", lot_sku, len(skus), skus)
@@ -89,6 +90,7 @@ class LotBuilder:
             if record.sku != lot_sku:
                 record.status = "approved"
                 record.lot_group_id = None
+                record.item_mode = "single"
                 session.add(record)
 
         # Remove lot item

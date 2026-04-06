@@ -36,6 +36,14 @@ class EbayCSVWriter:
             writer = csv.DictWriter(f, fieldnames=self.columns, extrasaction="ignore")
             writer.writeheader()
             for item in items:
+                # Skip individual member items that belong to a lot group —
+                # their lot header row covers them.
+                if item.status == "lot_member" or (
+                    item.lot_group_id
+                    and item.item_mode == "lot"
+                    and item.sku != item.lot_group_id
+                ):
+                    continue
                 row = self._build_row(item)
                 writer.writerow(row)
 

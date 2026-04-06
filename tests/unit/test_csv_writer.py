@@ -153,3 +153,49 @@ def test_write_csv_has_header_row(writer, tmp_path):
         rows = list(reader)
     assert len(rows) == 1
     assert "Custom label (SKU)" in rows[0]
+
+
+# ── lot export ────────────────────────────────────────────────────────────────
+
+def test_lot_member_skipped_in_csv(writer, tmp_path):
+    """Items with status=lot_member must not appear as separate CSV rows."""
+    lot_header = make_clothing_item(
+        sku="LOT-CL-000001",
+        status="approved",
+        item_mode="lot",
+        lot_group_id="LOT-CL-000001",
+        title_final="2 Men's Jackets Bundle",
+        list_price=40.00,
+    )
+    member = make_clothing_item(
+        sku="CL-000002",
+        status="lot_member",
+        item_mode="lot",
+        lot_group_id="LOT-CL-000001",
+    )
+    out_path = tmp_path / "lots_export.csv"
+    writer.write([lot_header, member], output_path=out_path)
+    with open(out_path, encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        rows = list(reader)
+    # Only the lot header should appear — member is suppressed
+    assert len(rows) == 1
+    assert rows[0]["Custom label (SKU)"] == "LOT-CL-000001"
+
+
+def test_lot_header_exported_as_single_row(writer, tmp_path):
+    """The lot header item (sku == lot_group_id) is exported normally."""
+    lot_header = make_clothing_item(
+        sku="LOT-CL-000001",
+        status="approved",
+        item_mode="lot",
+        lot_group_id="LOT-CL-000001",
+        title_final="Bundle",
+        list_price=35.00,
+    )
+    out_path = tmp_path / "lot_header.csv"
+    writer.write([lot_header], output_path=out_path)
+    with open(out_path, encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+    assert len(rows) == 1
+    assert rows[0]["Custom label (SKU)"] == "LOT-CL-000001"
