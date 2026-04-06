@@ -662,8 +662,15 @@ let allItems = [];
 let itemMap = {{}};
 {_detail_panel_js()}
 async function load() {{
-  const r = await fetch('/api/items?limit=500');
-  allItems = await r.json();
+  try {{
+    const r = await fetch('/api/items?limit=500');
+    if (!r.ok) {{ throw new Error('API error ' + r.status); }}
+    allItems = await r.json();
+  }} catch(e) {{
+    document.getElementById('inv-body').innerHTML =
+      '<tr><td colspan="10" style="color:#f09595">Failed to load items: ' + e.message + '</td></tr>';
+    return;
+  }}
   itemMap = {{}};
   allItems.forEach(function(it) {{ if (it.sku) itemMap[it.sku] = it; }});
   const params = new URLSearchParams(window.location.search);
@@ -919,9 +926,9 @@ th input[type=checkbox], td input[type=checkbox] {{ width:auto; cursor:pointer; 
 <div class="filter-bar">
   <div class="slider-wrap">
     <label>Min confidence:</label>
-    <input type="range" id="conf-slider" min="0" max="100" value="72"
+    <input type="range" id="conf-slider" min="0" max="100" value="0"
            oninput="document.getElementById('conf-val').textContent=this.value+'%'; applyFilters()">
-    <span id="conf-val" style="font-size:12px;color:#f1efe8;min-width:38px">72%</span>
+    <span id="conf-val" style="font-size:12px;color:#f1efe8;min-width:38px">0%</span>
   </div>
   <select id="cat-filter" onchange="applyFilters()" style="width:170px">
     <option value="">All categories</option>
@@ -968,8 +975,15 @@ let itemMap = {{}};
 {_detail_panel_js()}
 
 async function load() {{
-  const r = await fetch('/api/items?limit=500');
-  allItems = await r.json();
+  try {{
+    const r = await fetch('/api/items?limit=500');
+    if (!r.ok) {{ throw new Error('API error ' + r.status); }}
+    allItems = await r.json();
+  }} catch(e) {{
+    document.getElementById('bulk-body').innerHTML =
+      '<tr><td colspan="8" style="color:#f09595">Failed to load items: ' + e.message + '</td></tr>';
+    return;
+  }}
   itemMap = {{}};
   allItems.forEach(function(it) {{ if (it.sku) itemMap[it.sku] = it; }});
   const cats = [...new Set(allItems.map(it => it.category_label).filter(Boolean))].sort();
@@ -1081,6 +1095,7 @@ def _lots_html() -> str:
 <html lang="en">
 <head><meta charset="UTF-8"><title>Lots — Resale AI</title>
 {_base_style()}
+{_detail_panel_style()}
 <style>
 .lot-item {{ background:#222220;border:1px solid #2c2c2a;border-radius:6px;
              padding:10px 14px;margin-bottom:6px;display:flex;align-items:center;gap:10px;cursor:pointer; }}
@@ -1135,17 +1150,41 @@ def _lots_html() -> str:
 </main>
 <script>
 let allItems = [];
+let itemMap = {{}};
 let selectedSkus = new Set();
+{_detail_panel_js()}
 
 async function load() {{
-  const r = await fetch('/api/items?limit=500');
-  allItems = await r.json();
+  try {{
+    const r = await fetch('/api/items?limit=500');
+    if (!r.ok) {{ throw new Error('API error ' + r.status); }}
+    allItems = await r.json();
+  }} catch(e) {{
+    document.getElementById('item-list').innerHTML =
+      '<div style="color:#f09595">Failed to load items: ' + e.message + '</div>';
+    return;
+  }}
+  itemMap = {{}};
+  allItems.forEach(function(it) {{ if (it.sku) itemMap[it.sku] = it; }});
   const cats = [...new Set(allItems.map(it => it.category_label).filter(Boolean))].sort();
   const catSel = document.getElementById('cat-filter');
   while (catSel.options.length > 1) catSel.remove(1);
   cats.forEach(c => {{ const o = document.createElement('option'); o.value=c; o.textContent=c; catSel.appendChild(o); }});
   filterItems();
   loadExistingLots();
+}}
+
+async function detailAction(action, sku) {{
+  if (action === 'approve') {{
+    await fetch('/api/items/bulk-approve', {{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{skus:[sku]}})}});
+  }} else if (action === 'review') {{
+    await fetch('/api/items/bulk-review', {{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{skus:[sku]}})}});
+  }} else if (action === 'reject') {{
+    await fetch('/api/items/bulk-reject', {{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{skus:[sku]}})}});
+  }} else if (action === 'publish') {{
+    await fetch(`/api/ebay/publish/${{sku}}`, {{method:'POST'}});
+  }}
+  closePanel(); load();
 }}
 
 async function loadExistingLots() {{
@@ -1178,7 +1217,7 @@ function filterItems() {{
         const lotBadge = it.lot_group_id
           ? `<span style="background:#412402;color:#fac775;padding:1px 5px;border-radius:3px;font-size:10px;margin-left:4px" title="In lot: ${{it.lot_group_id}}">LOT</span>`
           : '';
-        return `<div class="lot-item${{isSel ? ' selected' : ''}}" onclick="toggleSelect('${{it.sku}}')">
+        return `<div class="lot-item${{isSel ? ' selected' : ''}}" onclick="openDetail(itemMap['${{it.sku}}'])">
           <input type="checkbox" style="width:auto" ${{isSel ? 'checked' : ''}} onclick="event.stopPropagation();toggleSelect('${{it.sku}}')">
           <span style="font-family:monospace;font-size:12px;color:#f1efe8;min-width:100px">${{it.sku}}${{lotBadge}}</span>
           <span style="font-size:12px;color:#888780;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${{it.title_final||it.title_raw||'-'}}</span>
@@ -1239,6 +1278,8 @@ function showMsg(text, type) {{
 
 load();
 </script>
+{_detail_panel_html()}
+{_lightbox_html()}
 </body></html>"""
 
 
