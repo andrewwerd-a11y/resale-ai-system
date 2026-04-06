@@ -53,7 +53,9 @@ def _from_record(record: ItemRecord) -> Item:
                 d[field] = json.loads(d[field])
             except (json.JSONDecodeError, TypeError):
                 d[field] = []
-    if isinstance(d.get("measurements"), str):
+    if not d.get("measurements"):
+        d["measurements"] = {}
+    elif isinstance(d["measurements"], str):
         try:
             d["measurements"] = json.loads(d["measurements"])
         except (json.JSONDecodeError, TypeError):

@@ -11,6 +11,7 @@ import logging
 from packages.core.src.config import get_settings
 from packages.core.src.result import Result
 from packages.domain.src.entities.item import Item
+from packages.pricing.src.price_researcher import PriceResearcher
 
 logger = logging.getLogger(__name__)
 
@@ -130,6 +131,23 @@ class ItemEnricher:
                 "Enriched %s — %d+%d tokens, ~$%.4f",
                 item.sku, input_tokens, output_tokens, cost_usd,
             )
+
+            # Layer eBay sold-price research on top of Claude's estimate.
+            # avg_sold_price wins over Claude's list_price when available.
+            researcher = PriceResearcher()
+            price_result = researcher.research(item)
+            if price_result.ok:
+                avg = price_result.value.get("avg_sold_price")
+                if avg:
+                    enriched["list_price"] = avg
+                    logger.info(
+                        "Price research for %s overrides list_price → $%.2f",
+                        item.sku, avg,
+                    )
+            else:
+                logger.debug(
+                    "Price research skipped for %s: %s", item.sku, price_result.error
+                )
 
             return Result.success(enriched, estimated_cost=round(cost_usd, 4))
 
