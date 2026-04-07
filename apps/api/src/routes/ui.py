@@ -209,7 +209,7 @@ function renderDetailPanel(it) {
 
   const imgs = _dpPaths.map(function(p, idx) {
     return '<img src="/api/items/' + it.sku + '/image?path=' + encodeURIComponent(p) + '"'
-      + ' onerror="this.style.display=\'none\'"'
+      + ' onerror="this.style.display=\\'none\\'"'
       + ' onclick="openDpLb(' + idx + ')" title="Click to enlarge" alt="photo">';
   }).join('');
 
