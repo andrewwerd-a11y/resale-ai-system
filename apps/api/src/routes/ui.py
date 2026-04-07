@@ -257,10 +257,10 @@ function renderDetailPanel(it) {
     + (imgs ? '<div class="dp-imgs">' + imgs + '</div>' : '')
     + '<div style="border-top:1px solid #2c2c2a;padding-top:12px;margin-bottom:14px">' + fieldRows + '</div>'
     + '<div style="display:flex;gap:6px;flex-wrap:wrap;border-top:1px solid #2c2c2a;padding-top:12px">'
-    + '<button class="btn btn-green"  style="font-size:12px;padding:5px 10px" onclick="detailAction(\'approve\',\'' + it.sku + '\')">Approve</button>'
-    + '<button class="btn btn-gray"   style="font-size:12px;padding:5px 10px" onclick="detailAction(\'review\',\'' + it.sku + '\')">Send to review</button>'
-    + '<button class="btn btn-purple" style="font-size:12px;padding:5px 10px" onclick="detailAction(\'publish\',\'' + it.sku + '\')">Publish to eBay</button>'
-    + '<button class="btn btn-red"    style="font-size:12px;padding:5px 10px" onclick="detailAction(\'reject\',\'' + it.sku + '\')">Reject</button>'
+    + '<button class="btn btn-green"  style="font-size:12px;padding:5px 10px" onclick="detailAction(\\'approve\\',\\'' + it.sku + '\\')">Approve</button>'
+    + '<button class="btn btn-gray"   style="font-size:12px;padding:5px 10px" onclick="detailAction(\\'review\\',\\'' + it.sku + '\\')">Send to review</button>'
+    + '<button class="btn btn-purple" style="font-size:12px;padding:5px 10px" onclick="detailAction(\\'publish\\',\\'' + it.sku + '\\')">Publish to eBay</button>'
+    + '<button class="btn btn-red"    style="font-size:12px;padding:5px 10px" onclick="detailAction(\\'reject\\',\\'' + it.sku + '\\')">Reject</button>'
     + '</div>';
 }
 
