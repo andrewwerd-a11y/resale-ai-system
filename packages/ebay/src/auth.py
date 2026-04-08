@@ -70,9 +70,10 @@ class EbayAuth:
             base = "https://auth.ebay.com/oauth2/authorize"
         else:
             base = "https://auth.sandbox.ebay.com/oauth2/authorize"
+        redirect_uri = s.ebay_oauth_callback if s.ebay_oauth_callback else s.ebay_runame
         params = urlencode({
             "client_id": s.ebay_app_id,
-            "redirect_uri": s.ebay_runame,
+            "redirect_uri": redirect_uri,
             "response_type": "code",
             "scope": SCOPES,
         })

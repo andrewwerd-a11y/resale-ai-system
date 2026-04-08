@@ -65,6 +65,7 @@ class Settings(BaseSettings):
 
     # eBay Shared
     ebay_runame: str = ""
+    ebay_oauth_callback: str = ""
     ebay_environment: str = "sandbox"
     ebay_marketplace_id: str = "EBAY_US"
 
