@@ -1,8 +1,9 @@
 """
-eBay API routes — publish listings, sync sold orders, check status.
+eBay API routes — OAuth flow, publish listings, sync sold orders, check status.
 """
 from __future__ import annotations
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlmodel import Session
 from packages.core.src.config import get_settings
 from packages.core.src.constants import ItemStatus
@@ -12,6 +13,56 @@ from packages.ebay.src.auth import EbayAuth
 from packages.ebay.src.photo_uploader import PhotoUploader
 
 router = APIRouter()
+
+# ── OAuth 2.0 flow ────────────────────────────────────────────────────────────
+
+@router.get("/oauth/start")
+def oauth_start():
+    """Redirect browser to eBay OAuth consent page."""
+    auth = EbayAuth()
+    url = auth.get_auth_url()
+    return RedirectResponse(url)
+
+
+@router.get("/oauth/callback")
+def oauth_callback(code: str = "", error: str = "", error_description: str = ""):
+    """Exchange authorization code for tokens and save to data/ebay_tokens.json."""
+    if error or not code:
+        msg = error_description or error or "No authorization code received."
+        return HTMLResponse(_oauth_result_html(False, msg))
+    auth = EbayAuth()
+    try:
+        tokens = auth.exchange_code_for_tokens(code)
+        expires_at = tokens.get("expires_at", "")
+        return HTMLResponse(_oauth_result_html(True, f"Tokens saved. Access token expires: {expires_at[:19].replace('T',' ')} UTC"))
+    except Exception as exc:
+        return HTMLResponse(_oauth_result_html(False, str(exc)))
+
+
+@router.get("/oauth/status")
+def oauth_status():
+    """Return current OAuth token status."""
+    auth = EbayAuth()
+    return auth.get_token_status()
+
+
+def _oauth_result_html(success: bool, message: str) -> str:
+    color = "#5dcaa5" if success else "#f09595"
+    heading = "eBay Connected!" if success else "OAuth Error"
+    return f"""<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>eBay OAuth — Resale AI</title>
+<style>body{{font-family:system-ui,sans-serif;background:#1a1a18;color:#d4d2c8;
+display:flex;align-items:center;justify-content:center;height:100vh;margin:0}}
+.box{{background:#222220;border:1px solid #2c2c2a;border-radius:10px;padding:32px 40px;max-width:480px;text-align:center}}
+h2{{color:{color};margin-bottom:12px}}p{{font-size:13px;color:#888780;margin-bottom:20px}}
+a{{color:#7f77dd;text-decoration:none;font-size:13px}}</style></head>
+<body><div class="box">
+<h2>{heading}</h2><p>{message}</p>
+<a href="/export">← Back to Export Center</a>
+</div></body></html>"""
+
+
+# ── Status ─────────────────────────────────────────────────────────────────────
 
 @router.get("/status")
 def ebay_status():

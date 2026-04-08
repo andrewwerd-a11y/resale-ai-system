@@ -843,9 +843,17 @@ def _export_html() -> str:
 
 </div>
 
-<!-- eBay connection status -->
+<!-- eBay OAuth + connection status -->
 <div class="status-panel">
-  <div style="font-size:13px;font-weight:500;color:#f1efe8;margin-bottom:12px">eBay connection status</div>
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+    <div style="font-size:13px;font-weight:500;color:#f1efe8">eBay account connection</div>
+    <a href="/api/ebay/oauth/start"
+       style="background:#534ab7;color:#eeedfe;padding:5px 12px;border-radius:6px;font-size:12px;text-decoration:none">
+      Connect eBay Account
+    </a>
+  </div>
+  <div id="ebay-oauth-content" style="color:#888780;font-size:12px;margin-bottom:14px">Loading...</div>
+  <div style="font-size:13px;font-weight:500;color:#f1efe8;margin-bottom:10px">API credentials</div>
   <div id="ebay-status-content" style="color:#888780;font-size:12px">Loading...</div>
 </div>
 
@@ -874,10 +882,41 @@ async function loadStats() {{
 
 async function loadEbayStatus() {{
   try {{
-    const r = await fetch('/api/ebay/status');
-    const d = await r.json();
+    const [sr, or_] = await Promise.all([
+      fetch('/api/ebay/status'),
+      fetch('/api/ebay/oauth/status'),
+    ]);
+    const d  = await sr.json();
+    const od = await or_.json();
+
+    // OAuth panel
+    let ohtml = '';
+    if (od.has_oauth_tokens) {{
+      const tokenBadge = od.access_token_valid
+        ? '<span class="badge-ok">OAuth token valid</span>'
+        : '<span class="badge-warn">OAuth token expired</span>';
+      const refreshBadge = od.refresh_token_valid
+        ? '<span class="badge-ok">refresh token valid</span>'
+        : '<span class="badge-warn">refresh token expired — reconnect</span>';
+      const exp = od.expires_at ? od.expires_at.slice(0,19).replace('T',' ') + ' UTC' : '?';
+      const rexp = od.refresh_expires_at ? od.refresh_expires_at.slice(0,10) : '?';
+      ohtml = `
+        <div class="status-row">${{tokenBadge}} ${{refreshBadge}}</div>
+        <div class="status-row"><span style="color:#888780">Access expires:</span><span>${{exp}}</span></div>
+        <div class="status-row"><span style="color:#888780">Refresh expires:</span><span>${{rexp}}</span></div>
+      `;
+    }} else if (od.using_env_token) {{
+      ohtml = `<div class="status-row"><span class="badge-warn">Using .env IAF token (not OAuth)</span>
+        <span style="color:#888780;margin-left:6px">Click "Connect eBay Account" to upgrade to OAuth</span></div>`;
+    }} else {{
+      ohtml = `<div class="status-row"><span class="badge-warn">No token configured</span>
+        <span style="color:#888780;margin-left:6px">Click "Connect eBay Account" to authorize</span></div>`;
+    }}
+    document.getElementById('ebay-oauth-content').innerHTML = ohtml;
+
+    // API credentials panel
     const connBadge = d.configured
-      ? '<span class="badge-ok">Connected</span>'
+      ? '<span class="badge-ok">Credentials OK</span>'
       : '<span class="badge-warn">Not configured</span>';
     const photoBadge = d.photo_hosting
       ? `<span class="badge-ok">${{d.photo_host||'cloudinary'}}</span>`
@@ -889,7 +928,7 @@ async function loadEbayStatus() {{
     `;
     if (!d.configured) {{
       html += `<div style="margin-top:10px;padding:10px;background:#2a1a00;border:1px solid #4a3000;border-radius:6px;font-size:12px;color:#fac775">
-        Add <code>EBAY_APP_ID</code>, <code>EBAY_CERT_ID</code>, <code>EBAY_DEV_ID</code>, and <code>EBAY_USER_TOKEN</code> to your <code>.env</code> file to enable direct publishing.
+        Add <code>EBAY_PROD_APP_ID</code>, <code>EBAY_PROD_CERT_ID</code>, and <code>EBAY_RUNAME</code> to your <code>.env</code> file.
       </div>`;
     }}
     document.getElementById('ebay-status-content').innerHTML = html;
