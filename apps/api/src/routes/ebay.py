@@ -102,7 +102,10 @@ def publish_batch(session: Session = Depends(get_session)):
             results["published"] += 1
         else:
             results["failed"] += 1
-            results["errors"].append(f"{item.sku}: {result.error}")
+            error_detail = result.error or "unknown error"
+            if result.details.get("body"):
+                error_detail += f" | eBay: {result.details['body']}"
+            results["errors"].append(f"{item.sku}: {error_detail}")
     return results
 
 @router.post("/publish/{sku}")
@@ -118,7 +121,10 @@ def publish_item(sku: str, session: Session = Depends(get_session)):
     client = EbayInventoryClient()
     result = client.publish_item(item)
     if not result.ok:
-        raise HTTPException(status_code=500, detail=result.error)
+        detail = result.error or "unknown error"
+        if result.details.get("body"):
+            detail += f" | eBay response: {result.details['body']}"
+        raise HTTPException(status_code=500, detail=detail)
     data = result.value
     item.listing_id = data["listing_id"]
     item.listing_url = data["listing_url"]
