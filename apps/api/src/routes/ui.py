@@ -261,7 +261,8 @@ function renderDetailPanel(it) {
     + '<button class="btn btn-gray"   style="font-size:12px;padding:5px 10px" onclick="detailAction(\\'review\\',\\'' + it.sku + '\\')">Send to review</button>'
     + '<button class="btn btn-purple" style="font-size:12px;padding:5px 10px" onclick="detailAction(\\'publish\\',\\'' + it.sku + '\\')">Publish to eBay</button>'
     + '<button class="btn btn-red"    style="font-size:12px;padding:5px 10px" onclick="detailAction(\\'reject\\',\\'' + it.sku + '\\')">Reject</button>'
-    + '</div>';
+    + '</div>'
+    + '<div id="dp-publish-result" style="margin-top:10px;font-size:12px"></div>';
 }
 
 function openDetail(it) {
@@ -742,7 +743,22 @@ async function detailAction(action, sku) {{
   }} else if (action === 'reject') {{
     await fetch('/api/items/bulk-reject', {{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{skus:[sku]}})}});
   }} else if (action === 'publish') {{
-    await fetch(`/api/ebay/publish/${{sku}}`, {{method:'POST'}});
+    const res = document.getElementById('dp-publish-result');
+    if (res) res.innerHTML = '<span style="color:#fac775">Publishing...</span>';
+    try {{
+      const r = await fetch(`/api/ebay/publish/${{sku}}`, {{method:'POST'}});
+      const d = await r.json();
+      if (r.ok) {{
+        const url = d.listing_url ? ` — <a href="${{d.listing_url}}" target="_blank" style="color:#5dcaa5">View listing</a>` : '';
+        if (res) res.innerHTML = `<span style="color:#5dcaa5">Listed! ID: ${{d.listing_id||'?'}}${{url}}</span>`;
+        load();
+      }} else {{
+        if (res) res.innerHTML = `<span style="color:#f09595">Error: ${{d.detail||d.error||'Unknown error'}}</span>`;
+      }}
+    }} catch(e) {{
+      if (res) res.innerHTML = `<span style="color:#f09595">Error: ${{e.message}}</span>`;
+    }}
+    return;
   }}
   closePanel(); load();
 }}
@@ -754,35 +770,87 @@ load();
 def _export_html() -> str:
     return f"""<!DOCTYPE html>
 <html lang="en">
-<head><meta charset="UTF-8"><title>Export — Resale AI</title>
+<head><meta charset="UTF-8"><title>Export Center — Resale AI</title>
 {_base_style()}
+<style>
+.export-card {{
+  background:#222220;border:1px solid #2c2c2a;border-radius:8px;padding:20px;
+  display:flex;flex-direction:column;
+}}
+.export-card-title {{ font-size:13px;font-weight:500;color:#f1efe8;margin-bottom:6px; }}
+.export-card-desc  {{ font-size:12px;color:#888780;margin-bottom:14px;flex:1; }}
+.export-count      {{ font-size:28px;font-weight:500;color:#5dcaa5;margin-bottom:2px; }}
+.export-count-label{{ font-size:11px;color:#888780;margin-bottom:14px; }}
+.export-msg        {{ margin-top:10px;font-size:12px; }}
+.status-panel      {{
+  background:#1a1a18;border:1px solid #2c2c2a;border-radius:8px;padding:18px;
+  margin-top:24px;max-width:700px;
+}}
+.status-row        {{ display:flex;gap:10px;align-items:center;margin-bottom:6px;font-size:12px;color:#d4d2c8; }}
+.badge-ok          {{ background:#085041;color:#9fe1cb;padding:2px 8px;border-radius:10px;font-size:11px; }}
+.badge-warn        {{ background:#3a2a00;color:#fac775;padding:2px 8px;border-radius:10px;font-size:11px; }}
+</style>
 </head>
 <body>
 {_nav("export")}
 <main>
 <h2>Export Center</h2>
 <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;max-width:700px">
-  <div style="background:#222220;border:1px solid #2c2c2a;border-radius:8px;padding:20px">
-    <div style="font-size:13px;font-weight:500;color:#f1efe8;margin-bottom:6px">eBay bulk upload CSV</div>
-    <div style="font-size:12px;color:#888780;margin-bottom:14px">
+
+  <!-- Card 1: Publish to eBay -->
+  <div class="export-card">
+    <div class="export-card-title">Publish to eBay</div>
+    <div class="export-card-desc">
+      Directly publish all approved items as live eBay listings with photos uploaded automatically.
+    </div>
+    <div class="export-count" id="publish-count">...</div>
+    <div class="export-count-label">items ready to publish</div>
+    <button class="btn btn-green" onclick="publishBatch()">Publish all to eBay</button>
+    <div class="export-msg" id="publish-msg"></div>
+  </div>
+
+  <!-- Card 2: eBay bulk CSV -->
+  <div class="export-card">
+    <div class="export-card-title">eBay bulk upload CSV</div>
+    <div class="export-card-desc">
       Exports all export-ready items to a CSV you can upload to eBay Seller Hub.
     </div>
-    <div style="font-size:24px;font-weight:500;color:#5dcaa5;margin-bottom:14px" id="ready-count">...</div>
-    <div style="font-size:12px;color:#888780;margin-bottom:14px">items ready</div>
+    <div class="export-count" id="ready-count">...</div>
+    <div class="export-count-label">items export-ready</div>
     <button class="btn btn-purple" onclick="generateCSV()">Generate eBay CSV</button>
-    <div id="csv-msg"></div>
+    <div class="export-msg" id="csv-msg"></div>
   </div>
-  <div style="background:#222220;border:1px solid #2c2c2a;border-radius:8px;padding:20px">
-    <div style="font-size:13px;font-weight:500;color:#f1efe8;margin-bottom:6px">Master inventory sheet</div>
-    <div style="font-size:12px;color:#888780;margin-bottom:14px">
+
+  <!-- Card 3: Master inventory sheet -->
+  <div class="export-card">
+    <div class="export-card-title">Master inventory sheet</div>
+    <div class="export-card-desc">
       Generates an Excel file with all items and their current status.
     </div>
-    <button class="btn btn-gray" onclick="generateSheet()">Generate master sheet</button>
-    <div id="sheet-msg"></div>
+    <button class="btn btn-gray" onclick="generateSheet()">Generate Excel</button>
+    <div class="export-msg" id="sheet-msg"></div>
   </div>
+
+  <!-- Card 4: Sync sold orders -->
+  <div class="export-card">
+    <div class="export-card-title">Sync sold orders</div>
+    <div class="export-card-desc">
+      Fetch sold orders from eBay and update profit records automatically.
+    </div>
+    <button class="btn btn-gray" onclick="syncSold()">Sync from eBay</button>
+    <div class="export-msg" id="sync-msg"></div>
+  </div>
+
 </div>
-<div style="margin-top:28px">
-  <h2>Upload instructions</h2>
+
+<!-- eBay connection status -->
+<div class="status-panel">
+  <div style="font-size:13px;font-weight:500;color:#f1efe8;margin-bottom:12px">eBay connection status</div>
+  <div id="ebay-status-content" style="color:#888780;font-size:12px">Loading...</div>
+</div>
+
+<div style="margin-top:28px;max-width:700px">
+  <h2>CSV upload instructions</h2>
   <ol style="font-size:13px;color:#888780;line-height:2;margin-left:20px;margin-top:10px">
     <li>Generate the eBay CSV above</li>
     <li>Open <strong style="color:#d4d2c8">eBay Seller Hub</strong> → Reports → Upload a file</li>
@@ -794,26 +862,92 @@ def _export_html() -> str:
 </main>
 <script>
 async function loadStats() {{
-  const r = await fetch('/api/export/stats');
-  const d = await r.json();
-  document.getElementById('ready-count').textContent = d.export_ready || 0;
+  const [sr, er] = await Promise.all([
+    fetch('/api/items/stats'),
+    fetch('/api/export/stats'),
+  ]);
+  const s = await sr.json();
+  const e = await er.json();
+  document.getElementById('publish-count').textContent = s._ready_to_publish || 0;
+  document.getElementById('ready-count').textContent   = e.export_ready || 0;
 }}
+
+async function loadEbayStatus() {{
+  try {{
+    const r = await fetch('/api/ebay/status');
+    const d = await r.json();
+    const connBadge = d.configured
+      ? '<span class="badge-ok">Connected</span>'
+      : '<span class="badge-warn">Not configured</span>';
+    const photoBadge = d.photo_hosting
+      ? `<span class="badge-ok">${{d.photo_host||'cloudinary'}}</span>`
+      : '<span class="badge-warn">local paths only</span>';
+    let html = `
+      <div class="status-row">${{connBadge}}<span style="color:#888780">Environment:</span><span>${{d.environment||'?'}}</span></div>
+      <div class="status-row"><span style="color:#888780">Marketplace:</span><span>${{d.marketplace||'?'}}</span></div>
+      <div class="status-row"><span style="color:#888780">Photo hosting:</span>${{photoBadge}}</div>
+    `;
+    if (!d.configured) {{
+      html += `<div style="margin-top:10px;padding:10px;background:#2a1a00;border:1px solid #4a3000;border-radius:6px;font-size:12px;color:#fac775">
+        Add <code>EBAY_APP_ID</code>, <code>EBAY_CERT_ID</code>, <code>EBAY_DEV_ID</code>, and <code>EBAY_USER_TOKEN</code> to your <code>.env</code> file to enable direct publishing.
+      </div>`;
+    }}
+    document.getElementById('ebay-status-content').innerHTML = html;
+  }} catch(e) {{
+    document.getElementById('ebay-status-content').textContent = 'Failed to load status.';
+  }}
+}}
+
+async function publishBatch() {{
+  document.getElementById('publish-msg').innerHTML = '<span style="color:#fac775">Publishing... this may take a moment.</span>';
+  try {{
+    const r = await fetch('/api/ebay/publish/batch', {{method:'POST'}});
+    const d = await r.json();
+    const msg = d.message || `Published: ${{d.published||0}}, Failed: ${{d.failed||0}}`;
+    const color = (d.failed||0) > 0 ? '#fac775' : '#5dcaa5';
+    document.getElementById('publish-msg').innerHTML = `<span style="color:${{color}}">${{msg}}</span>`;
+    if (d.errors && d.errors.length) {{
+      document.getElementById('publish-msg').innerHTML +=
+        '<div style="margin-top:6px;color:#f09595;font-size:11px">' + d.errors.join('<br>') + '</div>';
+    }}
+    loadStats();
+  }} catch(e) {{
+    document.getElementById('publish-msg').innerHTML = `<span style="color:#f09595">Error: ${{e.message}}</span>`;
+  }}
+}}
+
 async function generateCSV() {{
-  document.getElementById('csv-msg').innerHTML = '<div class="msg ok">Generating...</div>';
+  document.getElementById('csv-msg').innerHTML = '<span style="color:#fac775">Generating...</span>';
   const r = await fetch('/api/export/ebay-csv', {{method:'POST'}});
   const d = await r.json();
   document.getElementById('csv-msg').innerHTML =
-    `<div class="msg ok">${{d.message}}<br><small style="opacity:.7">${{d.path||''}}</small></div>`;
+    `<span style="color:#5dcaa5">${{d.message}}</span><br><small style="color:#888780">${{d.path||''}}</small>`;
   loadStats();
 }}
+
 async function generateSheet() {{
-  document.getElementById('sheet-msg').innerHTML = '<div class="msg ok">Generating...</div>';
+  document.getElementById('sheet-msg').innerHTML = '<span style="color:#fac775">Generating...</span>';
   const r = await fetch('/api/export/master-sheet', {{method:'POST'}});
   const d = await r.json();
   document.getElementById('sheet-msg').innerHTML =
-    `<div class="msg ok">${{d.message}}<br><small style="opacity:.7">${{d.path||''}}</small></div>`;
+    `<span style="color:#5dcaa5">${{d.message}}</span><br><small style="color:#888780">${{d.path||''}}</small>`;
 }}
+
+async function syncSold() {{
+  document.getElementById('sync-msg').innerHTML = '<span style="color:#fac775">Syncing...</span>';
+  try {{
+    const r = await fetch('/api/ebay/sync-sold', {{method:'POST'}});
+    const d = await r.json();
+    const matched = d.matched !== undefined ? d.matched : (d.orders_matched || 0);
+    document.getElementById('sync-msg').innerHTML =
+      `<span style="color:#5dcaa5">Matched: ${{matched}} orders</span>`;
+  }} catch(e) {{
+    document.getElementById('sync-msg').innerHTML = `<span style="color:#f09595">Error: ${{e.message}}</span>`;
+  }}
+}}
+
 loadStats();
+loadEbayStatus();
 </script>
 </body></html>"""
 
