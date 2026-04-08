@@ -26,31 +26,6 @@ def ebay_status():
         "photo_host": "cloudinary" if uploader.is_configured() else "local_paths_only",
     }
 
-@router.post("/publish/{sku}")
-def publish_item(sku: str, session: Session = Depends(get_session)):
-    from packages.ebay.src.inventory_client import EbayInventoryClient
-    import datetime
-    repo = ItemRepository(session)
-    item = repo.get_by_sku(sku)
-    if not item:
-        raise HTTPException(status_code=404, detail=f"Item {sku} not found")
-    if item.status not in (ItemStatus.APPROVED, ItemStatus.EXPORT_READY):
-        raise HTTPException(status_code=400, detail=f"Item must be approved. Current status: {item.status}")
-    client = EbayInventoryClient()
-    result = client.publish_item(item)
-    if not result.ok:
-        raise HTTPException(status_code=500, detail=result.error)
-    data = result.value
-    item.listing_id = data["listing_id"]
-    item.listing_url = data["listing_url"]
-    item.status = ItemStatus.LISTED
-    item.platform = "ebay"
-    item.date_listed = datetime.datetime.utcnow()
-    if data["photo_urls"]:
-        item.image_paths = data["photo_urls"]
-    repo.upsert(item)
-    return {"sku": sku, "listing_id": data["listing_id"], "listing_url": data["listing_url"], "status": "listed", "photos_uploaded": len(data["photo_urls"])}
-
 @router.post("/publish/batch")
 def publish_batch(session: Session = Depends(get_session)):
     from packages.ebay.src.inventory_client import EbayInventoryClient
@@ -78,6 +53,31 @@ def publish_batch(session: Session = Depends(get_session)):
             results["failed"] += 1
             results["errors"].append(f"{item.sku}: {result.error}")
     return results
+
+@router.post("/publish/{sku}")
+def publish_item(sku: str, session: Session = Depends(get_session)):
+    from packages.ebay.src.inventory_client import EbayInventoryClient
+    import datetime
+    repo = ItemRepository(session)
+    item = repo.get_by_sku(sku)
+    if not item:
+        raise HTTPException(status_code=404, detail=f"Item {sku} not found")
+    if item.status not in (ItemStatus.APPROVED, ItemStatus.EXPORT_READY):
+        raise HTTPException(status_code=400, detail=f"Item must be approved. Current status: {item.status}")
+    client = EbayInventoryClient()
+    result = client.publish_item(item)
+    if not result.ok:
+        raise HTTPException(status_code=500, detail=result.error)
+    data = result.value
+    item.listing_id = data["listing_id"]
+    item.listing_url = data["listing_url"]
+    item.status = ItemStatus.LISTED
+    item.platform = "ebay"
+    item.date_listed = datetime.datetime.utcnow()
+    if data["photo_urls"]:
+        item.image_paths = data["photo_urls"]
+    repo.upsert(item)
+    return {"sku": sku, "listing_id": data["listing_id"], "listing_url": data["listing_url"], "status": "listed", "photos_uploaded": len(data["photo_urls"])}
 
 @router.post("/sync-sold")
 def sync_sold(session: Session = Depends(get_session)):
