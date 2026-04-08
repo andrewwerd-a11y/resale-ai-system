@@ -11,9 +11,22 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
 
 import httpx
+
+CONDITION_MAP = {
+    "1000": "NEW",
+    "1500": "NEW_OTHER",
+    "2000": "NEW_WITH_DEFECTS",
+    "2500": "NEW_OTHER",
+    "3000": "LIKE_NEW",
+    "4000": "VERY_GOOD",
+    "5000": "USED_GOOD",
+    "6000": "USED_ACCEPTABLE",
+    "7000": "FOR_PARTS_OR_NOT_WORKING",
+}
 
 from packages.core.src.result import Result
 from packages.domain.src.entities.item import Item
@@ -155,21 +168,27 @@ class EbayInventoryClient:
     # ── Payload builders ──────────────────────────────────────────────────────
 
     def _build_inventory_payload(self, item: Item, photo_urls: list[str]) -> dict:
+        raw = str(item.condition_id or "5000")
+        digits_only = re.sub(r"[^0-9]", "", raw)[:4]
+        condition = CONDITION_MAP.get(digits_only, "USED_GOOD")
+
+        product: dict = {
+            "title": (item.title_final or item.title_raw or "")[:80],
+            "description": item.description_final or item.title_final or "",
+            "aspects": self._build_aspects(item),
+        }
+        if photo_urls:
+            product["imageUrls"] = photo_urls[:12]
+
         payload: dict = {
-            "product": {
-                "title": (item.title_final or item.title_raw or "")[:80],
-                "description": item.description_final or item.title_final or "",
-                "aspects": self._build_aspects(item),
-            },
-            "condition": item.condition_id or "USED_GOOD",
+            "product": product,
+            "condition": condition,
             "availability": {
                 "shipToLocationAvailability": {"quantity": 1}
             },
         }
         if item.condition_notes:
             payload["conditionDescription"] = item.condition_notes[:1000]
-        if photo_urls:
-            payload["product"]["imageUrls"] = photo_urls[:12]
         return payload
 
     def _build_aspects(self, item: Item) -> dict[str, list[str]]:
@@ -219,6 +238,7 @@ class EbayInventoryClient:
             "Authorization": f"Bearer {self.auth.user_token}",
             "Content-Type": "application/json",
             "Accept": "application/json",
+            "Content-Language": "en-US",
             "X-EBAY-C-MARKETPLACE-ID": self.auth.marketplace_id,
         }
 
