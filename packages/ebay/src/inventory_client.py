@@ -16,6 +16,14 @@ from pathlib import Path
 
 import httpx
 
+CATEGORY_MAP = {
+    "books":        "29223",   # Books > Antiquarian & Collectible
+    "clothing":     "11450",   # Clothing, Shoes & Accessories > Women > Clothing
+    "shoes":        "93427",   # Shoes
+    "collectibles": "1",       # Collectibles
+    "toys":         "19009",   # Toys & Hobbies > Dolls & Bears
+}
+
 CONDITION_MAP = {
     "1000": "NEW",
     "1500": "NEW_OTHER",
@@ -209,27 +217,32 @@ class EbayInventoryClient:
         return aspects
 
     def _build_offer_payload(self, item: Item, policies: dict) -> dict:
-        payload: dict = {
+        price = round(float(item.list_price or item.estimated_price or 9.99), 2)
+        category_id = str(
+            item.ebay_category_id
+            or CATEGORY_MAP.get(item.category_key or "", "")
+            or "99"
+        )
+        return {
             "sku": item.sku,
             "marketplaceId": self.auth.marketplace_id,
             "format": "FIXED_PRICE",
             "availableQuantity": 1,
-            "categoryId": item.ebay_category_id or "99",
+            "categoryId": category_id,
+            "listingDescription": item.description_final or item.title_final or "",
+            "listingPolicies": {
+                "fulfillmentPolicyId": policies.get("fulfillment_id", ""),
+                "paymentPolicyId":     policies.get("payment_id", ""),
+                "returnPolicyId":      policies.get("return_id", ""),
+            },
             "pricingSummary": {
                 "price": {
-                    "value": str(round(float(item.list_price or item.estimated_price or 9.99), 2)),
                     "currency": "USD",
+                    "value": f"{price:.2f}",
                 }
             },
-            "listingPolicies": {},
+            "includeCatalogProductDetails": False,
         }
-        if policies.get("fulfillment_id"):
-            payload["listingPolicies"]["fulfillmentPolicyId"] = policies["fulfillment_id"]
-        if policies.get("payment_id"):
-            payload["listingPolicies"]["paymentPolicyId"] = policies["payment_id"]
-        if policies.get("return_id"):
-            payload["listingPolicies"]["returnPolicyId"] = policies["return_id"]
-        return payload
 
     # ── HTTP helpers ──────────────────────────────────────────────────────────
 
