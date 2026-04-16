@@ -223,17 +223,22 @@ class EbayInventoryClient:
             or CATEGORY_MAP.get(item.category_key or "", "")
             or "99"
         )
+        # Derive country code from marketplace ID (e.g. "EBAY_US" → "US")
+        marketplace_id = self.auth.marketplace_id
+        country_code = marketplace_id.split("_", 1)[-1] if "_" in marketplace_id else "US"
         return {
             "sku": item.sku,
-            "marketplaceId": self.auth.marketplace_id,
+            "marketplaceId": marketplace_id,
             "format": "FIXED_PRICE",
             "availableQuantity": 1,
             "categoryId": category_id,
             "listingDescription": item.description_final or item.title_final or "",
+            "merchantLocationKey": "default",
             "listingPolicies": {
                 "fulfillmentPolicyId": policies.get("fulfillment_id", ""),
                 "paymentPolicyId":     policies.get("payment_id", ""),
                 "returnPolicyId":      policies.get("return_id", ""),
+                "countryCode":         country_code,
             },
             "pricingSummary": {
                 "price": {
