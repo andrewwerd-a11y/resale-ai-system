@@ -77,7 +77,7 @@ def run_category_intelligence(
     mode = "[yellow]RESET — re-fetching all[/yellow]" if reset else "skipping already-fetched"
     console.print(f"Processing [green]{len(skus)}[/green] items ({mode})\n")
 
-    stats: dict[str, int] = {"updated": 0, "skipped": 0, "failed": 0}
+    stats: dict[str, int] = {"updated": 0, "skipped": 0, "failed": 0, "suggestion": 0, "fallback": 0}
     category_hits: dict[str, int] = {}   # category_id → item count
 
     with Progress(
@@ -105,7 +105,18 @@ def run_category_intelligence(
                     # get_category_id re-derives it from category_key + title
                     if reset:
                         item.ebay_category_id = None
-                    cat_id = cat_intel.get_category_id(item)
+
+                    # Try Suggestions API first; track source for reporting
+                    suggestion = cat_intel.suggest_category(item)
+                    if suggestion.ok:
+                        cat_id, cat_name = suggestion.value
+                        source = "suggestion"
+                        stats["suggestion"] += 1
+                    else:
+                        cat_id, cat_name = cat_intel.get_category_id(item)
+                        source = "fallback"
+                        stats["fallback"] += 1
+
                     result = cat_intel.get_template(cat_id)
 
                     if not result.ok:
@@ -122,7 +133,7 @@ def run_category_intelligence(
 
                     # Update item fields
                     item.ebay_category_id = cat_id
-                    item.ebay_category_name = template.category_name
+                    item.ebay_category_name = cat_name or template.category_name
                     item.category_template_fetched = True
                     item.category_template_fetched_at = datetime.utcnow().isoformat()
 
@@ -144,6 +155,11 @@ def run_category_intelligence(
                     item.updated_at = datetime.utcnow()
                     repo.upsert(item)
 
+                    source_tag = "[green]✓ suggest[/green]" if source == "suggestion" else "[yellow]↩ fallback[/yellow]"
+                    console.print(
+                        f"  {source_tag} {sku} → {cat_id} {cat_name or template.category_name}",
+                        highlight=False,
+                    )
                     category_hits[cat_id] = category_hits.get(cat_id, 0) + 1
                     stats["updated"] += 1
 
@@ -155,6 +171,8 @@ def run_category_intelligence(
 
     console.rule("Complete")
     console.print(f"  [green]Updated  : {stats['updated']}[/green]")
+    console.print(f"  [green]  ✓ via eBay Suggestions API : {stats['suggestion']}[/green]")
+    console.print(f"  [yellow]  ↩ via CATEGORY_MAP fallback : {stats['fallback']}[/yellow]")
     console.print(f"  [yellow]Skipped  : {stats['skipped']}[/yellow]")
     console.print(f"  [red]Failed   : {stats['failed']}[/red]")
 

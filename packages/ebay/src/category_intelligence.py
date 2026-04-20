@@ -1,22 +1,23 @@
 """
 Category Intelligence Layer.
 
-Queries eBay's Taxonomy API to fetch required and recommended
-item specifics for any given category. Returns a field template
-that drives the review queue display and Claude enrichment.
+Category resolution order:
+  1. eBay Category Suggestions API — title-based, always returns valid leaf IDs
+  2. CATEGORY_MAP — static fallback when Suggestions API is unavailable
 
-eBay Taxonomy API endpoint:
-GET /commerce/taxonomy/v1/category_tree/0/get_item_aspects_for_category
-    ?category_id={id}
+Item aspects fetched via:
+  GET https://api.ebay.com/commerce/taxonomy/v1/category_tree/0/get_item_aspects_for_category
+      ?category_id={leaf_id}
 
 Uses App token (not user token) — no user auth required.
-Results cached per category_id to avoid repeated API calls.
+Templates cached per category_id; suggestions cached per title hash.
 """
 from __future__ import annotations
 
 import base64
+import hashlib
 import logging
-from dataclasses import dataclass, field as dc_field
+from dataclasses import dataclass
 from datetime import datetime
 
 import httpx
@@ -27,41 +28,35 @@ from packages.ebay.src.auth import EbayAuth
 
 logger = logging.getLogger(__name__)
 
+# Taxonomy API is always production — it is not sandboxed.
+_TAXONOMY_HOST = "https://api.ebay.com"
+
+# Static fallback map — used only when Suggestions API is unavailable.
 CATEGORY_MAP: dict[str, str] = {
     # Books
     "books":          "29223",   # Books > Antiquarian & Collectible
-    "books_general":  "29223",   # Books > Antiquarian & Collectible
+    "books_general":  "29223",
     # Clothing
     "clothing":       "53159",   # Clothing > Women > Tops
-    "clothing_women": "53159",   # Clothing > Women > Tops
+    "clothing_women": "53159",
     "clothing_men":   "57990",   # Clothing > Men > Shirts
     # Shoes
     "shoes":          "95672",   # Shoes > Women > Flats
-    "shoes_women":    "95672",   # Shoes > Women > Flats
+    "shoes_women":    "95672",
     "shoes_men":      "93427",   # Shoes > Men > Boots
     # Collectibles
     "collectibles":   "40143",   # Collectibles > Decorative Collectibles
-    # Toys — verified leaf categories
+    # Toys
     "toys":           "48084",   # Toys & Hobbies > Stuffed Animals > Bears
     "dolls":          "44201",   # Dolls & Bears > Dolls > Porcelain & China
-    "plush":          "48084",   # Toys & Hobbies > Stuffed Animals > Bears
-    "bears":          "48084",   # Toys & Hobbies > Stuffed Animals > Bears
+    "plush":          "48084",
+    "bears":          "48084",
     # Handbags
     "handbags":       "169291",  # Handbags & Purses > Handbags
 }
 
-# Ordered list of known-good fallback leaf category IDs tried when the primary fails.
+# Generic fallback chain for get_template when the resolved category ID fails.
 _FALLBACK_CHAIN = ["29223", "53159", "40143", "95672", "57990"]
-
-# Per-category parent fallbacks for error 62005 ("does not belong to category tree").
-# Tried before the generic chain so we stay in the right department.
-_PARENT_FALLBACKS: dict[str, str] = {
-    "48084": "166697",   # Stuffed Animals → Stuffed Animals parent
-    "44201": "2390",     # Porcelain Dolls → Dolls parent
-}
-
-# The Taxonomy API always runs on the production host — it is not sandboxed.
-_TAXONOMY_HOST = "https://api.ebay.com"
 
 
 @dataclass
@@ -86,9 +81,79 @@ class ValidationResult:
 class CategoryIntelligence:
     def __init__(self) -> None:
         self.auth = EbayAuth()
-        self._cache: dict[str, CategoryTemplate] = {}
+        self._template_cache: dict[str, CategoryTemplate] = {}
+        self._suggestion_cache: dict[str, tuple[str, str]] = {}  # title_hash → (id, name)
 
     # ── Public API ─────────────────────────────────────────────────────────────
+
+    def suggest_category(self, item: Item) -> Result[tuple[str, str]]:
+        """
+        Ask eBay's Taxonomy API to suggest the correct leaf category
+        based on the item title. Returns (category_id, category_name).
+        Uses App token. Results cached by title hash.
+        """
+        title = item.title_final or item.title_raw or ""
+        if not title:
+            return Result.failure("no_title_for_suggestion")
+
+        title_hash = hashlib.md5(title[:80].encode()).hexdigest()
+        if title_hash in self._suggestion_cache:
+            return Result.success(self._suggestion_cache[title_hash])
+
+        token = self._get_app_token() or self.auth.get_user_token()
+        if not token:
+            return Result.failure("No eBay token available")
+
+        url = (
+            f"{_TAXONOMY_HOST}/commerce/taxonomy/v1/category_tree/0"
+            f"/get_category_suggestions"
+        )
+        print(f"[CategoryIntelligence] SUGGEST {url}?q={title[:60]!r}")
+        try:
+            resp = httpx.get(
+                url,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Accept": "application/json",
+                },
+                params={"q": title[:80]},
+                timeout=15,
+            )
+        except Exception as exc:
+            return Result.failure(f"suggestion_error: {exc}")
+
+        if resp.status_code != 200:
+            return Result.failure(f"suggestion_failed: {resp.status_code} {resp.text[:200]}")
+
+        suggestions = resp.json().get("categorySuggestions", [])
+        if not suggestions:
+            return Result.failure("suggestion_empty: no results returned")
+
+        cat = suggestions[0]["category"]
+        category_id = cat["categoryId"]
+        category_name = cat["categoryName"]
+        self._suggestion_cache[title_hash] = (category_id, category_name)
+        logger.info(
+            "Suggested category for %r: %s (%s)", title[:40], category_id, category_name
+        )
+        return Result.success((category_id, category_name))
+
+    def get_category_id(self, item: Item) -> tuple[str, str]:
+        """
+        Return (category_id, category_name) for an item.
+        Tries eBay Category Suggestions API first (title-based, always leaf IDs).
+        Falls back to CATEGORY_MAP when the API is unavailable.
+        """
+        suggestion = self.suggest_category(item)
+        if suggestion.ok:
+            return suggestion.value
+
+        logger.debug(
+            "Suggestion unavailable for %s (%s), using CATEGORY_MAP",
+            item.sku, suggestion.error,
+        )
+        fallback_id = CATEGORY_MAP.get(item.category_key or "", "29223")
+        return (fallback_id, item.category_key or "unknown")
 
     def get_template(self, category_id: str) -> Result[CategoryTemplate]:
         """
@@ -97,21 +162,19 @@ class CategoryIntelligence:
         and field_constraints (allowed values per field).
         Cached per category_id for the session.
         """
-        if category_id in self._cache:
-            return Result.success(self._cache[category_id])
+        if category_id in self._template_cache:
+            return Result.success(self._template_cache[category_id])
 
         s = self.auth.settings
         token = self._get_app_token() or self.auth.get_user_token()
         if not token:
             return Result.failure("No eBay token available", error_code="NO_TOKEN")
 
-        # Taxonomy API is production-only — sandbox host returns 404/400 for
-        # categories that exist in the real tree.
         url = (
             f"{_TAXONOMY_HOST}/commerce/taxonomy/v1/category_tree/0"
             f"/get_item_aspects_for_category?category_id={category_id}"
         )
-        print(f"[CategoryIntelligence] GET {url}")
+        print(f"[CategoryIntelligence] ASPECTS {url}")
         try:
             resp = httpx.get(
                 url,
@@ -128,32 +191,19 @@ class CategoryIntelligence:
 
         if resp.status_code != 200:
             logger.warning(
-                "Category taxonomy fetch failed for %s: %s %s",
+                "Category aspects fetch failed for %s: %s %s",
                 category_id, resp.status_code, resp.text[:300],
             )
-            # On error 62005 ("does not belong to category tree"), try the
-            # designated parent category for this ID first.
-            error_id = None
-            try:
-                error_id = resp.json()["errors"][0]["errorId"]
-            except Exception:
-                pass
-
-            fallback_ids: list[str] = []
-            if error_id == 62005 and category_id in _PARENT_FALLBACKS:
-                fallback_ids.append(_PARENT_FALLBACKS[category_id])
-            fallback_ids.extend(
-                fid for fid in _FALLBACK_CHAIN if fid != category_id
-            )
-
-            for fallback_id in fallback_ids:
-                fallback_result = self._fetch_raw(fallback_id, token, s)
-                if fallback_result is not None:
-                    logger.info(
-                        "Using fallback category %s for %s", fallback_id, category_id
-                    )
-                    template = self._parse_template(category_id, fallback_result)
-                    self._cache[category_id] = template
+            # Try generic fallback chain — category IDs from suggestions should
+            # never hit this path, but static CATEGORY_MAP fallbacks might.
+            for fallback_id in _FALLBACK_CHAIN:
+                if fallback_id == category_id:
+                    continue
+                raw = self._fetch_aspects_raw(fallback_id, token, s)
+                if raw is not None:
+                    logger.info("Using fallback aspects from %s for %s", fallback_id, category_id)
+                    template = self._parse_template(category_id, raw)
+                    self._template_cache[category_id] = template
                     return Result.success(template)
             return Result.failure(
                 f"eBay API {resp.status_code}: {resp.text[:200]}",
@@ -162,68 +212,20 @@ class CategoryIntelligence:
 
         raw = resp.json()
         template = self._parse_template(category_id, raw)
-        self._cache[category_id] = template
+        self._template_cache[category_id] = template
         logger.info(
-            "Fetched category template for %s (%s): %d required, %d recommended",
+            "Fetched aspects for %s (%s): %d required, %d recommended",
             category_id, template.category_name,
             len(template.required_fields), len(template.recommended_fields),
         )
         return Result.success(template)
-
-    def get_category_id(self, item: Item) -> str:
-        """
-        Return best leaf category_id for item based on category_key, type, and title.
-        All returned IDs are verified eBay leaf categories.
-        """
-        if item.ebay_category_id:
-            return str(item.ebay_category_id)
-
-        category = item.category_key or ""
-        item_type = (item.type or "").lower()
-        title = (item.title_final or item.title_raw or "").lower()
-
-        if category == "toys":
-            if any(w in title or w in item_type for w in ["doll", "porcelain", "victorian", "raggedy"]):
-                return "44201"  # Dolls & Bears > Dolls > Porcelain & China
-            if any(w in title or w in item_type for w in ["bear", "plush", "stuffed", "care bear"]):
-                return "48084"  # Toys & Hobbies > Stuffed Animals > Bears
-            return "48084"      # default toys → stuffed animals
-
-        if category == "books":
-            # All book sub-types use the same leaf (11092 not valid in sandbox)
-            return "29223"  # Books > Antiquarian & Collectible
-
-        if category == "clothing":
-            dept = (item.department or "").lower()
-            if "men" in dept and "women" not in dept:
-                return "57990"  # Clothing > Men > Shirts
-            return "53159"      # Clothing > Women > Tops
-
-        if category == "shoes":
-            dept = (item.department or "").lower()
-            if "men" in dept and "women" not in dept:
-                return "93427"  # Shoes > Men > Boots
-            return "95672"      # Shoes > Women > Flats
-
-        if category == "collectibles":
-            return "40143"      # Collectibles > Decorative Collectibles
-
-        if category == "handbags":
-            return "169291"     # Handbags & Purses > Handbags
-
-        # Exact CATEGORY_MAP lookup for any other key
-        if category in CATEGORY_MAP:
-            return CATEGORY_MAP[category]
-
-        return "29223"          # safe fallback — Books > Antiquarian
 
     def validate_item_specifics(
         self, item: Item, template: CategoryTemplate
     ) -> ValidationResult:
         """
         Check which required fields are missing or invalid.
-        Returns list of missing required fields and list of
-        missing recommended fields. Never mutates the item.
+        Never mutates the item.
         """
         item_vals = self._flatten_item_values(item)
 
@@ -256,9 +258,8 @@ class CategoryIntelligence:
         self, item: Item, template: CategoryTemplate
     ) -> dict:
         """
-        Return a dict of field suggestions based on template +
-        existing item data. Does NOT write to DB — returns suggestions
-        only. Caller decides whether to apply.
+        Return field suggestions from template constraints.
+        Does NOT write to DB — caller decides whether to apply.
         """
         suggestions: dict[str, str] = {}
         for field_name in template.required_fields + template.recommended_fields:
@@ -269,13 +270,13 @@ class CategoryIntelligence:
 
     # ── Internal ────────────────────────────────────────────────────────────────
 
-    def _fetch_raw(self, category_id: str, token: str, s) -> dict | None:
-        """Fetch raw taxonomy response for a category. Returns None on any failure."""
+    def _fetch_aspects_raw(self, category_id: str, token: str, s) -> dict | None:
+        """Fetch raw aspects response for a category. Returns None on failure."""
         url = (
             f"{_TAXONOMY_HOST}/commerce/taxonomy/v1/category_tree/0"
             f"/get_item_aspects_for_category?category_id={category_id}"
         )
-        print(f"[CategoryIntelligence] GET {url}  (fallback)")
+        print(f"[CategoryIntelligence] ASPECTS {url}  (fallback)")
         try:
             resp = httpx.get(
                 url,
@@ -288,7 +289,7 @@ class CategoryIntelligence:
             )
             if resp.status_code == 200:
                 return resp.json()
-            logger.debug("Fallback %s returned %s", category_id, resp.status_code)
+            logger.debug("Fallback aspects %s → %s", category_id, resp.status_code)
         except Exception:
             pass
         return None
@@ -331,10 +332,7 @@ class CategoryIntelligence:
             name = aspect.get("localizedAspectName", "")
             if not name:
                 continue
-            usage = (
-                aspect.get("aspectConstraint", {})
-                .get("aspectUsage", "OPTIONAL")
-            )
+            usage = aspect.get("aspectConstraint", {}).get("aspectUsage", "OPTIONAL")
             allowed: list[str] = [
                 v.get("localizedValue", "")
                 for v in aspect.get("aspectValues", [])
@@ -342,13 +340,11 @@ class CategoryIntelligence:
             ]
             if allowed:
                 field_constraints[name] = allowed
-
             if usage == "REQUIRED":
                 required_fields.append(name)
             elif usage == "RECOMMENDED":
                 recommended_fields.append(name)
 
-        # Try to pull category name from the response
         ancestors = raw.get("categoryTreeNodeAncestors", [])
         cat_name = ancestors[-1].get("categoryName", "") if ancestors else ""
         if not cat_name:
@@ -367,7 +363,6 @@ class CategoryIntelligence:
     def _flatten_item_values(self, item: Item) -> dict[str, str]:
         """Build a flat case-normalised dict of all item field values."""
         vals: dict[str, str] = {}
-        # Known scalar attributes
         for attr in [
             "brand", "type", "color", "size", "material", "style", "pattern",
             "department", "author", "publisher", "format", "edition", "era",
@@ -377,11 +372,9 @@ class CategoryIntelligence:
         ]:
             val = getattr(item, attr, None)
             if val:
-                # Store under both the raw attr name and the eBay-style title-case key
                 vals[attr] = str(val)
                 vals[attr.replace("_", " ").title()] = str(val)
                 vals[attr.lower()] = str(val)
-        # item_specifics dict
         if isinstance(item.item_specifics, dict):
             for k, v in item.item_specifics.items():
                 if v:
@@ -393,7 +386,6 @@ class CategoryIntelligence:
 
     @staticmethod
     def _lookup(vals: dict[str, str], field_name: str) -> str:
-        """Try several normalisations of field_name against vals."""
         return (
             vals.get(field_name)
             or vals.get(field_name.lower())

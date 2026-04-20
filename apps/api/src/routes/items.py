@@ -219,14 +219,14 @@ def run_category_intelligence(sku: str, session: Session = Depends(get_session))
 
     cat_intel = CategoryIntelligence()
     cat_sheet = CategorySpreadsheet()
-    cat_id = cat_intel.get_category_id(item)
+    cat_id, cat_name = cat_intel.get_category_id(item)
     result = cat_intel.get_template(cat_id)
     if not result.ok:
         raise HTTPException(status_code=502, detail=result.error)
 
     template = result.value
     item.ebay_category_id = cat_id
-    item.ebay_category_name = template.category_name
+    item.ebay_category_name = cat_name or template.category_name
     item.category_template_fetched = True
     item.category_template_fetched_at = datetime.utcnow().isoformat()
     cat_sheet.save_template(template)
