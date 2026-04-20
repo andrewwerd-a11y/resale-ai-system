@@ -40,6 +40,12 @@ class Item(BaseModel):
     category_key: str | None = None
     category_label: str | None = None
     ebay_category_id: str | None = None
+    ebay_category_name: str | None = None
+    category_template_fetched: bool = False
+    category_template_fetched_at: str | None = None
+    missing_required_fields: list[str] = Field(default_factory=list)
+    missing_recommended_fields: list[str] = Field(default_factory=list)
+    publish_ready: bool = False
 
     # Titles / description
     title_raw: str | None = None

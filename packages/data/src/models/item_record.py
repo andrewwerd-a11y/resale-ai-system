@@ -29,6 +29,12 @@ class ItemRecord(SQLModel, table=True):
     category_key: Optional[str] = Field(default=None, index=True)
     category_label: Optional[str] = None
     ebay_category_id: Optional[str] = None
+    ebay_category_name: Optional[str] = None
+    category_template_fetched: int = Field(default=0)
+    category_template_fetched_at: Optional[str] = None
+    missing_required_fields: Optional[str] = None    # JSON list
+    missing_recommended_fields: Optional[str] = None  # JSON list
+    publish_ready: int = Field(default=0)
 
     # Titles
     title_raw: Optional[str] = None

@@ -15,7 +15,7 @@ from packages.pricing.src.price_researcher import PriceResearcher
 
 logger = logging.getLogger(__name__)
 
-SYSTEM_PROMPT = """You are an expert eBay reseller with deep knowledge of secondhand market pricing \
+_SYSTEM_PROMPT_BASE = """You are an expert eBay reseller with deep knowledge of secondhand market pricing \
 and listing optimization. You will receive structured data about a resale item \
 extracted from photos by a vision model. Your job is to:
 
@@ -37,6 +37,66 @@ Return ONLY valid JSON matching this schema:
   "enrichment_notes": "any concerns or flags",
   "enrichment_confidence": 0.00
 }"""
+
+# Kept for backwards compatibility — used when no category template is available
+SYSTEM_PROMPT = _SYSTEM_PROMPT_BASE
+
+
+def _build_system_prompt(item) -> str:
+    """Build a system prompt that includes category intelligence when available."""
+    base = _SYSTEM_PROMPT_BASE
+    category_section = _build_category_section(item)
+    if category_section:
+        return base + "\n\n" + category_section
+    return base
+
+
+def _build_category_section(item) -> str:
+    """Build the category intelligence addendum for the system prompt."""
+    cat_id = getattr(item, "ebay_category_id", None)
+    cat_name = getattr(item, "ebay_category_name", None)
+    missing_req = getattr(item, "missing_required_fields", []) or []
+    missing_rec = getattr(item, "missing_recommended_fields", []) or []
+
+    if not cat_id:
+        return ""
+
+    # Try to load field constraints from the spreadsheet
+    field_constraints: dict = {}
+    try:
+        from packages.ebay.src.category_spreadsheet import CategorySpreadsheet
+        sheet = CategorySpreadsheet()
+        template = sheet.load_template(cat_id)
+        if template:
+            field_constraints = template.field_constraints
+    except Exception:
+        pass
+
+    lines = [
+        f"The item belongs to eBay category: {cat_name or cat_id} (ID: {cat_id})",
+        "",
+    ]
+    if missing_req:
+        lines.append("Required fields for this category that MUST be in your item_specifics response:")
+        for f in missing_req:
+            allowed = field_constraints.get(f, [])
+            hint = f" (allowed: {', '.join(allowed[:8])}{'...' if len(allowed) > 8 else ''})" if allowed else ""
+            lines.append(f"  - {f}{hint}")
+        lines.append("")
+    if missing_rec:
+        lines.append("Recommended fields for this category (fill if determinable):")
+        for f in missing_rec:
+            lines.append(f"  - {f}")
+        lines.append("")
+    if field_constraints and not missing_req and not missing_rec:
+        lines.append("All required fields are present. Verify values are accurate.")
+    lines.append(
+        "Fill all required fields in item_specifics. "
+        "Use allowed values where constraints exist. "
+        "If you cannot determine a required field value from the item data, "
+        "use the most common/safe default from the allowed values list."
+    )
+    return "\n".join(lines)
 
 _PROTECTED = frozenset({
     "sku", "status", "batch_id", "photo_folder", "image_paths",
@@ -104,7 +164,7 @@ class ItemEnricher:
             response = client.messages.create(
                 model=self.settings.enrichment_model,
                 max_tokens=2048,
-                system=SYSTEM_PROMPT,
+                system=_build_system_prompt(item),
                 messages=[{"role": "user", "content": user_message}],
             )
 

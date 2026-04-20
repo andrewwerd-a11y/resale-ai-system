@@ -200,6 +200,132 @@ def analyze_single(sku: str, session: Session = Depends(get_session)):
             "confidence": item.confidence_score}
 
 
+@router.post("/{sku}/category-intelligence")
+def run_category_intelligence(sku: str, session: Session = Depends(get_session)):
+    """
+    Re-run category intelligence for a single item.
+    Triggered by title or category changes in review queue.
+    Never triggered by item specifics changes.
+    Returns updated template and validation result.
+    """
+    from datetime import datetime
+    from packages.ebay.src.category_intelligence import CategoryIntelligence
+    from packages.ebay.src.category_spreadsheet import CategorySpreadsheet
+
+    repo = ItemRepository(session)
+    item = repo.get_by_sku(sku)
+    if not item:
+        raise HTTPException(status_code=404, detail=f"Item {sku} not found")
+
+    cat_intel = CategoryIntelligence()
+    cat_sheet = CategorySpreadsheet()
+    cat_id = cat_intel.get_category_id(item)
+    result = cat_intel.get_template(cat_id)
+    if not result.ok:
+        raise HTTPException(status_code=502, detail=result.error)
+
+    template = result.value
+    item.ebay_category_id = cat_id
+    item.ebay_category_name = template.category_name
+    item.category_template_fetched = True
+    item.category_template_fetched_at = datetime.utcnow().isoformat()
+    cat_sheet.save_template(template)
+
+    validation = cat_intel.validate_item_specifics(item, template)
+    item.missing_required_fields = validation.missing_required
+    item.missing_recommended_fields = validation.missing_recommended
+    item.publish_ready = validation.is_publish_ready
+
+    review_reasons = list(item.review_reasons or [])
+    if validation.missing_required and "missing_required_specifics" not in review_reasons:
+        review_reasons.append("missing_required_specifics")
+    elif not validation.missing_required and "missing_required_specifics" in review_reasons:
+        review_reasons.remove("missing_required_specifics")
+    item.review_reasons = review_reasons
+    item.updated_at = datetime.utcnow()
+    repo.upsert(item)
+
+    return {
+        "sku": sku,
+        "category_id": cat_id,
+        "category_name": template.category_name,
+        "required_fields": template.required_fields,
+        "recommended_fields": template.recommended_fields,
+        "field_constraints": template.field_constraints,
+        "missing_required": validation.missing_required,
+        "missing_recommended": validation.missing_recommended,
+        "invalid_fields": validation.invalid_fields,
+        "publish_ready": validation.is_publish_ready,
+    }
+
+
+@router.get("/{sku}/category-template")
+def get_category_template(sku: str, session: Session = Depends(get_session)):
+    """Return current category template and validation status for item."""
+    from packages.ebay.src.category_intelligence import CategoryIntelligence
+    from packages.ebay.src.category_spreadsheet import CategorySpreadsheet
+
+    repo = ItemRepository(session)
+    item = repo.get_by_sku(sku)
+    if not item:
+        raise HTTPException(status_code=404, detail=f"Item {sku} not found")
+
+    cat_id = item.ebay_category_id
+    if not cat_id:
+        return {
+            "sku": sku,
+            "category_id": None,
+            "category_name": None,
+            "required_fields": [],
+            "recommended_fields": [],
+            "field_constraints": {},
+            "missing_required": list(item.missing_required_fields or []),
+            "missing_recommended": list(item.missing_recommended_fields or []),
+            "publish_ready": item.publish_ready,
+            "template_fetched": item.category_template_fetched,
+        }
+
+    # Try disk cache first, then in-memory fetch
+    sheet = CategorySpreadsheet()
+    template = sheet.load_template(cat_id)
+    if not template:
+        ci = CategoryIntelligence()
+        result = ci.get_template(cat_id)
+        if result.ok:
+            template = result.value
+
+    if not template:
+        return {
+            "sku": sku,
+            "category_id": cat_id,
+            "category_name": item.ebay_category_name,
+            "required_fields": [],
+            "recommended_fields": [],
+            "field_constraints": {},
+            "missing_required": list(item.missing_required_fields or []),
+            "missing_recommended": list(item.missing_recommended_fields or []),
+            "publish_ready": item.publish_ready,
+            "template_fetched": item.category_template_fetched,
+        }
+
+    ci = CategoryIntelligence()
+    validation = ci.validate_item_specifics(item, template)
+    return {
+        "sku": sku,
+        "category_id": cat_id,
+        "category_name": template.category_name,
+        "required_fields": template.required_fields,
+        "recommended_fields": template.recommended_fields,
+        "field_constraints": template.field_constraints,
+        "missing_required": validation.missing_required,
+        "missing_recommended": validation.missing_recommended,
+        "invalid_fields": validation.invalid_fields,
+        "publish_ready": validation.is_publish_ready,
+        "template_fetched": item.category_template_fetched,
+        "template_fetched_at": item.category_template_fetched_at,
+    }
+
+
 @router.post("/process")
 def trigger_worker(background_tasks: BackgroundTasks):
     """Trigger the intake worker in the background."""

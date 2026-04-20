@@ -180,10 +180,20 @@ class EbayInventoryClient:
         digits_only = re.sub(r"[^0-9]", "", raw)[:4]
         condition = CONDITION_MAP.get(digits_only, "USED_GOOD")
 
+        # Load category template from disk cache if available
+        template = None
+        cat_id = item.ebay_category_id
+        if cat_id:
+            try:
+                from packages.ebay.src.category_spreadsheet import CategorySpreadsheet
+                template = CategorySpreadsheet().load_template(cat_id)
+            except Exception:
+                pass
+
         product: dict = {
             "title": (item.title_final or item.title_raw or "")[:80],
             "description": item.description_final or item.title_final or "",
-            "aspects": self._build_aspects(item),
+            "aspects": self._build_item_specifics(item, template),
         }
         if photo_urls:
             product["imageUrls"] = photo_urls[:12]
@@ -198,6 +208,57 @@ class EbayInventoryClient:
         if item.condition_notes:
             payload["conditionDescription"] = item.condition_notes[:1000]
         return payload
+
+    def _build_item_specifics(self, item: Item, template=None) -> dict[str, list[str]]:
+        """
+        Build item specifics dict for the inventory item payload.
+        Priority: manually set values > AI extracted values > template defaults.
+        All values must be lists of strings as eBay requires.
+        """
+        specifics: dict[str, list[str]] = {}
+
+        # Load stored item_specifics
+        stored: dict = {}
+        if isinstance(item.item_specifics, dict):
+            stored = item.item_specifics
+        elif isinstance(item.item_specifics, str):
+            try:
+                stored = json.loads(item.item_specifics)
+            except Exception:
+                stored = {}
+
+        # Standard field mapping (attr → eBay field name)
+        field_map = {
+            "Brand":      item.brand,
+            "Type":       item.type,
+            "Color":      item.color,
+            "Size":       item.size,
+            "Material":   item.material,
+            "Style":      item.style,
+            "Pattern":    item.pattern,
+            "Department": item.department,
+        }
+        for ebay_field, val in field_map.items():
+            if val:
+                specifics[ebay_field] = [str(val)]
+
+        # Apply stored item_specifics (override standard fields)
+        for k, v in stored.items():
+            if v:
+                specifics[k] = [str(v)] if not isinstance(v, list) else [str(x) for x in v]
+
+        # Apply required template fields if still missing
+        if template is not None:
+            required_fields = getattr(template, "required_fields", [])
+            field_constraints = getattr(template, "field_constraints", {})
+            for field_name in required_fields:
+                if field_name not in specifics:
+                    # Use first allowed value as safe default
+                    defaults = field_constraints.get(field_name, [])
+                    if defaults:
+                        specifics[field_name] = [defaults[0]]
+
+        return specifics
 
     def _build_aspects(self, item: Item) -> dict[str, list[str]]:
         aspects: dict[str, list[str]] = {}

@@ -17,6 +17,49 @@ from packages.data.src.models.sale_record import SaleRecord
 router = APIRouter()
 
 
+# ── Category Intelligence Reports ─────────────────────────────────────────────
+
+@router.get("/category-intelligence")
+def category_intelligence_report():
+    """Return category spreadsheet summary — fill rates, avg prices, trends."""
+    from packages.ebay.src.category_spreadsheet import CategorySpreadsheet
+    sheet = CategorySpreadsheet()
+    return sheet.get_summary()
+
+
+@router.get("/category-intelligence/export")
+def export_category_intelligence():
+    """Export full category intelligence CSV."""
+    import tempfile
+    from pathlib import Path
+    from packages.ebay.src.category_spreadsheet import CategorySpreadsheet
+
+    sheet = CategorySpreadsheet()
+    rows = sheet.get_summary()
+    if not rows:
+        output = io.StringIO()
+        output.write("No category intelligence data available.\n")
+        output.seek(0)
+        return StreamingResponse(
+            io.BytesIO(output.getvalue().encode()),
+            media_type="text/csv",
+            headers={"Content-Disposition": "attachment; filename=category_intelligence.csv"},
+        )
+
+    output = io.StringIO()
+    fieldnames = list(rows[0].keys())
+    writer = csv.DictWriter(output, fieldnames=fieldnames)
+    writer.writeheader()
+    writer.writerows(rows)
+    output.seek(0)
+    filename = f"category_intelligence_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+    return StreamingResponse(
+        io.BytesIO(output.getvalue().encode()),
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
+
+
 def _parse_dt(s: str | None) -> datetime | None:
     if not s:
         return None

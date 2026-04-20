@@ -59,6 +59,14 @@ def migrate_add_columns() -> None:
         ("sourcing_location", "TEXT"),
         ("sourcing_date", "TEXT"),
         ("sourcing_batch", "TEXT"),
+        # Phase 3.6 — Category Intelligence
+        ("ebay_category_name", "TEXT"),
+        ("category_template_fetched", "INTEGER DEFAULT 0"),
+        ("category_template_fetched_at", "TEXT"),
+        ("item_specifics", "TEXT"),
+        ("missing_required_fields", "TEXT"),
+        ("missing_recommended_fields", "TEXT"),
+        ("publish_ready", "INTEGER DEFAULT 0"),
     ]
     for col_name, col_def in new_columns:
         try:

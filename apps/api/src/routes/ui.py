@@ -475,6 +475,46 @@ function renderDetail(it) {{
     </div>`;
   }}).filter(Boolean).join('');
 
+  // ── Category Intelligence section ─────────────────────────────────────────
+  let catIntelHtml = '';
+  if (it.ebay_category_id || it.category_template_fetched) {{
+    const catName = it.ebay_category_name || it.ebay_category_id || '';
+    const missing = it.missing_required_fields || [];
+    const missingRec = it.missing_recommended_fields || [];
+    const publishReady = it.publish_ready;
+
+    const publishBadge = publishReady
+      ? '<span style="background:#085041;color:#9fe1cb;padding:1px 7px;border-radius:8px;font-size:11px">Publish Ready</span>'
+      : '<span style="background:#501313;color:#f09595;padding:1px 7px;border-radius:8px;font-size:11px">Missing Required Fields</span>';
+
+    const missingReqList = missing.length
+      ? missing.map(f => `<div style="color:#f09595;font-size:12px">&#10007; ${{f}}</div>`).join('')
+      : '<div style="color:#5dcaa5;font-size:12px">&#10003; All required fields present</div>';
+
+    const missingRecList = missingRec.length
+      ? `<div style="margin-top:6px;font-size:11px;color:#888780">Recommended missing: ${{missingRec.slice(0,5).join(', ')}}${{missingRec.length > 5 ? '…' : ''}}</div>`
+      : '';
+
+    catIntelHtml = `
+      <div style="border:1px solid #2c2c2a;border-radius:6px;padding:10px;margin-bottom:12px">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+          <span style="font-size:12px;font-weight:500;color:#f1efe8">Category Intelligence</span>
+          ${{publishBadge}}
+        </div>
+        <div style="font-size:11px;color:#888780;margin-bottom:6px">
+          eBay: ${{catName}} (ID: ${{it.ebay_category_id || '—'}})
+        </div>
+        ${{missingReqList}}
+        ${{missingRecList}}
+        <button onclick="rerunCatIntel('${{it.sku}}')"
+          style="margin-top:8px;background:#2c2c2a;border:none;color:#d4d2c8;font-size:11px;
+                 padding:3px 10px;border-radius:4px;cursor:pointer;font-family:inherit">
+          Re-run category intelligence
+        </button>
+        <span id="cat-intel-msg-${{it.sku}}" style="font-size:11px;margin-left:6px;color:#888780"></span>
+      </div>`;
+  }}
+
   document.getElementById('detail-panel').innerHTML = `
     <div style="font-family:monospace;font-size:14px;color:#f1efe8;margin-bottom:4px">${{it.sku}}</div>
     <div style="font-size:12px;color:#888780;margin-bottom:12px">${{it.category_label || it.category_key}}</div>
@@ -486,6 +526,7 @@ function renderDetail(it) {{
       <div class="conf-bar"><div class="conf-fill" style="width:${{confPct}}%;background:${{confColor}}"></div></div>
     </div>
     ${{enrichNotes}}
+    ${{catIntelHtml}}
     <div class="images">${{imgs}}</div>
     <div id="edit-fields">${{fieldRows}}</div>
     <div class="field-row">
@@ -527,6 +568,32 @@ async function editAndApprove(sku) {{
   }});
   if (r.ok) {{ showMsg('Saved and approved.', 'ok'); edits = {{}}; removeItem(sku); }}
   else showMsg('Error saving.', 'err');
+}}
+
+async function rerunCatIntel(sku) {{
+  const msgEl = document.getElementById('cat-intel-msg-' + sku);
+  if (msgEl) msgEl.textContent = 'Running...';
+  try {{
+    const r = await fetch(`/api/items/${{sku}}/category-intelligence`, {{method: 'POST'}});
+    if (r.ok) {{
+      const d = await r.json();
+      if (msgEl) msgEl.textContent = d.publish_ready ? 'Done — publish ready!' : `Done — ${{d.missing_required.length}} required fields missing`;
+      // Refresh the item in the list
+      const idx = items.findIndex(i => i.sku === sku);
+      if (idx >= 0) {{
+        const itemR = await fetch(`/api/items/${{sku}}`);
+        if (itemR.ok) {{
+          items[idx] = await itemR.json();
+          renderDetail(items[idx]);
+        }}
+      }}
+    }} else {{
+      const err = await r.json().catch(() => ({{detail: 'Error'}}));
+      if (msgEl) msgEl.textContent = 'Error: ' + (err.detail || r.status);
+    }}
+  }} catch(e) {{
+    if (msgEl) msgEl.textContent = 'Error: ' + e.message;
+  }}
 }}
 
 async function approveAll() {{
@@ -1523,6 +1590,18 @@ def _reports_html() -> str:
   </tr></thead>
   <tbody id="sales-body"><tr><td colspan="8" style="color:#888780">Loading...</td></tr></tbody>
 </table>
+
+<div style="margin-top:32px;margin-bottom:12px;display:flex;align-items:center;justify-content:space-between">
+  <h2 style="margin:0">Category Intelligence</h2>
+  <button class="btn btn-gray" style="font-size:12px" onclick="exportCatIntel()">Export CSV</button>
+</div>
+<table id="cat-intel-table">
+  <thead><tr>
+    <th>Category ID</th><th>Category Name</th><th>Items</th>
+    <th>Sold</th><th>Avg Sold Price</th><th>Last Updated</th>
+  </tr></thead>
+  <tbody id="cat-intel-body"><tr><td colspan="6" style="color:#888780">Loading...</td></tr></tbody>
+</table>
 </main>
 <script>
 async function loadSummary() {{
@@ -1614,7 +1693,36 @@ function clearFilters() {{
   loadSales();
 }}
 
-loadSummary(); loadMonthly(); loadPlatforms(); loadSales();
+async function loadCatIntel() {{
+  try {{
+    const r = await fetch('/api/reports/category-intelligence');
+    const rows = await r.json();
+    const tbody = document.getElementById('cat-intel-body');
+    if (!rows.length) {{
+      tbody.innerHTML = '<tr><td colspan="6" style="color:#888780">No category intelligence data yet. Run analyze_all.py to populate.</td></tr>';
+      return;
+    }}
+    tbody.innerHTML = rows.map(row => `<tr>
+      <td style="font-family:monospace;font-size:12px">${{row.category_id || '-'}}</td>
+      <td>${{row.category_name || '-'}}</td>
+      <td>${{row.item_count || 0}}</td>
+      <td>${{row.sold_count || 0}}</td>
+      <td>${{row.avg_sold_price ? '$' + parseFloat(row.avg_sold_price).toFixed(2) : '-'}}</td>
+      <td style="font-size:11px;color:#888780">${{(row.last_updated || '').slice(0,10) || '-'}}</td>
+    </tr>`).join('');
+  }} catch(e) {{ console.error('cat intel load error', e); }}
+}}
+
+async function exportCatIntel() {{
+  const r = await fetch('/api/reports/category-intelligence/export');
+  const blob = await r.blob();
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'category_intelligence.csv';
+  a.click();
+}}
+
+loadSummary(); loadMonthly(); loadPlatforms(); loadSales(); loadCatIntel();
 </script>
 </body></html>"""
 

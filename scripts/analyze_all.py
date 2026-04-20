@@ -10,9 +10,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
 from datetime import datetime
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -24,6 +27,8 @@ from packages.core.src.constants import ItemStatus, ItemMode
 from packages.data.src.db.sqlite import engine, init_db
 from packages.data.src.models.review_record import ReviewRecord
 from packages.data.src.repositories.item_repo import ItemRepository
+from packages.ebay.src.category_intelligence import CategoryIntelligence
+from packages.ebay.src.category_spreadsheet import CategorySpreadsheet
 from packages.intake.src.image_normalizer import ImageNormalizer
 from packages.pricing.src.estimator import PriceEstimator
 from packages.triage.src.router import TriageRouter
@@ -65,6 +70,8 @@ def analyze_all(limit: int | None = None, prefix_filter: str | None = None) -> N
     router = TriageRouter()
     normalizer = ImageNormalizer()
     estimator = PriceEstimator()
+    cat_intel = CategoryIntelligence()
+    cat_sheet = CategorySpreadsheet()
 
     with Session(engine) as session:
         repo = ItemRepository(session)
@@ -147,6 +154,26 @@ def analyze_all(limit: int | None = None, prefix_filter: str | None = None) -> N
                     item.features = _safe_list(item.features)
                     item.defects = _safe_list(item.defects)
                     item.review_reasons = _safe_list(item.review_reasons)
+
+                    # ── Step 2: Category Intelligence ──────────────────────────
+                    cat_id = cat_intel.get_category_id(item)
+                    cat_result = cat_intel.get_template(cat_id)
+                    if cat_result.ok:
+                        template = cat_result.value
+                        item.ebay_category_id = cat_id
+                        item.ebay_category_name = template.category_name
+                        item.category_template_fetched = True
+                        item.category_template_fetched_at = datetime.utcnow().isoformat()
+                        cat_sheet.save_template(template)
+                        validation = cat_intel.validate_item_specifics(item, template)
+                        item.missing_required_fields = validation.missing_required
+                        item.missing_recommended_fields = validation.missing_recommended
+                        item.publish_ready = validation.is_publish_ready
+                        if validation.missing_required:
+                            if "missing_required_specifics" not in item.review_reasons:
+                                item.review_reasons.append("missing_required_specifics")
+                    else:
+                        logger.warning("Category intelligence unavailable for %s: %s", sku, cat_result.error)
 
                     item = estimator.apply(item)
 

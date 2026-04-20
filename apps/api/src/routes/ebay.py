@@ -167,6 +167,92 @@ def mark_sold_manual(
     return result.value
 
 
+@router.patch("/listing/{sku}")
+def update_listing(sku: str, updates: dict, session: Session = Depends(get_session)):
+    """
+    Update a live eBay listing after publish.
+    Uses PUT /sell/inventory/v1/inventory_item/{sku} to update fields.
+    Allowed updates: title, description, price, item_specifics.
+    Does NOT update: category_id, condition (these require relisting).
+    Returns success or eBay error details.
+    """
+    import json
+    from packages.ebay.src.inventory_client import EbayInventoryClient
+
+    repo = ItemRepository(session)
+    item = repo.get_by_sku(sku)
+    if not item:
+        raise HTTPException(status_code=404, detail=f"Item {sku} not found")
+    if item.status != ItemStatus.LISTED:
+        raise HTTPException(status_code=400, detail=f"Item {sku} is not listed (status: {item.status})")
+
+    # Apply allowed updates to the item
+    allowed_fields = {"title_final", "description_final", "list_price", "item_specifics"}
+    for k, v in updates.items():
+        if k in allowed_fields and hasattr(item, k):
+            setattr(item, k, v)
+
+    client = EbayInventoryClient()
+    if not client.auth.is_configured():
+        raise HTTPException(status_code=503, detail="eBay credentials not configured")
+
+    auth = client.auth
+    base = auth.api_base
+    headers = {
+        "Authorization": f"Bearer {auth.user_token}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "Content-Language": "en-US",
+        "X-EBAY-C-MARKETPLACE-ID": auth.marketplace_id,
+    }
+
+    # Build minimal inventory item payload with updated fields
+    import re
+    CONDITION_MAP = {
+        "1000": "NEW", "1500": "NEW_OTHER", "2000": "NEW_WITH_DEFECTS",
+        "2500": "NEW_OTHER", "3000": "LIKE_NEW", "4000": "VERY_GOOD",
+        "5000": "USED_GOOD", "6000": "USED_ACCEPTABLE",
+        "7000": "FOR_PARTS_OR_NOT_WORKING",
+    }
+    raw_cond = str(item.condition_id or "5000")
+    digits_only = re.sub(r"[^0-9]", "", raw_cond)[:4]
+    condition = CONDITION_MAP.get(digits_only, "USED_GOOD")
+
+    aspects: dict = {}
+    if isinstance(item.item_specifics, dict):
+        for k, v in item.item_specifics.items():
+            if v:
+                aspects[k] = [str(v)]
+
+    product: dict = {
+        "title": (item.title_final or item.title_raw or "")[:80],
+        "description": item.description_final or item.title_final or "",
+        "aspects": aspects,
+    }
+    inventory_payload = {
+        "product": product,
+        "condition": condition,
+        "availability": {"shipToLocationAvailability": {"quantity": 1}},
+    }
+
+    import httpx
+    resp = httpx.put(
+        f"{base}/sell/inventory/v1/inventory_item/{sku}",
+        headers=headers,
+        json=inventory_payload,
+        timeout=30,
+    )
+    if resp.status_code not in (200, 204):
+        detail = f"eBay API {resp.status_code}: {resp.text[:300]}"
+        raise HTTPException(status_code=502, detail=detail)
+
+    # Persist updated fields
+    from datetime import datetime
+    item.updated_at = datetime.utcnow()
+    repo.upsert(item)
+    return {"sku": sku, "updated": True, "fields": list(updates.keys())}
+
+
 @router.get("/listings")
 def get_active_listings(session: Session = Depends(get_session)):
     repo = ItemRepository(session)

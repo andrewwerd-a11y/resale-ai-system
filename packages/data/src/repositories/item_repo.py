@@ -19,7 +19,8 @@ def _to_record(item: Item) -> dict:
     """Convert Item entity to flat dict for DB storage."""
     d = item.model_dump()
     # Serialize known list/dict fields to JSON strings
-    for field in ["features", "defects", "review_reasons", "image_paths"]:
+    for field in ["features", "defects", "review_reasons", "image_paths",
+                  "missing_required_fields", "missing_recommended_fields"]:
         if isinstance(d.get(field), list):
             d[field] = json.dumps(d[field])
     if isinstance(d.get("measurements"), dict):
@@ -30,7 +31,10 @@ def _to_record(item: Item) -> dict:
     if item.image_paths:
         d["image_paths"] = "|".join(item.image_paths)
     # Coerce any remaining list/dict values on string fields
-    known_json_fields = {"features", "defects", "review_reasons", "image_paths", "measurements", "item_specifics"}
+    known_json_fields = {
+        "features", "defects", "review_reasons", "image_paths", "measurements",
+        "item_specifics", "missing_required_fields", "missing_recommended_fields",
+    }
     for k, v in d.items():
         if k in known_json_fields:
             continue
@@ -45,7 +49,8 @@ def _from_record(record: ItemRecord) -> Item:
     """Convert ItemRecord DB row back to Item entity."""
     d = record.model_dump()
     # Deserialize JSON string fields
-    for field in ["features", "defects", "review_reasons"]:
+    for field in ["features", "defects", "review_reasons",
+                  "missing_required_fields", "missing_recommended_fields"]:
         if d.get(field) is None:
             d[field] = []
         elif isinstance(d[field], str):
