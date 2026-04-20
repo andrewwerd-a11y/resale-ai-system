@@ -51,8 +51,17 @@ CATEGORY_MAP: dict[str, str] = {
 }
 
 # Ordered list of known-good fallback leaf category IDs tried when the primary fails.
-# In production the primary IDs work; these cover sandbox limitations.
 _FALLBACK_CHAIN = ["29223", "53159", "40143", "95672", "57990"]
+
+# Per-category parent fallbacks for error 62005 ("does not belong to category tree").
+# Tried before the generic chain so we stay in the right department.
+_PARENT_FALLBACKS: dict[str, str] = {
+    "48084": "166697",   # Stuffed Animals → Stuffed Animals parent
+    "44201": "2390",     # Porcelain Dolls → Dolls parent
+}
+
+# The Taxonomy API always runs on the production host — it is not sandboxed.
+_TAXONOMY_HOST = "https://api.ebay.com"
 
 
 @dataclass
@@ -96,10 +105,13 @@ class CategoryIntelligence:
         if not token:
             return Result.failure("No eBay token available", error_code="NO_TOKEN")
 
+        # Taxonomy API is production-only — sandbox host returns 404/400 for
+        # categories that exist in the real tree.
         url = (
-            f"{s.ebay_api_base}/commerce/taxonomy/v1/category_tree/0"
+            f"{_TAXONOMY_HOST}/commerce/taxonomy/v1/category_tree/0"
             f"/get_item_aspects_for_category?category_id={category_id}"
         )
+        print(f"[CategoryIntelligence] GET {url}")
         try:
             resp = httpx.get(
                 url,
@@ -119,17 +131,28 @@ class CategoryIntelligence:
                 "Category taxonomy fetch failed for %s: %s %s",
                 category_id, resp.status_code, resp.text[:300],
             )
-            # Try fallback chain before giving up (covers sandbox limitations)
-            for fallback_id in _FALLBACK_CHAIN:
-                if fallback_id == category_id:
-                    continue
+            # On error 62005 ("does not belong to category tree"), try the
+            # designated parent category for this ID first.
+            error_id = None
+            try:
+                error_id = resp.json()["errors"][0]["errorId"]
+            except Exception:
+                pass
+
+            fallback_ids: list[str] = []
+            if error_id == 62005 and category_id in _PARENT_FALLBACKS:
+                fallback_ids.append(_PARENT_FALLBACKS[category_id])
+            fallback_ids.extend(
+                fid for fid in _FALLBACK_CHAIN if fid != category_id
+            )
+
+            for fallback_id in fallback_ids:
                 fallback_result = self._fetch_raw(fallback_id, token, s)
                 if fallback_result is not None:
                     logger.info(
                         "Using fallback category %s for %s", fallback_id, category_id
                     )
                     template = self._parse_template(category_id, fallback_result)
-                    # Keep the original category_id so DB stores the right value
                     self._cache[category_id] = template
                     return Result.success(template)
             return Result.failure(
@@ -249,9 +272,10 @@ class CategoryIntelligence:
     def _fetch_raw(self, category_id: str, token: str, s) -> dict | None:
         """Fetch raw taxonomy response for a category. Returns None on any failure."""
         url = (
-            f"{s.ebay_api_base}/commerce/taxonomy/v1/category_tree/0"
+            f"{_TAXONOMY_HOST}/commerce/taxonomy/v1/category_tree/0"
             f"/get_item_aspects_for_category?category_id={category_id}"
         )
+        print(f"[CategoryIntelligence] GET {url}  (fallback)")
         try:
             resp = httpx.get(
                 url,
@@ -264,6 +288,7 @@ class CategoryIntelligence:
             )
             if resp.status_code == 200:
                 return resp.json()
+            logger.debug("Fallback %s returned %s", category_id, resp.status_code)
         except Exception:
             pass
         return None
