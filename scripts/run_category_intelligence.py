@@ -101,6 +101,10 @@ def run_category_intelligence(
                         progress.advance(task)
                         continue
 
+                    # On --reset, ignore any stale stored category ID so
+                    # get_category_id re-derives it from category_key + title
+                    if reset:
+                        item.ebay_category_id = None
                     cat_id = cat_intel.get_category_id(item)
                     result = cat_intel.get_template(cat_id)
 
