@@ -41,11 +41,11 @@ CATEGORY_MAP: dict[str, str] = {
     "shoes_men":      "93427",   # Shoes > Men > Boots
     # Collectibles
     "collectibles":   "40143",   # Collectibles > Decorative Collectibles
-    # Toys — leaf categories (sandbox-safe)
-    "toys":           "40143",   # Collectibles > Decorative Collectibles (sandbox fallback)
-    "dolls":          "40143",   # Collectibles > Decorative Collectibles (sandbox fallback)
-    "plush":          "40143",   # Collectibles > Decorative Collectibles (sandbox fallback)
-    "bears":          "40143",   # Collectibles > Decorative Collectibles (sandbox fallback)
+    # Toys — verified leaf categories
+    "toys":           "48084",   # Toys & Hobbies > Stuffed Animals > Bears
+    "dolls":          "44201",   # Dolls & Bears > Dolls > Porcelain & China
+    "plush":          "48084",   # Toys & Hobbies > Stuffed Animals > Bears
+    "bears":          "48084",   # Toys & Hobbies > Stuffed Animals > Bears
     # Handbags
     "handbags":       "169291",  # Handbags & Purses > Handbags
 }
@@ -161,10 +161,10 @@ class CategoryIntelligence:
 
         if category == "toys":
             if any(w in title or w in item_type for w in ["doll", "porcelain", "victorian", "raggedy"]):
-                return "238"    # Toys > Dolls > Porcelain Dolls
+                return "44201"  # Dolls & Bears > Dolls > Porcelain & China
             if any(w in title or w in item_type for w in ["bear", "plush", "stuffed", "care bear"]):
-                return "19009"  # Toys > Stuffed Animals
-            return "19009"      # default toys → stuffed animals
+                return "48084"  # Toys & Hobbies > Stuffed Animals > Bears
+            return "48084"      # default toys → stuffed animals
 
         if category == "books":
             # All book sub-types use the same leaf (11092 not valid in sandbox)
