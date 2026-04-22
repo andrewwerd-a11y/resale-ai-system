@@ -20,7 +20,7 @@ from packages.core.src.config import get_settings
 from packages.data.src.db.sqlite import init_db, migrate_add_columns
 from apps.api.src.routes import (
     items, review, export, health, ui, ebay,
-    reports, sourcing, capture, sync, settings, lots,
+    reports, sourcing, capture, sync, settings, lots, listings,
 )
 
 logger = logging.getLogger(__name__)
@@ -107,6 +107,7 @@ app.include_router(capture.router, prefix="/api/capture", tags=["capture"])
 app.include_router(sync.router, prefix="/api/sync", tags=["sync"])
 app.include_router(settings.router, prefix="/api/settings", tags=["settings"])
 app.include_router(lots.router, prefix="/api/lots", tags=["lots"])
+app.include_router(listings.router, prefix="/api/listings", tags=["listings"])
 app.include_router(ui.router, tags=["ui"])
 
 
@@ -179,6 +180,7 @@ def _dashboard_html() -> str:
   <a href="/review-queue">Review Queue</a>
   <a href="/bulk-approve">Bulk Approve</a>
   <a href="/inventory">Inventory</a>
+  <a href="/listings">Listings</a>
   <a href="/lots">Lots</a>
   <a href="/reports">Reports</a>
   <a href="/sourcing">Sourcing</a>

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import tempfile
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, UploadFile, File
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlmodel import Session
@@ -465,3 +466,258 @@ def bulk_reject(body: BulkSkuRequest, session: Session = Depends(get_session)):
             repo.upsert(item)
             updated.append(sku)
     return {"updated": len(updated), "skus": updated}
+
+
+# ── Phase 5B — Photos ──────────────────────────────────────────────────────────
+
+@router.post("/{sku}/photos")
+async def upload_photos(
+    sku: str,
+    files: list[UploadFile] = File(...),
+    session: Session = Depends(get_session),
+):
+    """Upload one or more photos, append their URLs to image_paths."""
+    repo = ItemRepository(session)
+    item = repo.get_by_sku(sku)
+    if not item:
+        raise HTTPException(status_code=404, detail=f"Item {sku} not found")
+
+    from packages.ebay.src.photo_uploader import PhotoUploader
+    uploader = PhotoUploader()
+    new_urls = []
+
+    for upload in files:
+        suffix = Path(upload.filename or "photo.jpg").suffix or ".jpg"
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            tmp.write(await upload.read())
+            tmp_path = Path(tmp.name)
+        try:
+            result = uploader.upload(tmp_path)
+            if result.ok:
+                new_urls.append(result.value)
+            else:
+                # If Cloudinary not configured, skip gracefully
+                pass
+        finally:
+            try:
+                tmp_path.unlink()
+            except Exception:
+                pass
+
+    if new_urls:
+        existing = [p for p in (item.image_paths or "").split("|") if p.strip()]
+        all_paths = existing + new_urls
+        item.image_paths = "|".join(all_paths)
+        repo.upsert(item)
+
+    paths = [p for p in (item.image_paths or "").split("|") if p.strip()]
+    return {"image_paths": paths}
+
+
+class PhotoUrlBody(BaseModel):
+    url: str
+
+
+@router.delete("/{sku}/photos")
+def delete_photo(sku: str, body: PhotoUrlBody, session: Session = Depends(get_session)):
+    """Remove a photo URL from image_paths (does not delete from Cloudinary)."""
+    repo = ItemRepository(session)
+    item = repo.get_by_sku(sku)
+    if not item:
+        raise HTTPException(status_code=404, detail=f"Item {sku} not found")
+
+    paths = [p for p in (item.image_paths or "").split("|") if p.strip()]
+    paths = [p for p in paths if p != body.url]
+    item.image_paths = "|".join(paths)
+    repo.upsert(item)
+    return {"image_paths": paths}
+
+
+@router.post("/{sku}/photos/set-cover")
+def set_cover_photo(sku: str, body: PhotoUrlBody, session: Session = Depends(get_session)):
+    """Move a photo URL to index 0 in image_paths."""
+    repo = ItemRepository(session)
+    item = repo.get_by_sku(sku)
+    if not item:
+        raise HTTPException(status_code=404, detail=f"Item {sku} not found")
+
+    paths = [p for p in (item.image_paths or "").split("|") if p.strip()]
+    if body.url not in paths:
+        raise HTTPException(status_code=404, detail="URL not found in image_paths")
+
+    paths.remove(body.url)
+    paths.insert(0, body.url)
+    item.image_paths = "|".join(paths)
+    repo.upsert(item)
+    return {"image_paths": paths}
+
+
+# ── Phase 5B — Claude Suggest ──────────────────────────────────────────────────
+
+class ClaudeSuggestBody(BaseModel):
+    type: str  # "title" or "description"
+
+
+@router.post("/{sku}/claude-suggest")
+def claude_suggest(sku: str, body: ClaudeSuggestBody, session: Session = Depends(get_session)):
+    """
+    Generate a Claude title or description suggestion.
+    Never auto-applies — returns suggestion for user review only.
+    """
+    repo = ItemRepository(session)
+    item = repo.get_by_sku(sku)
+    if not item:
+        raise HTTPException(status_code=404, detail=f"Item {sku} not found")
+    if body.type not in ("title", "description"):
+        raise HTTPException(status_code=422, detail="type must be 'title' or 'description'")
+
+    from packages.core.src.config import get_settings
+    cfg = get_settings()
+    if not cfg.anthropic_api_key:
+        raise HTTPException(status_code=503, detail="ANTHROPIC_API_KEY not configured")
+
+    try:
+        import anthropic
+    except ImportError:
+        raise HTTPException(status_code=503, detail="anthropic package not installed")
+
+    client = anthropic.Anthropic(api_key=cfg.anthropic_api_key)
+    model = cfg.enrichment_model or "claude-sonnet-4-20250514"
+
+    # Build item context
+    title_raw = item.title_final or item.title_raw or ""
+    brand = item.brand or ""
+    category = item.ebay_category_name or item.category_label or ""
+    condition = item.condition_label or ""
+    condition_notes = item.condition_notes or ""
+    description_existing = item.description_final or ""
+
+    if body.type == "title":
+        prompt = f"""You are an expert eBay listing optimizer. Generate a single eBay title for this item.
+
+Item data:
+- Current title: {title_raw}
+- Brand: {brand}
+- Category: {category}
+- Condition: {condition}
+- Condition notes: {condition_notes}
+
+STRICT RULES — enforce exactly:
+1. Start with Brand then item Type
+2. Include specific identifiers (author, model, year if known)
+3. Maximum 80 characters total
+4. No punctuation
+5. No subjective words (beautiful, amazing, stunning, rare unless objectively verifiable)
+6. Do NOT use "Vintage" unless condition notes confirm pre-1990
+7. Format: [Brand] [Type] [Specific Identifiers] [Format/Size]
+
+Return ONLY the title text, nothing else."""
+
+    else:  # description
+        prompt = f"""You are an expert eBay listing writer. Write a short description for this item.
+
+Item data:
+- Title: {title_raw}
+- Brand: {brand}
+- Category: {category}
+- Condition: {condition}
+- Condition notes: {condition_notes}
+- Existing description: {description_existing}
+
+STRICT RULES — enforce exactly:
+1. Maximum 4 sentences
+2. Condition facts only — what you can observe
+3. No subjective adjectives (beautiful, charming, lovely)
+4. No flowery prose
+5. Lead with condition, note any defects honestly, end with format/key specs
+6. Example: "Hardcover in good used condition. Spine intact, pages clean with minor yellowing. Cover shows light shelf wear. 342 pages, first edition."
+
+Return ONLY the description text, nothing else."""
+
+    try:
+        response = client.messages.create(
+            model=model,
+            max_tokens=300,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        suggestion = response.content[0].text.strip()
+
+        # For descriptions: truncate to first 4 sentences server-side
+        if body.type == "description":
+            import re
+            sentences = re.split(r'(?<=[.!?])\s+', suggestion)
+            suggestion = " ".join(sentences[:4])
+
+        # For titles: enforce 80-char max
+        if body.type == "title":
+            suggestion = suggestion[:80]
+
+        return {"suggestion": suggestion, "type": body.type}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Claude API error: {exc}")
+
+
+# ── Phase 5B — Price Suggest ───────────────────────────────────────────────────
+
+@router.get("/{sku}/price-suggest")
+def price_suggest(sku: str, session: Session = Depends(get_session)):
+    """Get price suggestion from eBay sold comps."""
+    repo = ItemRepository(session)
+    item = repo.get_by_sku(sku)
+    if not item:
+        raise HTTPException(status_code=404, detail=f"Item {sku} not found")
+
+    query = item.title_final or item.title_raw or f"{item.brand or ''} {item.type or ''}".strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="Item has no title for price lookup")
+
+    try:
+        from packages.enrichment.src.ebay_browse import get_price_comps
+        comps = get_price_comps(query, limit=15)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    median = comps.get("median")
+    suggested = median or item.estimated_price or item.list_price
+    return {
+        "median": median,
+        "low": comps.get("low"),
+        "high": comps.get("high"),
+        "sample_size": comps.get("sample_size", 0),
+        "suggested_price": round(float(suggested), 2) if suggested else None,
+    }
+
+
+# ── Phase 5B — Recategorize ────────────────────────────────────────────────────
+
+@router.post("/{sku}/recategorize")
+def recategorize_item(sku: str, session: Session = Depends(get_session)):
+    """Re-run category detection and update local ebay_category_id/name."""
+    from packages.ebay.src.category_intelligence import CategoryIntelligence
+    from packages.ebay.src.category_spreadsheet import CategorySpreadsheet
+    from datetime import datetime
+
+    repo = ItemRepository(session)
+    item = repo.get_by_sku(sku)
+    if not item:
+        raise HTTPException(status_code=404, detail=f"Item {sku} not found")
+
+    cat_intel = CategoryIntelligence()
+    cat_id, cat_name = cat_intel.get_category_id(item)
+    result = cat_intel.get_template(cat_id)
+    if not result.ok:
+        raise HTTPException(status_code=502, detail=result.error)
+
+    template = result.value
+    item.ebay_category_id = cat_id
+    item.ebay_category_name = cat_name or template.category_name
+    item.category_template_fetched = True
+    item.category_template_fetched_at = datetime.utcnow().isoformat()
+    CategorySpreadsheet().save_template(template)
+    repo.upsert(item)
+
+    return {
+        "sku": sku,
+        "ebay_category_id": cat_id,
+        "ebay_category_name": item.ebay_category_name,
+    }

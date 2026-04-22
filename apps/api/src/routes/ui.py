@@ -10,6 +10,11 @@ from fastapi.responses import HTMLResponse
 router = APIRouter()
 
 
+@router.get("/listings", response_class=HTMLResponse)
+async def listings_page():
+    return HTMLResponse(_listings_html())
+
+
 @router.get("/review-queue", response_class=HTMLResponse)
 async def review_queue_page():
     return HTMLResponse(_review_queue_html())
@@ -67,6 +72,7 @@ def _nav(active: str) -> str:
         ("Review Queue", "/review-queue", "review"),
         ("Bulk Approve", "/bulk-approve", "bulk"),
         ("Inventory", "/inventory", "inventory"),
+        ("Listings", "/listings", "listings"),
         ("Lots", "/lots", "lots"),
         ("Reports", "/reports", "reports"),
         ("Sourcing", "/sourcing", "sourcing"),
@@ -2490,5 +2496,1055 @@ async function saveAll() {{
 
 loadDbSettings();
 loadSettings();
+</script>
+</body></html>"""
+
+
+# ── Listings page (Phase 5B) ───────────────────────────────────────────────────
+
+def _listings_html() -> str:  # noqa: PLR0915
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Listings — Resale AI System</title>
+{_base_style()}
+<style>
+.listing-card {{
+  display:flex; align-items:flex-start; background:#222220;
+  border:1px solid #2c2c2a; border-radius:8px; padding:10px;
+  cursor:pointer; position:relative; transition:border-color .15s;
+  user-select:none;
+}}
+.listing-card:hover {{ border-color:#534ab7; }}
+.listing-card.selected {{ border-color:#7f77dd; background:#26215c22; }}
+.card-check {{
+  position:absolute; top:8px; left:8px;
+  width:16px; height:16px; cursor:pointer; z-index:2;
+}}
+.listing-card .card-thumb {{
+  width:80px; height:80px; object-fit:cover; border-radius:4px;
+  flex-shrink:0; margin-left:20px;
+}}
+.card-thumb-placeholder {{
+  width:80px; height:80px; background:#2c2c2a; border-radius:4px;
+  flex-shrink:0; margin-left:20px; display:flex;
+  align-items:center; justify-content:center;
+  color:#3a3a38; font-size:22px;
+}}
+#drawer-overlay {{
+  display:none; position:fixed; inset:0;
+  background:rgba(0,0,0,.5); z-index:200;
+}}
+#drawer-overlay.open {{ display:block; }}
+#drawer {{
+  position:fixed; top:0; right:-500px; width:480px; height:100vh;
+  background:#111110; border-left:1px solid #2c2c2a;
+  overflow-y:auto; z-index:201; transition:right .25s ease;
+  display:flex; flex-direction:column;
+}}
+#drawer.open {{ right:0; }}
+.drawer-section {{
+  border-bottom:1px solid #2c2c2a; padding:14px 16px;
+}}
+.drawer-section-title {{
+  font-size:11px; color:#888780; text-transform:uppercase;
+  letter-spacing:.05em; margin-bottom:10px;
+}}
+.field-dirty {{ border-left:3px solid #fac775 !important; padding-left:8px; }}
+.field-row {{ margin-bottom:12px; position:relative; }}
+.field-row label {{ font-size:11px; color:#888780; margin-bottom:3px; display:block; }}
+.revert-link {{
+  font-size:10px; color:#7f77dd; cursor:pointer;
+  position:absolute; right:0; top:0; text-decoration:underline;
+}}
+.char-counter {{ font-size:10px; color:#888780; text-align:right; margin-top:2px; }}
+.suggest-panel {{
+  background:#1a2030; border:1px solid #2c3a5c; border-radius:6px;
+  padding:10px; margin-top:6px; font-size:12px; color:#d4d2c8;
+  display:none;
+}}
+.suggest-panel.open {{ display:block; }}
+.suggest-text {{ color:#9fe1cb; margin-bottom:8px; line-height:1.5; }}
+.price-note {{ font-size:11px; color:#888780; margin-top:4px; }}
+.step-row {{
+  display:flex; align-items:center; gap:8px;
+  font-size:12px; color:#d4d2c8; padding:4px 0;
+}}
+.step-icon {{ font-size:14px; width:18px; text-align:center; }}
+.photo-scroll {{
+  display:flex; gap:8px; overflow-x:auto; padding-bottom:6px;
+}}
+.photo-thumb {{
+  flex-shrink:0; width:100px; height:100px; position:relative;
+}}
+.photo-thumb img {{
+  width:100px; height:100px; object-fit:cover; border-radius:4px;
+  border:1px solid #2c2c2a;
+}}
+.photo-cover-badge {{
+  position:absolute; top:4px; left:4px;
+  background:#fac775; color:#1a1a18; font-size:9px;
+  padding:1px 5px; border-radius:3px; font-weight:600;
+}}
+.photo-actions {{
+  position:absolute; bottom:4px; left:0; right:0;
+  display:flex; gap:4px; justify-content:center;
+}}
+.photo-btn {{
+  background:rgba(17,17,16,.85); border:1px solid #3a3a38;
+  color:#d4d2c8; font-size:9px; padding:2px 5px; border-radius:3px;
+  cursor:pointer; font-family:inherit;
+}}
+.photo-btn:hover {{ background:#2c2c2a; }}
+#ctx-menu {{
+  display:none; position:fixed; background:#1a1a18;
+  border:1px solid #3a3a38; border-radius:6px;
+  z-index:500; min-width:180px; padding:4px 0;
+  box-shadow:0 4px 16px rgba(0,0,0,.5);
+}}
+#ctx-menu .ctx-item {{
+  padding:7px 14px; font-size:13px; color:#d4d2c8;
+  cursor:pointer;
+}}
+#ctx-menu .ctx-item:hover {{ background:#2c2c2a; }}
+#ctx-menu .ctx-sep {{ border-top:1px solid #2c2c2a; margin:4px 0; }}
+#toast {{
+  position:fixed; bottom:24px; left:50%; transform:translateX(-50%);
+  background:#2c2c2a; color:#f1efe8; padding:10px 20px;
+  border-radius:8px; font-size:13px; z-index:600;
+  box-shadow:0 4px 16px rgba(0,0,0,.5);
+  opacity:0; transition:opacity .3s; pointer-events:none;
+}}
+#toast.show {{ opacity:1; }}
+#toast.ok {{ background:#085041; color:#9fe1cb; }}
+#toast.err {{ background:#501313; color:#f09595; }}
+#dialog-overlay {{
+  display:none; position:fixed; inset:0;
+  background:rgba(0,0,0,.6); z-index:400;
+  align-items:center; justify-content:center;
+}}
+#dialog-overlay.open {{ display:flex; }}
+#dialog-box {{
+  background:#1a1a18; border:1px solid #3a3a38; border-radius:10px;
+  padding:24px; min-width:320px; max-width:460px;
+}}
+#dialog-box h3 {{ font-size:14px; color:#f1efe8; margin-bottom:12px; }}
+#dialog-box p {{ font-size:13px; color:#888780; margin-bottom:16px; }}
+.grid-container {{
+  display:grid;
+  grid-template-columns:repeat(auto-fill, minmax(280px, 1fr));
+  gap:10px; padding:16px 24px;
+}}
+</style>
+</head>
+<body>
+{_nav("listings")}
+<div style="background:#111110;border-bottom:1px solid #2c2c2a;padding:10px 24px;display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+  <select id="status-filter" onchange="loadItems()"
+    style="background:#2c2c2a;border:1px solid #3a3a38;color:#f1efe8;border-radius:6px;padding:5px 10px;font-size:13px;font-family:inherit">
+    <option value="all">All Active</option>
+    <option value="listed">Listed</option>
+    <option value="exported">Exported</option>
+  </select>
+  <input id="search-input" type="text" placeholder="Search SKU or title..."
+    oninput="debounceSearch()"
+    style="background:#2c2c2a;border:1px solid #3a3a38;color:#f1efe8;border-radius:6px;padding:5px 10px;font-size:13px;font-family:inherit;width:220px">
+  <span id="item-count" style="font-size:12px;color:#888780">Loading...</span>
+  <div style="margin-left:auto;display:flex;gap:8px">
+    <button class="btn btn-gray" onclick="syncFromEbay()" id="sync-btn">Sync from eBay</button>
+    <button class="btn btn-gray" onclick="window.open('https://www.ebay.com/sh/lst/active','_blank')">eBay Seller Hub ↗</button>
+  </div>
+</div>
+
+<div id="bulk-bar" style="display:none;background:#26215c;border-bottom:1px solid #3a3a38;padding:8px 24px;display:flex;align-items:center;gap:8px">
+  <span id="bulk-count" style="font-size:12px;color:#afa9ec;margin-right:4px"></span>
+  <button class="btn btn-gray" style="font-size:12px;padding:4px 10px" onclick="dlgBulkPrice()">Set Price</button>
+  <button class="btn btn-gray" style="font-size:12px;padding:4px 10px" onclick="dlgBulkPromo()">Set Promo %</button>
+  <button class="btn btn-purple" style="font-size:12px;padding:4px 10px" onclick="bulkPushAll()">Push All</button>
+  <button class="btn btn-red" style="font-size:12px;padding:4px 10px" onclick="bulkEndListings()">End Listings</button>
+  <button class="btn btn-gray" style="font-size:12px;padding:4px 10px" onclick="deselectAll()">Deselect All</button>
+</div>
+
+<div id="grid-wrapper">
+  <div id="items-grid" class="grid-container">
+    <div style="color:#888780;padding:24px;grid-column:1/-1;text-align:center">Loading...</div>
+  </div>
+</div>
+
+<!-- Drawer -->
+<div id="drawer-overlay" onclick="closeDrawer()"></div>
+<div id="drawer">
+  <div id="drawer-inner" style="flex:1"></div>
+</div>
+
+<!-- Context menu -->
+<div id="ctx-menu">
+  <div class="ctx-item" onclick="ctxOpenEbay()">Open on eBay ↗</div>
+  <div class="ctx-item" onclick="ctxOpenSellerHub()">Open in Seller Hub ↗</div>
+  <div class="ctx-sep"></div>
+  <div class="ctx-item" onclick="ctxImproveTitle()">Improve Title with Claude</div>
+  <div class="ctx-item" onclick="ctxPriceSuggest()">Suggest Market Price</div>
+  <div class="ctx-sep"></div>
+  <div class="ctx-item" style="color:#f09595" onclick="ctxEndListing()">End This Listing</div>
+  <div class="ctx-item" onclick="ctxSendToReview()">Send to Review Queue</div>
+</div>
+
+<!-- Toast -->
+<div id="toast"></div>
+
+<!-- Dialog -->
+<div id="dialog-overlay">
+  <div id="dialog-box">
+    <h3 id="dlg-title"></h3>
+    <p id="dlg-body"></p>
+    <div id="dlg-content"></div>
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">
+      <button class="btn btn-gray" onclick="closeDlg()" id="dlg-cancel">Cancel</button>
+      <button class="btn btn-purple" onclick="dlgConfirm()" id="dlg-ok">OK</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ── State ─────────────────────────────────────────────────────────────────────
+var allItems = [];
+var selectedSkus = new Set();
+var lastClickedIdx = null;
+var drawerSku = null;
+var drawerItem = null;
+var dirtyFields = {{}};   // {{fieldName: {{value, original}}}}
+var drawerPhotos = [];
+var originalPhotos = [];
+var alertDays = [30, 60, 90];
+var defaultPromoPct = 3;
+var ctxItem = null;
+var dlgCallback = null;
+var searchTimer = null;
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+async function init() {{
+  try {{
+    const r = await fetch('/api/settings');
+    const s = await r.json();
+    const ad = s.listing_age_alert_days || '30,60,90';
+    alertDays = ad.split(',').map(Number).filter(Boolean);
+    defaultPromoPct = parseFloat(s.default_promotion_pct || '3') || 3;
+  }} catch(e) {{}}
+  loadItems();
+}}
+
+function debounceSearch() {{
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(loadItems, 300);
+}}
+
+async function loadItems() {{
+  const st = document.getElementById('status-filter').value;
+  const q = document.getElementById('search-input').value;
+  try {{
+    const r = await fetch('/api/listings?status=' + st + '&search=' + encodeURIComponent(q));
+    allItems = await r.json();
+  }} catch(e) {{
+    showToast('Failed to load listings', false);
+    allItems = [];
+  }}
+  selectedSkus = new Set();
+  updateBulkBar();
+  renderGrid();
+}}
+
+// ── Grid ──────────────────────────────────────────────────────────────────────
+function renderGrid() {{
+  const grid = document.getElementById('items-grid');
+  document.getElementById('item-count').textContent = allItems.length + ' items';
+  if (!allItems.length) {{
+    grid.innerHTML = '<div style="color:#888780;padding:40px;grid-column:1/-1;text-align:center">No active listings found.</div>';
+    return;
+  }}
+  grid.innerHTML = allItems.map((item, idx) => renderCard(item, idx)).join('');
+}}
+
+function renderCard(item, idx) {{
+  const days = item.days_listed;
+  let daysBadge = '';
+  if (days != null) {{
+    let color = '#888780', bg = '#2c2c2a';
+    if (days > (alertDays[2] || 90)) {{ color = '#f09595'; bg = '#501313'; }}
+    else if (days > (alertDays[1] || 60)) {{ color = '#fac775'; bg = '#412402'; }}
+    else if (days > (alertDays[0] || 30)) {{ color = '#fac775'; bg = '#2c1a00'; }}
+    daysBadge = '<span style="background:' + bg + ';color:' + color + ';padding:2px 6px;border-radius:4px;font-size:10px">' + days + 'd</span> ';
+  }}
+  const statusBadge = item.status === 'listed'
+    ? '<span style="background:#085041;color:#9fe1cb;padding:2px 6px;border-radius:4px;font-size:10px">listed</span>'
+    : '<span style="background:#26215c;color:#afa9ec;padding:2px 6px;border-radius:4px;font-size:10px">exported</span>';
+  const flags = item.concern_flags;
+  const concernDot = flags && flags !== '[]' && flags !== 'null' && flags !== ''
+    ? '<span style="width:7px;height:7px;background:#f09595;border-radius:50%;display:inline-block;margin-left:4px;vertical-align:middle" title="Has concern flags"></span>'
+    : '';
+  const price = item.list_price != null ? '$' + parseFloat(item.list_price).toFixed(2) : '-';
+  const sel = selectedSkus.has(item.sku);
+  const thumb = item.cover_photo
+    ? '<img class="card-thumb" src="' + esc(item.cover_photo) + '" onerror="this.style.display=\'none\'">'
+    : '<div class="card-thumb-placeholder">📷</div>';
+  return '<div class="listing-card' + (sel ? ' selected' : '') + '" data-idx="' + idx + '" data-sku="' + esc(item.sku) + '"'
+    + ' onclick="cardClick(' + idx + ', event)" oncontextmenu="showCtxMenu(event,' + idx + ');return false;">'
+    + '<input type="checkbox" class="card-check" ' + (sel ? 'checked' : '') + ' onclick="event.stopPropagation();toggleSelect(' + idx + ',event)">'
+    + thumb
+    + '<div style="flex:1;min-width:0;margin-left:10px">'
+    + '<div style="font-family:monospace;font-size:11px;color:#888780">' + esc(item.sku) + '</div>'
+    + '<div style="font-size:12px;color:#f1efe8;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;margin:3px 0;line-height:1.4">' + esc(item.title || '-') + '</div>'
+    + '<div style="font-size:13px;color:#5dcaa5;font-weight:500">' + price + '</div>'
+    + '<div style="margin-top:5px;display:flex;gap:4px;flex-wrap:wrap;align-items:center">'
+    + statusBadge + ' ' + daysBadge + concernDot
+    + '</div></div></div>';
+}}
+
+function cardClick(idx, event) {{
+  if (event.target.classList.contains('card-check')) return;
+  if (event.shiftKey && lastClickedIdx !== null) {{
+    toggleSelect(idx, event);
+    return;
+  }}
+  openDrawer(allItems[idx]);
+  lastClickedIdx = idx;
+}}
+
+// ── Multi-select ──────────────────────────────────────────────────────────────
+function toggleSelect(idx, event) {{
+  const item = allItems[idx];
+  if (!item) return;
+  if (event && event.shiftKey && lastClickedIdx !== null) {{
+    const lo = Math.min(lastClickedIdx, idx);
+    const hi = Math.max(lastClickedIdx, idx);
+    for (let i = lo; i <= hi; i++) {{
+      selectedSkus.add(allItems[i].sku);
+    }}
+  }} else {{
+    if (selectedSkus.has(item.sku)) selectedSkus.delete(item.sku);
+    else selectedSkus.add(item.sku);
+  }}
+  lastClickedIdx = idx;
+  renderGrid();
+  updateBulkBar();
+}}
+
+function updateBulkBar() {{
+  const bar = document.getElementById('bulk-bar');
+  if (selectedSkus.size >= 2) {{
+    bar.style.display = 'flex';
+    document.getElementById('bulk-count').textContent = selectedSkus.size + ' selected';
+  }} else {{
+    bar.style.display = 'none';
+  }}
+}}
+
+function deselectAll() {{
+  selectedSkus = new Set();
+  renderGrid();
+  updateBulkBar();
+}}
+
+// ── Drawer ────────────────────────────────────────────────────────────────────
+function openDrawer(item) {{
+  drawerSku = item.sku;
+  drawerItem = item;
+  dirtyFields = {{}};
+  drawerPhotos = (item.image_paths || '').split('|').filter(Boolean);
+  originalPhotos = [...drawerPhotos];
+  renderDrawer(item);
+  document.getElementById('drawer-overlay').classList.add('open');
+  document.getElementById('drawer').classList.add('open');
+}}
+
+function closeDrawer() {{
+  document.getElementById('drawer-overlay').classList.remove('open');
+  document.getElementById('drawer').classList.remove('open');
+  drawerSku = null;
+  drawerItem = null;
+  dirtyFields = {{}};
+}}
+
+function renderDrawer(item) {{
+  const hasListingId = item.listing_id && item.listing_id !== '';
+  const hasOfferId = item.offer_id && item.offer_id !== '';
+  const ebayLink = hasListingId
+    ? '<a href="https://www.ebay.com/itm/' + item.listing_id + '" target="_blank" style="color:#7f77dd;text-decoration:none;font-size:12px">Open on eBay ↗</a>'
+    : '<span style="color:#3a3a38;font-size:12px" title="No listing ID">Open on eBay ↗</span>';
+  const statusBadge = item.status === 'listed'
+    ? '<span class="badge" style="background:#085041;color:#9fe1cb">listed</span>'
+    : '<span class="badge" style="background:#26215c;color:#afa9ec">exported</span>';
+
+  const condOptions = ['NEW','LIKE_NEW','VERY_GOOD','USED_GOOD','USED_ACCEPTABLE','FOR_PARTS_OR_NOT_WORKING']
+    .map(c => '<option value="' + c + '"' + (item.condition === c ? ' selected' : '') + '>' + c.replace(/_/g,' ') + '</option>').join('');
+
+  const promoPct = item.promotion_pct || defaultPromoPct;
+
+  document.getElementById('drawer-inner').innerHTML = `
+<div class="drawer-section" style="position:sticky;top:0;background:#111110;z-index:10">
+  <div style="display:flex;justify-content:space-between;align-items:flex-start">
+    <div>
+      <div style="font-family:monospace;font-size:15px;color:#f1efe8;font-weight:500">${{esc(item.sku)}}</div>
+      <div style="margin-top:4px;display:flex;gap:8px;align-items:center">
+        ${{statusBadge}}
+        ${{ebayLink}}
+        <a href="https://www.ebay.com/sh/lst/active" target="_blank" style="color:#888780;text-decoration:none;font-size:11px">Seller Hub ↗</a>
+      </div>
+    </div>
+    <button onclick="closeDrawer()" style="background:none;border:none;color:#888780;font-size:20px;cursor:pointer;padding:0;line-height:1">&#10005;</button>
+  </div>
+</div>
+
+<div class="drawer-section" id="drawer-photos">
+  <div class="drawer-section-title">Photos</div>
+  <div class="photo-scroll" id="photo-row"></div>
+  <div style="margin-top:8px;display:flex;align-items:center;gap:8px">
+    <button class="btn btn-gray" style="font-size:12px;padding:4px 10px" onclick="document.getElementById('photo-upload').click()">+ Add Photos</button>
+    <input type="file" id="photo-upload" multiple accept="image/*" style="display:none" onchange="handlePhotoUpload(this.files)">
+    <span style="font-size:10px;color:#888780">Use Set Cover to change cover photo.</span>
+  </div>
+</div>
+
+<div class="drawer-section">
+  <div class="drawer-section-title">Fields</div>
+
+  <div class="field-row" id="field-row-title">
+    <label>Title <span id="revert-title" class="revert-link" style="display:none" onclick="revertField('title')">Revert</span></label>
+    <input type="text" id="field-title" value="${{esc(item.title||'')}}" maxlength="80"
+      oninput="markDirty('title',this.value); updateCharCounter()">
+    <div class="char-counter"><span id="char-counter">0</span>/80</div>
+    <button class="btn btn-gray" style="font-size:11px;padding:3px 8px;margin-top:4px" onclick="claudeSuggest('title')">Improve with Claude</button>
+    <div class="suggest-panel" id="suggest-panel-title">
+      <div class="drawer-section-title" style="margin-bottom:6px">Claude Suggestion</div>
+      <div class="suggest-text" id="suggest-text-title"></div>
+      <div style="display:flex;gap:6px">
+        <button class="btn btn-green" style="font-size:11px;padding:3px 8px" onclick="acceptSuggestion('title')">Accept</button>
+        <button class="btn btn-gray" style="font-size:11px;padding:3px 8px" onclick="editSuggestion('title')">Edit</button>
+        <button class="btn btn-gray" style="font-size:11px;padding:3px 8px" onclick="dismissSuggestion('title')">Dismiss</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="field-row" id="field-row-description">
+    <label>Description <span id="revert-description" class="revert-link" style="display:none" onclick="revertField('description')">Revert</span></label>
+    <textarea id="field-description" rows="5" style="resize:vertical" oninput="markDirty('description',this.value)">${{esc(item.description||'')}}</textarea>
+    <button class="btn btn-gray" style="font-size:11px;padding:3px 8px;margin-top:4px" onclick="claudeSuggest('description')">Improve with Claude</button>
+    <div class="suggest-panel" id="suggest-panel-description">
+      <div class="drawer-section-title" style="margin-bottom:6px">Claude Suggestion</div>
+      <div class="suggest-text" id="suggest-text-description"></div>
+      <div style="display:flex;gap:6px">
+        <button class="btn btn-green" style="font-size:11px;padding:3px 8px" onclick="acceptSuggestion('description')">Accept</button>
+        <button class="btn btn-gray" style="font-size:11px;padding:3px 8px" onclick="editSuggestion('description')">Edit</button>
+        <button class="btn btn-gray" style="font-size:11px;padding:3px 8px" onclick="dismissSuggestion('description')">Dismiss</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="field-row" id="field-row-price">
+    <label>Price ($) <span id="revert-price" class="revert-link" style="display:none" onclick="revertField('price')">Revert</span></label>
+    <input type="number" id="field-price" value="${{item.list_price||''}}" step="0.01" min="0"
+      oninput="markDirty('price',parseFloat(this.value))">
+    <button class="btn btn-gray" style="font-size:11px;padding:3px 8px;margin-top:4px" onclick="suggestPrice()">Suggest Market Price</button>
+    <div id="price-note" class="price-note"></div>
+  </div>
+
+  <div class="field-row" id="field-row-condition">
+    <label>Condition <span id="revert-condition" class="revert-link" style="display:none" onclick="revertField('condition')">Revert</span></label>
+    <select id="field-condition" onchange="markDirty('condition',this.value)">
+      ${{condOptions}}
+    </select>
+  </div>
+
+  <div class="field-row">
+    <label>Category</label>
+    <div style="display:flex;align-items:center;gap:8px">
+      <span id="category-display" style="font-size:13px;color:#f1efe8">${{esc(item.ebay_category_name||'Unknown')}}</span>
+      <button class="btn btn-gray" style="font-size:11px;padding:3px 8px" onclick="recategorize()">Recategorize</button>
+    </div>
+  </div>
+</div>
+
+<div class="drawer-section">
+  <div class="drawer-section-title">Promotion</div>
+  <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+    <label style="display:flex;align-items:center;gap:6px;cursor:pointer;margin:0">
+      <input type="checkbox" id="promo-toggle" onchange="togglePromo(this.checked)"
+        ${{item.promotion_pct ? 'checked' : ''}}>
+      <span style="font-size:13px;color:#d4d2c8">Promote this listing</span>
+    </label>
+  </div>
+  <div id="promo-pct-row" style="${{item.promotion_pct ? '' : 'display:none'}}">
+    <label>Promotion % (2–20)</label>
+    <input type="number" id="field-promo-pct" value="${{promoPct}}"
+      min="2" max="20" step="0.5" style="width:100px">
+  </div>
+  <div style="font-size:11px;color:#888780;margin-top:6px">Changes applied when you push to eBay.</div>
+</div>
+
+<div class="drawer-section">
+  <div class="drawer-section-title">Push to eBay</div>
+  ${{!hasOfferId ? '<div style="background:#412402;color:#fac775;padding:8px 10px;border-radius:6px;font-size:12px;margin-bottom:10px">No offer ID stored. Publish this item first via the Export tab.</div>' : ''}}
+  <div id="push-steps" style="margin-bottom:10px"></div>
+  <button class="btn btn-purple" style="width:100%;padding:9px" onclick="pushToEbay()" id="push-btn" ${{!hasOfferId ? 'disabled style="opacity:.5;cursor:default"' : ''}}>Push to eBay</button>
+  <button class="btn btn-red" style="width:100%;padding:7px;margin-top:8px" onclick="confirmEndListing()">End Listing</button>
+</div>
+`;
+
+  renderPhotoRow();
+  updateCharCounter();
+}}
+
+// ── Photos ────────────────────────────────────────────────────────────────────
+function renderPhotoRow() {{
+  const row = document.getElementById('photo-row');
+  if (!row) return;
+  if (!drawerPhotos.length) {{
+    row.innerHTML = '<span style="color:#888780;font-size:12px">No photos</span>';
+    return;
+  }}
+  row.innerHTML = drawerPhotos.map((url, i) => `
+<div class="photo-thumb">
+  <img src="${{esc(url)}}" onerror="this.src=''" title="${{esc(url)}}">
+  ${{i === 0 ? '<div class="photo-cover-badge">Cover</div>' : ''}}
+  <div class="photo-actions">
+    ${{i !== 0 ? '<button class="photo-btn" onclick="setCover(\'' + esc(url) + '\')">Set Cover</button>' : ''}}
+    <button class="photo-btn" style="color:#f09595" onclick="deletePhoto(\'' + esc(url) + '\')">Del</button>
+  </div>
+</div>`).join('');
+}}
+
+async function handlePhotoUpload(files) {{
+  if (!files.length || !drawerSku) return;
+  const fd = new FormData();
+  for (const f of files) fd.append('files', f);
+  try {{
+    const r = await fetch('/api/items/' + drawerSku + '/photos', {{method:'POST', body:fd}});
+    if (!r.ok) throw new Error(await r.text());
+    const d = await r.json();
+    drawerPhotos = d.image_paths;
+    renderPhotoRow();
+    // Update cover photo in grid
+    const idx = allItems.findIndex(i => i.sku === drawerSku);
+    if (idx >= 0) {{ allItems[idx].image_paths = drawerPhotos.join('|'); allItems[idx].cover_photo = drawerPhotos[0] || null; renderGrid(); }}
+    showToast('Photos uploaded', true);
+  }} catch(e) {{
+    showToast('Upload failed: ' + e, false);
+  }}
+  document.getElementById('photo-upload').value = '';
+}}
+
+async function deletePhoto(url) {{
+  if (!drawerSku) return;
+  if (!confirm('Remove this photo from the listing?')) return;
+  try {{
+    const r = await fetch('/api/items/' + drawerSku + '/photos', {{
+      method:'DELETE', headers:{{'Content-Type':'application/json'}},
+      body: JSON.stringify({{url}})
+    }});
+    if (!r.ok) throw new Error(await r.text());
+    const d = await r.json();
+    drawerPhotos = d.image_paths;
+    renderPhotoRow();
+    showToast('Photo removed', true);
+  }} catch(e) {{
+    showToast('Failed: ' + e, false);
+  }}
+}}
+
+async function setCover(url) {{
+  if (!drawerSku) return;
+  try {{
+    const r = await fetch('/api/items/' + drawerSku + '/photos/set-cover', {{
+      method:'POST', headers:{{'Content-Type':'application/json'}},
+      body: JSON.stringify({{url}})
+    }});
+    if (!r.ok) throw new Error(await r.text());
+    const d = await r.json();
+    drawerPhotos = d.image_paths;
+    renderPhotoRow();
+    // Update grid
+    const idx = allItems.findIndex(i => i.sku === drawerSku);
+    if (idx >= 0) {{ allItems[idx].cover_photo = drawerPhotos[0] || null; allItems[idx].image_paths = drawerPhotos.join('|'); renderGrid(); }}
+    showToast('Cover photo updated', true);
+  }} catch(e) {{
+    showToast('Failed: ' + e, false);
+  }}
+}}
+
+// ── Dirty fields ──────────────────────────────────────────────────────────────
+function markDirty(field, value) {{
+  if (!(field in dirtyFields)) {{
+    let original;
+    if (field === 'title') original = drawerItem.title || '';
+    else if (field === 'description') original = drawerItem.description || '';
+    else if (field === 'price') original = drawerItem.list_price;
+    else if (field === 'condition') original = drawerItem.condition || '';
+    dirtyFields[field] = {{value, original}};
+  }} else {{
+    dirtyFields[field].value = value;
+  }}
+  const row = document.getElementById('field-row-' + field);
+  const inp = document.getElementById('field-' + field);
+  const rev = document.getElementById('revert-' + field);
+  if (row) row.classList.add('field-dirty');
+  if (rev) rev.style.display = 'inline';
+}}
+
+function revertField(field) {{
+  if (!(field in dirtyFields)) return;
+  const orig = dirtyFields[field].original;
+  delete dirtyFields[field];
+  if (field === 'title') document.getElementById('field-title').value = orig || '';
+  if (field === 'description') document.getElementById('field-description').value = orig || '';
+  if (field === 'price') document.getElementById('field-price').value = orig != null ? orig : '';
+  if (field === 'condition') document.getElementById('field-condition').value = orig || '';
+  const row = document.getElementById('field-row-' + field);
+  const rev = document.getElementById('revert-' + field);
+  if (row) row.classList.remove('field-dirty');
+  if (rev) rev.style.display = 'none';
+  updateCharCounter();
+}}
+
+function updateCharCounter() {{
+  const el = document.getElementById('field-title');
+  const ctr = document.getElementById('char-counter');
+  if (!el || !ctr) return;
+  const n = (el.value || '').length;
+  ctr.textContent = n;
+  ctr.style.color = n > 75 ? '#f09595' : n > 59 ? '#fac775' : '#888780';
+}}
+
+// ── Claude suggest ────────────────────────────────────────────────────────────
+async function claudeSuggest(type) {{
+  if (!drawerSku) return;
+  const panel = document.getElementById('suggest-panel-' + type);
+  const textEl = document.getElementById('suggest-text-' + type);
+  panel.classList.add('open');
+  textEl.textContent = 'Generating suggestion...';
+  try {{
+    const r = await fetch('/api/items/' + drawerSku + '/claude-suggest', {{
+      method:'POST', headers:{{'Content-Type':'application/json'}},
+      body: JSON.stringify({{type}})
+    }});
+    if (!r.ok) {{ const e = await r.json(); throw new Error(e.detail || 'API error'); }}
+    const d = await r.json();
+    textEl.textContent = d.suggestion;
+    panel.dataset.suggestion = d.suggestion;
+  }} catch(e) {{
+    textEl.textContent = 'Error: ' + e.message;
+    panel.dataset.suggestion = '';
+  }}
+}}
+
+function acceptSuggestion(type) {{
+  const panel = document.getElementById('suggest-panel-' + type);
+  const suggestion = panel.dataset.suggestion || '';
+  if (!suggestion) return;
+  const field = type === 'title' ? 'field-title' : 'field-description';
+  document.getElementById(field).value = suggestion;
+  markDirty(type === 'title' ? 'title' : 'description', suggestion);
+  updateCharCounter();
+  panel.classList.remove('open');
+}}
+
+function editSuggestion(type) {{
+  const panel = document.getElementById('suggest-panel-' + type);
+  const suggestion = panel.dataset.suggestion || '';
+  const field = type === 'title' ? 'field-title' : 'field-description';
+  document.getElementById(field).value = suggestion;
+  markDirty(type === 'title' ? 'title' : 'description', suggestion);
+  updateCharCounter();
+  panel.classList.remove('open');
+  document.getElementById(field).focus();
+}}
+
+function dismissSuggestion(type) {{
+  document.getElementById('suggest-panel-' + type).classList.remove('open');
+}}
+
+// ── Price suggest ─────────────────────────────────────────────────────────────
+async function suggestPrice() {{
+  if (!drawerSku) return;
+  const btn = event.target;
+  btn.textContent = 'Looking up comps...';
+  btn.disabled = true;
+  const noteEl = document.getElementById('price-note');
+  try {{
+    const r = await fetch('/api/items/' + drawerSku + '/price-suggest');
+    if (!r.ok) {{ const e = await r.json(); throw new Error(e.detail || 'API error'); }}
+    const d = await r.json();
+    if (d.suggested_price != null) {{
+      const inp = document.getElementById('field-price');
+      inp.value = d.suggested_price.toFixed(2);
+      markDirty('price', d.suggested_price);
+      noteEl.textContent = 'Based on ' + d.sample_size + ' sold comps: median $'
+        + (d.median||0).toFixed(2) + ', range $' + (d.low||0).toFixed(2) + '–$' + (d.high||0).toFixed(2);
+    }} else {{
+      noteEl.textContent = 'No comps found for this item.';
+    }}
+  }} catch(e) {{
+    noteEl.textContent = 'Error: ' + e.message;
+  }} finally {{
+    btn.textContent = 'Suggest Market Price';
+    btn.disabled = false;
+  }}
+}}
+
+// ── Promotion ─────────────────────────────────────────────────────────────────
+function togglePromo(enabled) {{
+  document.getElementById('promo-pct-row').style.display = enabled ? '' : 'none';
+}}
+
+// ── Recategorize ──────────────────────────────────────────────────────────────
+async function recategorize() {{
+  if (!drawerSku) return;
+  const btn = event.target;
+  btn.textContent = 'Working...';
+  btn.disabled = true;
+  try {{
+    const r = await fetch('/api/items/' + drawerSku + '/recategorize', {{method:'POST'}});
+    if (!r.ok) {{ const e = await r.json(); throw new Error(e.detail||'error'); }}
+    const d = await r.json();
+    document.getElementById('category-display').textContent = d.ebay_category_name || 'Unknown';
+    showToast('Category updated to: ' + (d.ebay_category_name||'Unknown'), true);
+  }} catch(e) {{
+    showToast('Recategorize failed: ' + e.message, false);
+  }} finally {{
+    btn.textContent = 'Recategorize';
+    btn.disabled = false;
+  }}
+}}
+
+// ── Push to eBay ──────────────────────────────────────────────────────────────
+async function pushToEbay() {{
+  if (!drawerSku) return;
+  const btn = document.getElementById('push-btn');
+  const stepsEl = document.getElementById('push-steps');
+  btn.disabled = true;
+  btn.textContent = 'Pushing...';
+
+  const payload = {{
+    title: document.getElementById('field-title')?.value || null,
+    description: document.getElementById('field-description')?.value || null,
+    list_price: parseFloat(document.getElementById('field-price')?.value) || null,
+    condition: document.getElementById('field-condition')?.value || null,
+    promotion_enabled: document.getElementById('promo-toggle')?.checked || false,
+    promotion_pct: parseFloat(document.getElementById('field-promo-pct')?.value) || null,
+    photos_changed: JSON.stringify(drawerPhotos) !== JSON.stringify(originalPhotos),
+  }};
+
+  stepsEl.innerHTML = '<div class="step-row"><span class="step-icon">⏳</span> Pushing to eBay...</div>';
+  try {{
+    const r = await fetch('/api/listings/push/' + drawerSku, {{
+      method:'POST', headers:{{'Content-Type':'application/json'}},
+      body: JSON.stringify(payload)
+    }});
+    const d = await r.json();
+    if (!r.ok) {{
+      stepsEl.innerHTML = '<div class="step-row"><span class="step-icon">❌</span><span style="color:#f09595">' + esc(d.detail||'Error') + '</span></div>';
+      showToast('Push failed', false);
+      return;
+    }}
+
+    stepsEl.innerHTML = (d.steps||[]).map(s =>
+      '<div class="step-row"><span class="step-icon">' + (s.ok ? '✅' : '❌') + '</span>'
+      + '<span style="color:' + (s.ok ? '#9fe1cb' : '#f09595') + '">' + esc(s.msg) + '</span></div>'
+    ).join('');
+
+    if (d.ok) {{
+      // Clear dirty borders
+      ['title','description','price','condition'].forEach(f => {{
+        const row = document.getElementById('field-row-' + f);
+        const rev = document.getElementById('revert-' + f);
+        if (row) row.classList.remove('field-dirty');
+        if (rev) rev.style.display = 'none';
+      }});
+      dirtyFields = {{}};
+      originalPhotos = [...drawerPhotos];
+      // Update card in grid
+      const idx = allItems.findIndex(i => i.sku === drawerSku);
+      if (idx >= 0 && d.item) {{
+        if (d.item.title) allItems[idx].title = d.item.title;
+        if (d.item.list_price) allItems[idx].list_price = d.item.list_price;
+        renderGrid();
+      }}
+      showToast('Pushed successfully', true);
+    }} else {{
+      showToast('Push completed with errors', false);
+    }}
+  }} catch(e) {{
+    stepsEl.innerHTML = '<div class="step-row"><span class="step-icon">❌</span><span style="color:#f09595">' + esc(e.message) + '</span></div>';
+    showToast('Push failed: ' + e.message, false);
+  }} finally {{
+    btn.disabled = false;
+    btn.textContent = 'Push to eBay';
+  }}
+}}
+
+// ── End listing ───────────────────────────────────────────────────────────────
+function confirmEndListing() {{
+  if (!drawerSku) return;
+  showDialog(
+    'End This Listing',
+    'End this listing on eBay? This removes it from active listings. The item will remain in your inventory and can be relisted from the Export tab.',
+    null,
+    async () => {{
+      try {{
+        const r = await fetch('/api/listings/end/' + drawerSku, {{method:'DELETE'}});
+        if (!r.ok) {{ const e = await r.json(); throw new Error(e.detail||'Error'); }}
+        showToast('Listing ended', true);
+        closeDrawer();
+        loadItems();
+      }} catch(e) {{
+        showToast('End listing failed: ' + e.message, false);
+      }}
+    }},
+    'End Listing',
+    'btn-red'
+  );
+}}
+
+// ── Sync ──────────────────────────────────────────────────────────────────────
+async function syncFromEbay() {{
+  const btn = document.getElementById('sync-btn');
+  btn.textContent = 'Syncing...';
+  btn.disabled = true;
+  try {{
+    const r = await fetch('/api/listings/sync');
+    if (!r.ok) {{ const e = await r.json(); throw new Error(e.detail||'error'); }}
+    const d = await r.json();
+    showToast('Synced ' + d.synced + ' items, updated ' + d.updated, true);
+    loadItems();
+  }} catch(e) {{
+    showToast('Sync failed: ' + e.message, false);
+  }} finally {{
+    btn.textContent = 'Sync from eBay';
+    btn.disabled = false;
+  }}
+}}
+
+// ── Context menu ──────────────────────────────────────────────────────────────
+function showCtxMenu(event, idx) {{
+  ctxItem = allItems[idx];
+  const menu = document.getElementById('ctx-menu');
+  menu.style.display = 'block';
+  menu.style.left = event.clientX + 'px';
+  menu.style.top = event.clientY + 'px';
+  // Clamp to viewport
+  const rect = menu.getBoundingClientRect();
+  if (rect.right > window.innerWidth) menu.style.left = (event.clientX - rect.width) + 'px';
+  if (rect.bottom > window.innerHeight) menu.style.top = (event.clientY - rect.height) + 'px';
+}}
+
+function hideCtxMenu() {{
+  document.getElementById('ctx-menu').style.display = 'none';
+  ctxItem = null;
+}}
+
+function ctxOpenEbay() {{
+  if (!ctxItem) return;
+  if (ctxItem.listing_id) window.open('https://www.ebay.com/itm/' + ctxItem.listing_id, '_blank');
+  hideCtxMenu();
+}}
+
+function ctxOpenSellerHub() {{
+  window.open('https://www.ebay.com/sh/lst/active', '_blank');
+  hideCtxMenu();
+}}
+
+async function ctxImproveTitle() {{
+  if (!ctxItem) return;
+  openDrawer(ctxItem);
+  hideCtxMenu();
+  await new Promise(r => setTimeout(r, 100));
+  claudeSuggest('title');
+}}
+
+async function ctxPriceSuggest() {{
+  if (!ctxItem) return;
+  openDrawer(ctxItem);
+  hideCtxMenu();
+  await new Promise(r => setTimeout(r, 100));
+  suggestPrice();
+}}
+
+async function ctxEndListing() {{
+  if (!ctxItem) return;
+  const sku = ctxItem.sku;
+  hideCtxMenu();
+  showDialog(
+    'End This Listing',
+    'End listing for ' + sku + '? This removes it from active eBay listings.',
+    null,
+    async () => {{
+      try {{
+        const r = await fetch('/api/listings/end/' + sku, {{method:'DELETE'}});
+        if (!r.ok) {{ const e = await r.json(); throw new Error(e.detail||'Error'); }}
+        showToast('Listing ended: ' + sku, true);
+        loadItems();
+      }} catch(e) {{
+        showToast('Failed: ' + e.message, false);
+      }}
+    }},
+    'End Listing', 'btn-red'
+  );
+}}
+
+async function ctxSendToReview() {{
+  if (!ctxItem) return;
+  const sku = ctxItem.sku;
+  hideCtxMenu();
+  try {{
+    const r = await fetch('/api/items/' + sku, {{
+      method:'PATCH', headers:{{'Content-Type':'application/json'}},
+      body: JSON.stringify({{
+        status: 'needs_review',
+        review_sub_queue: 'awaiting_approval',
+        reviewer_notes: 'Manually sent from Listings page'
+      }})
+    }});
+    if (!r.ok) {{ const e = await r.json(); throw new Error(e.detail||'Error'); }}
+    showToast('Sent to Review Queue: ' + sku, true);
+    loadItems();
+  }} catch(e) {{
+    showToast('Failed: ' + e.message, false);
+  }}
+}}
+
+// ── Bulk actions ──────────────────────────────────────────────────────────────
+function dlgBulkPrice() {{
+  showDialog('Set Price', 'Enter the new price for ' + selectedSkus.size + ' items:',
+    '<input type="number" id="dlg-input" step="0.01" min="0" placeholder="0.00" style="width:100%;margin-top:4px">',
+    async () => {{
+      const price = parseFloat(document.getElementById('dlg-input').value);
+      if (!price || price <= 0) {{ showToast('Invalid price', false); return; }}
+      const r = await fetch('/api/listings/bulk/price', {{
+        method:'POST', headers:{{'Content-Type':'application/json'}},
+        body: JSON.stringify({{skus: [...selectedSkus], price}})
+      }});
+      const d = await r.json();
+      showToast('Updated ' + d.updated.length + ' items', true);
+      loadItems();
+    }}
+  );
+}}
+
+function dlgBulkPromo() {{
+  showDialog('Set Promo %', 'Enter promotion % for ' + selectedSkus.size + ' items (2–20):',
+    '<input type="number" id="dlg-input" step="0.5" min="2" max="20" placeholder="3" style="width:100%;margin-top:4px">',
+    async () => {{
+      const pct = parseFloat(document.getElementById('dlg-input').value);
+      if (!pct || pct < 2 || pct > 20) {{ showToast('Invalid %', false); return; }}
+      const r = await fetch('/api/listings/bulk/promo', {{
+        method:'POST', headers:{{'Content-Type':'application/json'}},
+        body: JSON.stringify({{skus: [...selectedSkus], promotion_pct: pct}})
+      }});
+      const d = await r.json();
+      showToast('Updated ' + d.updated.length + ' items', true);
+      loadItems();
+    }}
+  );
+}}
+
+async function bulkPushAll() {{
+  const skus = [...selectedSkus];
+  if (!skus.length) return;
+  if (!confirm('Push ' + skus.length + ' listings to eBay?')) return;
+
+  const bar = document.getElementById('bulk-bar');
+  bar.innerHTML = '<span style="color:#afa9ec;font-size:12px">Pushing 0/' + skus.length + '...</span>';
+  let pass = 0, fail = 0;
+
+  for (const sku of skus) {{
+    try {{
+      const r = await fetch('/api/listings/push/' + sku, {{
+        method:'POST', headers:{{'Content-Type':'application/json'}},
+        body: JSON.stringify({{promotion_enabled:false}})
+      }});
+      const d = await r.json();
+      if (d.ok) pass++; else fail++;
+    }} catch(e) {{ fail++; }}
+    bar.innerHTML = '<span style="color:#afa9ec;font-size:12px">Pushing ' + (pass+fail) + '/' + skus.length + '...</span>';
+  }}
+
+  showToast('Bulk push done: ' + pass + ' ok, ' + fail + ' failed', pass > 0);
+  deselectAll();
+  loadItems();
+}}
+
+async function bulkEndListings() {{
+  const skus = [...selectedSkus];
+  showDialog(
+    'End ' + skus.length + ' Listings',
+    'End all ' + skus.length + ' selected listings on eBay? Items will move to Export Ready.',
+    null,
+    async () => {{
+      let done = 0;
+      for (const sku of skus) {{
+        try {{
+          await fetch('/api/listings/end/' + sku, {{method:'DELETE'}});
+          done++;
+        }} catch(e) {{}}
+      }}
+      showToast('Ended ' + done + ' listings', true);
+      deselectAll();
+      loadItems();
+    }},
+    'End All', 'btn-red'
+  );
+}}
+
+// ── Dialog ────────────────────────────────────────────────────────────────────
+function showDialog(title, body, contentHtml, onOk, okLabel, okClass) {{
+  document.getElementById('dlg-title').textContent = title;
+  document.getElementById('dlg-body').textContent = body;
+  document.getElementById('dlg-content').innerHTML = contentHtml || '';
+  const okBtn = document.getElementById('dlg-ok');
+  okBtn.textContent = okLabel || 'OK';
+  okBtn.className = 'btn ' + (okClass || 'btn-purple');
+  dlgCallback = onOk;
+  document.getElementById('dialog-overlay').classList.add('open');
+}}
+
+async function dlgConfirm() {{
+  closeDlg();
+  if (dlgCallback) await dlgCallback();
+}}
+
+function closeDlg() {{
+  document.getElementById('dialog-overlay').classList.remove('open');
+  dlgCallback = null;
+}}
+
+// ── Toast ─────────────────────────────────────────────────────────────────────
+var toastTimer = null;
+function showToast(msg, ok) {{
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.className = 'show ' + (ok ? 'ok' : 'err');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.className = '', 3500);
+}}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function esc(s) {{
+  return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}}
+
+// ── Close on outside click ────────────────────────────────────────────────────
+document.addEventListener('click', function(e) {{
+  const menu = document.getElementById('ctx-menu');
+  if (menu.style.display === 'block' && !menu.contains(e.target)) hideCtxMenu();
+}});
+document.addEventListener('keydown', function(e) {{
+  if (e.key === 'Escape') {{
+    hideCtxMenu();
+    closeDrawer();
+    closeDlg();
+  }}
+}});
+
+init();
 </script>
 </body></html>"""
