@@ -77,6 +77,7 @@ def migrate_add_columns() -> None:
         ("offer_id", "VARCHAR"),
         ("promotion_pct", "REAL"),
         ("cost_basis", "REAL"),
+        ("last_synced_at", "TEXT"),
     ]
     for col_name, col_def in new_columns:
         try:

@@ -124,6 +124,11 @@ class ItemRecord(SQLModel, table=True):
     confidence_score: Optional[float] = None
     needs_review: bool = False
     review_reasons: Optional[str] = None      # JSON array string
+    review_reason: Optional[str] = None
+    review_sub_queue: Optional[str] = None
+    reviewer_notes: Optional[str] = None
+    listing_quality_score: Optional[float] = None
+    concern_flags: Optional[str] = None       # JSON array string
     manual_override: bool = False
     notes: Optional[str] = None
 
@@ -143,3 +148,4 @@ class ItemRecord(SQLModel, table=True):
     # Timestamps
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
+    last_synced_at: Optional[str] = None
