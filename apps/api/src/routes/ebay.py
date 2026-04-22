@@ -93,6 +93,7 @@ def publish_batch(session: Session = Depends(get_session)):
             data = result.value
             item.listing_id = data["listing_id"]
             item.listing_url = data["listing_url"]
+            item.offer_id = data.get("offer_id") or ""
             item.status = ItemStatus.LISTED
             item.platform = "ebay"
             item.date_listed = datetime.datetime.utcnow()
@@ -128,13 +129,21 @@ def publish_item(sku: str, session: Session = Depends(get_session)):
     data = result.value
     item.listing_id = data["listing_id"]
     item.listing_url = data["listing_url"]
+    item.offer_id = data.get("offer_id") or ""
     item.status = ItemStatus.LISTED
     item.platform = "ebay"
     item.date_listed = datetime.datetime.utcnow()
     if data["photo_urls"]:
         item.image_paths = data["photo_urls"]
     repo.upsert(item)
-    return {"sku": sku, "listing_id": data["listing_id"], "listing_url": data["listing_url"], "status": "listed", "photos_uploaded": len(data["photo_urls"])}
+    return {
+        "sku": sku,
+        "listing_id": data["listing_id"],
+        "listing_url": data["listing_url"],
+        "offer_id": data.get("offer_id"),
+        "status": "listed",
+        "photos_uploaded": len(data["photo_urls"]),
+    }
 
 @router.post("/sync-sold")
 def sync_sold(session: Session = Depends(get_session)):

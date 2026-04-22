@@ -55,7 +55,7 @@ class EbayInventoryClient:
     def publish_item(self, item: Item) -> Result[dict]:
         """
         Upload photos, create/replace inventory item, create offer, publish.
-        Returns Result with {"listing_id", "listing_url", "photo_urls"}.
+        Returns Result with {"listing_id", "listing_url", "photo_urls", "offer_id"}.
         """
         if not self.auth.is_configured():
             return Result.failure(
@@ -64,14 +64,40 @@ class EbayInventoryClient:
             )
 
         image_paths = [Path(p) for p in (item.image_paths or [])]
+
+        # Sort photos by quality before upload if photo_sort == "auto"
+        if image_paths:
+            try:
+                from packages.core.src.settings import get_setting
+                sort_mode = get_setting("photo_sort") or "auto"
+                if sort_mode == "auto":
+                    from packages.enrichment.src.photo_scorer import rank_photos
+                    image_paths = rank_photos(image_paths)
+                    logger.debug("Photos ranked for %s; cover=%s", item.sku, image_paths[0].name if image_paths else "none")
+            except Exception as _exc:
+                logger.warning("Photo ranking skipped for %s: %s", item.sku, _exc)
+
         photo_urls = self.uploader.upload_all(image_paths) if image_paths else []
 
         try:
-            listing_id, listing_url = self._publish_via_api(item, photo_urls)
+            listing_id, listing_url, offer_id = self._publish_via_api(item, photo_urls)
+
+            # Resolve promotion percentage: item-level overrides DB default
+            promo_pct = 0.0
+            try:
+                from packages.core.src.settings import get_setting as _gs
+                promo_pct = float(item.promotion_pct or 0) or float(_gs("default_promotion_pct") or 0)
+            except Exception:
+                pass
+            if promo_pct > 0:
+                logger.info("Promotion pct %.1f%% set for %s — Marketing API call pending", promo_pct, item.sku)
+                # Marketing API calls (bulk_create_ads_by_listing_id) implemented in Phase 5B
+
             return Result.success({
                 "listing_id": listing_id,
                 "listing_url": listing_url,
                 "photo_urls": photo_urls,
+                "offer_id": offer_id,
             })
         except _EbayApiError as exc:
             logger.error("eBay API %s for %s: %s", exc.status_code, item.sku, exc.body)
@@ -171,7 +197,7 @@ class EbayInventoryClient:
 
         listing_id = publish_resp.get("listingId", offer_id)
         env_domain = "sandbox.ebay.com" if self.auth.settings.ebay_environment == "sandbox" else "ebay.com"
-        return listing_id, f"https://www.{env_domain}/itm/{listing_id}"
+        return listing_id, f"https://www.{env_domain}/itm/{listing_id}", offer_id
 
     # ── Payload builders ──────────────────────────────────────────────────────
 

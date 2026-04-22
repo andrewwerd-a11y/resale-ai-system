@@ -2134,11 +2134,97 @@ input[type=range] {{ accent-color:#7f77dd;cursor:pointer; }}
 <main style="max-width:900px">
 <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
   <h2 style="margin:0">Settings</h2>
-  <button class="btn btn-purple" onclick="saveAll()">Save Changes</button>
+  <div style="display:flex;align-items:center;gap:12px">
+    <span id="dirty-indicator" style="font-size:12px;color:#ef9f27;display:none">Unsaved changes</span>
+    <button class="btn btn-purple" id="save-btn" onclick="saveAll()">Save Settings</button>
+  </div>
 </div>
+<div id="save-toast" style="display:none;padding:8px 14px;border-radius:6px;font-size:13px;margin-bottom:12px"></div>
 <div class="restart-banner" id="restart-banner">
   Changes saved. Restart the server for .env changes to take effect.
 </div>
+
+<!-- ── DB-backed settings ─────────────────────────────── -->
+<div class="settings-section">
+  <h3>Photo Intake</h3>
+  <div class="field-row">
+    <label>Photo Sort Mode</label>
+    <div style="display:flex;gap:0;border:1px solid #3a3a38;border-radius:6px;overflow:hidden;width:fit-content">
+      <button id="sort-auto" onclick="setPhotoSort('auto')"
+              style="padding:6px 18px;font-size:13px;cursor:pointer;border:none;font-family:inherit;
+                     background:#534ab7;color:#eeedfe">Auto (AI)</button>
+      <button id="sort-manual" onclick="setPhotoSort('manual')"
+              style="padding:6px 18px;font-size:13px;cursor:pointer;border:none;font-family:inherit;
+                     background:#2c2c2a;color:#888780">Manual</button>
+    </div>
+    <input type="hidden" id="photo-sort" value="auto">
+  </div>
+</div>
+
+<div class="settings-section">
+  <h3>Enrichment</h3>
+  <div class="settings-grid">
+    <div class="field-row">
+      <label>Enrichment Mode</label>
+      <select id="enrichment-mode" onchange="markDirty()">
+        <option value="local">Local only (Ollama vision, no Claude)</option>
+        <option value="claude">Claude only</option>
+        <option value="hybrid">Hybrid (Local first, Claude fallback)</option>
+      </select>
+    </div>
+    <div class="field-row">
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+        <input type="checkbox" id="enrichment-enabled" style="width:auto" onchange="markDirty()">
+        <span style="font-size:13px;color:#d4d2c8">Enable AI enrichment (Claude API)</span>
+      </label>
+    </div>
+  </div>
+</div>
+
+<div class="settings-section">
+  <h3>Listings</h3>
+  <div class="settings-grid">
+    <div class="field-row">
+      <label>Default Promotion %</label>
+      <input type="number" id="default-promo-pct" min="0" max="20" step="0.5"
+             style="width:120px" onchange="markDirty()">
+      <span style="font-size:11px;color:#888780;margin-top:4px;display:block">
+        Applied to new listings unless overridden per item. Set to 0 to disable.
+      </span>
+    </div>
+    <div class="field-row">
+      <label>Default Condition</label>
+      <select id="intake-condition" onchange="markDirty()">
+        <option value="NEW">New</option>
+        <option value="LIKE_NEW">Like New</option>
+        <option value="USED_EXCELLENT">Used - Excellent</option>
+        <option value="USED_VERY_GOOD">Used - Very Good</option>
+        <option value="USED_GOOD">Used - Good</option>
+        <option value="USED_ACCEPTABLE">Used - Acceptable</option>
+        <option value="FOR_PARTS_OR_NOT_WORKING">For Parts / Not Working</option>
+      </select>
+    </div>
+  </div>
+</div>
+
+<div class="settings-section">
+  <h3>Listing Age Alerts</h3>
+  <div style="display:flex;gap:16px;align-items:flex-end">
+    <div class="field-row" style="margin:0">
+      <label>First alert (days)</label>
+      <input type="number" id="alert-days-1" min="1" style="width:100px" onchange="markDirty()">
+    </div>
+    <div class="field-row" style="margin:0">
+      <label>Second alert (days)</label>
+      <input type="number" id="alert-days-2" min="1" style="width:100px" onchange="markDirty()">
+    </div>
+    <div class="field-row" style="margin:0">
+      <label>Third alert (days)</label>
+      <input type="number" id="alert-days-3" min="1" style="width:100px" onchange="markDirty()">
+    </div>
+  </div>
+</div>
+<!-- ── end DB-backed settings ─────────────────────────── -->
 
 <div class="settings-section">
   <h3>Vision Model</h3>
@@ -2247,6 +2333,49 @@ input[type=range] {{ accent-color:#7f77dd;cursor:pointer; }}
 </div>
 </main>
 <script>
+let _dirty = false;
+
+function markDirty() {{
+  _dirty = true;
+  document.getElementById('dirty-indicator').style.display = 'inline';
+}}
+
+function setPhotoSort(val) {{
+  document.getElementById('photo-sort').value = val;
+  document.getElementById('sort-auto').style.background   = val === 'auto'   ? '#534ab7' : '#2c2c2a';
+  document.getElementById('sort-auto').style.color        = val === 'auto'   ? '#eeedfe' : '#888780';
+  document.getElementById('sort-manual').style.background = val === 'manual' ? '#534ab7' : '#2c2c2a';
+  document.getElementById('sort-manual').style.color      = val === 'manual' ? '#eeedfe' : '#888780';
+  markDirty();
+}}
+
+function showToast(msg, ok) {{
+  const t = document.getElementById('save-toast');
+  t.textContent = msg;
+  t.style.background = ok ? '#085041' : '#501313';
+  t.style.color = ok ? '#9fe1cb' : '#f09595';
+  t.style.border = ok ? '1px solid #0d6b57' : '1px solid #7a1f1f';
+  t.style.display = 'block';
+  setTimeout(() => {{ t.style.display = 'none'; }}, 3000);
+}}
+
+async function loadDbSettings() {{
+  try {{
+    const r = await fetch('/api/settings');
+    const d = await r.json();
+    setPhotoSort(d.photo_sort || 'auto');
+    document.getElementById('enrichment-mode').value = d.enrichment_mode || 'hybrid';
+    document.getElementById('default-promo-pct').value = parseFloat(d.default_promotion_pct || '3');
+    document.getElementById('intake-condition').value = d.intake_default_condition || 'USED_EXCELLENT';
+    const parts = (d.listing_age_alert_days || '30,60,90').split(',');
+    document.getElementById('alert-days-1').value = parseInt(parts[0]) || 30;
+    document.getElementById('alert-days-2').value = parseInt(parts[1]) || 60;
+    document.getElementById('alert-days-3').value = parseInt(parts[2]) || 90;
+    _dirty = false;
+    document.getElementById('dirty-indicator').style.display = 'none';
+  }} catch(e) {{ console.error('loadDbSettings:', e); }}
+}}
+
 async function loadSettings() {{
   try {{
     const [rCurrent, rRules, rPlatforms] = await Promise.all([
@@ -2300,28 +2429,66 @@ async function togglePlatform(key, active) {{
 }}
 
 async function saveAll() {{
-  const confVal = parseInt(document.getElementById('conf-threshold').value) / 100;
-  await fetch('/api/settings/rules', {{
-    method:'PATCH', headers:{{'Content-Type':'application/json'}},
-    body: JSON.stringify({{
-      triage: {{
-        confidence_review_threshold: confVal,
-        high_value_threshold: parseFloat(document.getElementById('high-value-threshold').value)||75,
-      }},
-      pricing: {{
-        stale_listing_days: parseInt(document.getElementById('stale-days').value)||60,
-        price_drop_percent: parseInt(document.getElementById('stale-drop').value)||10,
-      }},
-      ebay: {{
-        default_shipping_policy: document.getElementById('ebay-shipping').value,
-        default_return_policy: document.getElementById('ebay-return').value,
-        default_payment_policy: document.getElementById('ebay-payment').value,
-      }},
-    }})
-  }});
-  document.getElementById('restart-banner').classList.add('show');
+  const btn = document.getElementById('save-btn');
+  btn.textContent = 'Saving...';
+  btn.disabled = true;
+  try {{
+    // Save DB-backed settings
+    const alertDays = [
+      parseInt(document.getElementById('alert-days-1').value) || 30,
+      parseInt(document.getElementById('alert-days-2').value) || 60,
+      parseInt(document.getElementById('alert-days-3').value) || 90,
+    ].join(',');
+    const dbResp = await fetch('/api/settings', {{
+      method:'PATCH', headers:{{'Content-Type':'application/json'}},
+      body: JSON.stringify({{
+        photo_sort: document.getElementById('photo-sort').value,
+        enrichment_mode: document.getElementById('enrichment-mode').value,
+        default_promotion_pct: String(document.getElementById('default-promo-pct').value || '3'),
+        intake_default_condition: document.getElementById('intake-condition').value,
+        listing_age_alert_days: alertDays,
+      }})
+    }});
+    if (!dbResp.ok) {{
+      const err = await dbResp.json();
+      showToast('Error: ' + (err.detail || 'save failed'), false);
+      return;
+    }}
+
+    // Save rules-based settings
+    const confVal = parseInt(document.getElementById('conf-threshold').value) / 100;
+    await fetch('/api/settings/rules', {{
+      method:'PATCH', headers:{{'Content-Type':'application/json'}},
+      body: JSON.stringify({{
+        triage: {{
+          confidence_review_threshold: confVal,
+          high_value_threshold: parseFloat(document.getElementById('high-value-threshold').value)||75,
+        }},
+        pricing: {{
+          stale_listing_days: parseInt(document.getElementById('stale-days').value)||60,
+          price_drop_percent: parseInt(document.getElementById('stale-drop').value)||10,
+        }},
+        ebay: {{
+          default_shipping_policy: document.getElementById('ebay-shipping').value,
+          default_return_policy: document.getElementById('ebay-return').value,
+          default_payment_policy: document.getElementById('ebay-payment').value,
+        }},
+      }})
+    }});
+
+    _dirty = false;
+    document.getElementById('dirty-indicator').style.display = 'none';
+    showToast('Settings saved', true);
+    document.getElementById('restart-banner').classList.add('show');
+  }} catch(e) {{
+    showToast('Save failed: ' + e, false);
+  }} finally {{
+    btn.textContent = 'Save Settings';
+    btn.disabled = false;
+  }}
 }}
 
+loadDbSettings();
 loadSettings();
 </script>
 </body></html>"""

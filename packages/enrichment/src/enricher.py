@@ -146,6 +146,15 @@ class ItemEnricher:
                 "Enrichment not available: check ANTHROPIC_API_KEY and ENRICHMENT_ENABLED"
             )
 
+        # Respect enrichment_mode from DB settings
+        try:
+            from packages.core.src.settings import get_setting
+            mode = get_setting("enrichment_mode") or "hybrid"
+        except Exception:
+            mode = "hybrid"
+        if mode == "local":
+            return Result.failure("Enrichment mode is 'local' — Claude enrichment disabled in settings")
+
         # Build the user-message payload — exclude noise fields
         item_data = {
             k: v for k, v in item.model_dump().items()

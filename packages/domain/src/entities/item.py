@@ -108,6 +108,7 @@ class Item(BaseModel):
 
     # Pricing
     cost: float | None = None
+    cost_basis: float | None = None             # Phase 5A
     estimated_price: float | None = None
     list_price: float | None = None
     minimum_price: float | None = None
@@ -120,6 +121,8 @@ class Item(BaseModel):
     # Platform / listing
     platform: str | None = None
     listing_id: str | None = None
+    offer_id: str | None = None                 # Phase 5A — eBay offer ID
+    promotion_pct: float | None = None          # Phase 5A — ad rate %
     listing_url: str | None = None
     date_listed: datetime | None = None
     days_listed: int | None = None

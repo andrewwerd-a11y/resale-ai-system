@@ -97,6 +97,7 @@ class ItemRecord(SQLModel, table=True):
 
     # Pricing
     cost: Optional[float] = None
+    cost_basis: Optional[float] = None          # Phase 5A
     estimated_price: Optional[float] = None
     list_price: Optional[float] = None
     minimum_price: Optional[float] = None
@@ -107,6 +108,8 @@ class ItemRecord(SQLModel, table=True):
     # Platform / listing
     platform: Optional[str] = None
     listing_id: Optional[str] = None
+    offer_id: Optional[str] = None              # Phase 5A — eBay offer ID
+    promotion_pct: Optional[float] = None       # Phase 5A — ad rate %
     listing_url: Optional[str] = None
     date_listed: Optional[datetime] = None
     days_listed: Optional[int] = None

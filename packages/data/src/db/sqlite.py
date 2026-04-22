@@ -67,11 +67,60 @@ def migrate_add_columns() -> None:
         ("missing_required_fields", "TEXT"),
         ("missing_recommended_fields", "TEXT"),
         ("publish_ready", "INTEGER DEFAULT 0"),
+        # Phase 3.7 — Review queue
+        ("review_reason", "TEXT"),
+        ("review_sub_queue", "TEXT"),
+        ("reviewer_notes", "TEXT"),
+        ("listing_quality_score", "INTEGER"),
+        ("concern_flags", "TEXT"),
+        # Phase 5A — eBay offer tracking + promotions + cost
+        ("offer_id", "VARCHAR"),
+        ("promotion_pct", "REAL"),
+        ("cost_basis", "REAL"),
     ]
     for col_name, col_def in new_columns:
         try:
             cursor.execute(f"ALTER TABLE items ADD COLUMN {col_name} {col_def}")
         except sqlite3.OperationalError:
             pass  # Column already exists
+    conn.commit()
+    conn.close()
+    _migrate_settings_table()
+
+
+def _migrate_settings_table() -> None:
+    """
+    Create the settings table and seed default values.
+    Idempotent — INSERT OR IGNORE never overwrites existing values.
+    """
+    import sqlite3
+    from datetime import datetime
+
+    settings = get_settings()
+    conn = sqlite3.connect(settings.db_path)
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    defaults = [
+        ("photo_sort",               "auto"),
+        ("enrichment_mode",          "hybrid"),
+        ("default_promotion_pct",    "3"),
+        ("listing_age_alert_days",   "30,60,90"),
+        ("intake_default_condition", "USED_EXCELLENT"),
+    ]
+    now = datetime.utcnow().isoformat()
+    for key, value in defaults:
+        cursor.execute(
+            "INSERT OR IGNORE INTO settings (key, value, updated_at) VALUES (?, ?, ?)",
+            (key, value, now),
+        )
+
     conn.commit()
     conn.close()

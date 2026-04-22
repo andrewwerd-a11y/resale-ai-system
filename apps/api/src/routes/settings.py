@@ -2,6 +2,7 @@
 Settings API — read/write config files and return current settings.
 Changes to rules.json and platforms.json take effect on next request.
 Changes to .env fields require server restart.
+GET / PATCH "" operate on the DB-backed settings table.
 """
 from __future__ import annotations
 
@@ -26,6 +27,29 @@ class RulesUpdate(BaseModel):
 
 class PlatformToggle(BaseModel):
     active: bool
+
+
+@router.get("")
+def get_db_settings():
+    """Return all DB-backed settings as {key: value} dict."""
+    from packages.core.src.settings import get_all_settings
+    return get_all_settings()
+
+
+@router.patch("")
+def patch_db_settings(body: dict):
+    """
+    Partial update of DB-backed settings.
+    Validates keys against whitelist — rejects unknown keys with 400.
+    Returns full updated settings dict on success.
+    """
+    from packages.core.src.settings import KNOWN_KEYS, set_setting, get_all_settings
+    unknown = [k for k in body if k not in KNOWN_KEYS]
+    if unknown:
+        raise HTTPException(status_code=400, detail=f"Unknown setting keys: {unknown}")
+    for key, value in body.items():
+        set_setting(key, str(value))
+    return get_all_settings()
 
 
 @router.get("/rules")
