@@ -19,6 +19,7 @@ uv.lock
 .env
 
 # Database (never commit real data)
+resale.db
 data/app.db
 data/app.db-shm
 data/app.db-wal

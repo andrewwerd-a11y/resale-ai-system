@@ -67,6 +67,57 @@ def apply_stale_drops(session: Session = Depends(get_session)):
     return {"updated": count, "drop_percent": checker.stale_drop}
 
 
+@router.get("/enrich/estimate")
+def enrich_estimate(
+    skus: str = "",
+    batch_size: int = 10,
+    session: Session = Depends(get_session),
+):
+    """
+    Estimate Claude API cost for enriching a set of items.
+    ?skus=SKU1,SKU2  — target specific items
+    ?batch_size=N    — target next N unenriched items (default 10)
+    """
+    from sqlmodel import select
+    from packages.data.src.models.item_record import ItemRecord
+
+    TOKENS_PER_IMAGE = 1200
+    INPUT_PRICE_PER_TOKEN = 3.00 / 1_000_000  # claude-sonnet-4-5 input pricing
+
+    if skus:
+        sku_list = [s.strip() for s in skus.split(",") if s.strip()]
+        records = [
+            session.exec(select(ItemRecord).where(ItemRecord.sku == s)).first()
+            for s in sku_list
+        ]
+        records = [r for r in records if r]
+    else:
+        records = list(
+            session.exec(
+                select(ItemRecord).where(ItemRecord.enrichment_done == False)
+            ).all()[:batch_size]
+        )
+
+    item_summaries = []
+    total_images = 0
+    for rec in records:
+        paths = [p for p in (rec.image_paths or "").split("|") if p.strip()]
+        n = len(paths)
+        total_images += n
+        item_summaries.append({"sku": rec.sku, "image_count": n})
+
+    estimated_input_tokens = total_images * TOKENS_PER_IMAGE
+    estimated_cost = round(estimated_input_tokens * INPUT_PRICE_PER_TOKEN, 4)
+
+    return {
+        "item_count": len(records),
+        "image_count": total_images,
+        "estimated_input_tokens": estimated_input_tokens,
+        "estimated_cost_usd": estimated_cost,
+        "items": item_summaries,
+    }
+
+
 @router.get("")
 def list_items(limit: int = 50, status: str | None = None, session: Session = Depends(get_session)):
     repo = ItemRepository(session)
@@ -198,6 +249,36 @@ def analyze_single(sku: str, session: Session = Depends(get_session)):
 
     return {"sku": sku, "status": item.status, "mode": item.item_mode,
             "confidence": item.confidence_score}
+
+
+@router.post("/{sku}/enrich")
+def enrich_item(sku: str, session: Session = Depends(get_session)):
+    """Run Claude enrichment pipeline on a single item."""
+    from packages.enrichment.src.enricher import ItemEnricher
+    repo = ItemRepository(session)
+    item = repo.get_by_sku(sku)
+    if not item:
+        raise HTTPException(status_code=404, detail=f"Item {sku} not found")
+    enricher = ItemEnricher()
+    if not enricher.is_available():
+        raise HTTPException(
+            status_code=503,
+            detail="Enrichment not available — check ANTHROPIC_API_KEY and ENRICHMENT_ENABLED",
+        )
+    result = enricher.enrich(item)
+    if not result.ok:
+        raise HTTPException(status_code=500, detail=result.error)
+    enricher.apply_to_item(item, result.value)
+    repo.upsert(item)
+    return {
+        "sku": sku,
+        "status": item.status,
+        "enrichment_done": item.enrichment_done,
+        "estimated_cost_usd": result.details.get("estimated_cost"),
+        "title_final": item.title_final,
+        "list_price": item.list_price,
+        "estimated_price": item.estimated_price,
+    }
 
 
 @router.post("/{sku}/category-intelligence")

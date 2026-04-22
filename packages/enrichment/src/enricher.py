@@ -11,7 +11,6 @@ import logging
 from packages.core.src.config import get_settings
 from packages.core.src.result import Result
 from packages.domain.src.entities.item import Item
-from packages.pricing.src.price_researcher import PriceResearcher
 
 logger = logging.getLogger(__name__)
 
@@ -192,22 +191,73 @@ class ItemEnricher:
                 item.sku, input_tokens, output_tokens, cost_usd,
             )
 
-            # Layer eBay sold-price research on top of Claude's estimate.
-            # avg_sold_price wins over Claude's list_price when available.
-            researcher = PriceResearcher()
-            price_result = researcher.research(item)
-            if price_result.ok:
-                avg = price_result.value.get("avg_sold_price")
-                if avg:
-                    enriched["list_price"] = avg
-                    logger.info(
-                        "Price research for %s overrides list_price → $%.2f",
-                        item.sku, avg,
+            # ── Price comp research ──────────────────────────────────────────
+            # Uses ebay_browse.get_price_comps: Marketplace Insights (actual sold)
+            # with Browse API fallback. Uses median, not avg of active listings.
+            try:
+                from packages.enrichment.src.ebay_browse import get_price_comps
+                search_query = (
+                    enriched.get("ebay_search_query")
+                    or enriched.get("title_final")
+                    or item.title_final
+                    or item.title_raw
+                    or ""
+                ).strip()[:80]
+
+                if search_query:
+                    comp = get_price_comps(search_query, limit=10)
+                    comp_median = comp.get("median")
+                    claude_est = float(enriched.get("estimated_price") or item.estimated_price or 0)
+
+                    if comp_median and claude_est > 0:
+                        concern_flags = list(enriched.get("concern_flags") or [])
+                        if comp_median < claude_est * 0.5:
+                            # Anomalously low comp — keep Claude's estimate, flag item
+                            concern_flags.append("comp_price_anomaly")
+                            enriched["concern_flags"] = concern_flags
+                            enriched["needs_review"] = True
+                            logger.warning(
+                                "Comp anomaly for %s: median=$%.2f << est=$%.2f — keeping Claude estimate",
+                                item.sku, comp_median, claude_est,
+                            )
+                        elif comp_median > claude_est * 1.5:
+                            # Comp much higher — use it but flag for human review
+                            concern_flags.append("comp_price_high")
+                            enriched["concern_flags"] = concern_flags
+                            enriched["needs_review"] = True
+                            enriched["list_price"] = comp_median
+                            logger.info(
+                                "Comp median $%.2f >> Claude est $%.2f for %s — using comp, flagging review",
+                                comp_median, claude_est, item.sku,
+                            )
+                        else:
+                            enriched["list_price"] = comp_median
+                            logger.info(
+                                "Price comps for %s: median=$%.2f sample=%d",
+                                item.sku, comp_median, comp.get("sample_size", 0),
+                            )
+                    elif comp_median:
+                        # No claude_est to compare against — use comp median directly
+                        enriched["list_price"] = comp_median
+
+            except Exception as _price_exc:
+                logger.debug("Price comp lookup failed for %s: %s", item.sku, _price_exc)
+
+            # ── Floor guard: list_price must be >= estimated_price * 0.6 ─────
+            _claude_est = float(enriched.get("estimated_price") or item.estimated_price or 0)
+            _final_list = float(enriched.get("list_price") or 0)
+            if _claude_est > 0 and _final_list > 0:
+                _floor = round(_claude_est * 0.6, 2)
+                if _final_list < _floor:
+                    _flags = list(enriched.get("concern_flags") or [])
+                    _flags.append("list_price_below_floor")
+                    enriched["concern_flags"] = _flags
+                    enriched["needs_review"] = True
+                    enriched["list_price"] = _floor
+                    logger.warning(
+                        "list_price $%.2f below floor $%.2f for %s — clamped",
+                        _final_list, _floor, item.sku,
                     )
-            else:
-                logger.debug(
-                    "Price research skipped for %s: %s", item.sku, price_result.error
-                )
 
             return Result.success(enriched, estimated_cost=round(cost_usd, 4))
 
