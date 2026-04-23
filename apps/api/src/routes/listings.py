@@ -148,19 +148,29 @@ def sync_listings(session: Session = Depends(get_session)):
             continue
 
         changed = False
-        # Check offer data for price/offer_id updates
-        offers = ebay_item.get("offers", [])
-        if offers:
-            offer = offers[0]
-            ebay_price_str = (offer.get("pricingSummary", {}) or {}).get("price", {}) or {}
-            ebay_price = float(ebay_price_str.get("value", 0) or 0)
-            if ebay_price and ebay_price != local.list_price:
-                local.list_price = ebay_price
-                changed = True
-            offer_id = offer.get("offerId", "")
-            if offer_id and offer_id != local.offer_id:
-                local.offer_id = offer_id
-                changed = True
+        # Fetch offer data separately (inventory_item endpoint does not include offers)
+        try:
+            offer_resp = httpx.get(
+                f"{base}/sell/inventory/v1/offer",
+                headers=headers,
+                params={"sku": sku},
+                timeout=15,
+            )
+            if offer_resp.status_code == 200:
+                offers = offer_resp.json().get("offers", [])
+                if offers:
+                    offer = offers[0]
+                    offer_id = offer.get("offerId", "")
+                    if offer_id and offer_id != local.offer_id:
+                        local.offer_id = offer_id
+                        changed = True
+                    ebay_price_str = (offer.get("pricingSummary") or {}).get("price") or {}
+                    ebay_price = float(ebay_price_str.get("value", 0) or 0)
+                    if ebay_price and ebay_price != local.list_price:
+                        local.list_price = ebay_price
+                        changed = True
+        except Exception as exc:
+            logger.warning("Failed to fetch offer for SKU %s: %s", sku, exc)
 
         if changed:
             repo.upsert(local)

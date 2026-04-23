@@ -2786,7 +2786,7 @@ function renderCard(item, idx) {{
   const price = item.list_price != null ? '$' + parseFloat(item.list_price).toFixed(2) : '-';
   const sel = selectedSkus.has(item.sku);
   const thumb = item.cover_photo
-    ? '<img class="card-thumb" src="' + esc(item.cover_photo) + '" onerror="this.style.display=\'none\'">'
+    ? '<img class="card-thumb" src="' + esc(item.cover_photo) + '" onerror="this.style.display=\\'none\\'">'
     : '<div class="card-thumb-placeholder">📷</div>';
   return '<div class="listing-card' + (sel ? ' selected' : '') + '" data-idx="' + idx + '" data-sku="' + esc(item.sku) + '"'
     + ' onclick="cardClick(' + idx + ', event)" oncontextmenu="showCtxMenu(event,' + idx + ');return false;">'
