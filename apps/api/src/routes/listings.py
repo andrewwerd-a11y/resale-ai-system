@@ -10,7 +10,6 @@ import sqlite3
 from datetime import datetime
 from typing import Optional
 
-import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlmodel import Session, select
@@ -20,6 +19,7 @@ from packages.data.src.db.sqlite import get_session
 from packages.data.src.models.item_record import ItemRecord
 from packages.data.src.repositories.item_repo import ItemRepository
 from packages.ebay.src.auth import EbayAuth
+from packages.ebay.src import http_client as ebay_http
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -111,7 +111,7 @@ def sync_listings(session: Session = Depends(get_session)):
     limit = 25
     while True:
         try:
-            resp = httpx.get(
+            resp = ebay_http.get(
                 f"{base}/sell/inventory/v1/inventory_item",
                 headers=headers,
                 params={"limit": limit, "offset": offset},
@@ -151,7 +151,7 @@ def sync_listings(session: Session = Depends(get_session)):
         changed = False
         # Fetch offer data separately (inventory_item endpoint does not include offers)
         try:
-            offer_resp = httpx.get(
+            offer_resp = ebay_http.get(
                 f"{base}/sell/inventory/v1/offer",
                 headers=headers,
                 params={"sku": sku},
@@ -180,6 +180,40 @@ def sync_listings(session: Session = Depends(get_session)):
         _touch_synced_at(cfg.db_path, sku, now)
 
     return {"synced": synced, "updated": updated, "not_found": not_found}
+
+
+@router.get("/ebay-connectivity")
+def ebay_connectivity():
+    """
+    Diagnose eBay connectivity and auth wiring from the API process.
+    """
+    auth = EbayAuth()
+    token = auth.user_token or ""
+    token_prefix = token[:20]
+    result = {
+        "api_base": auth.api_base,
+        "marketplace_id": auth.marketplace_id,
+        "token_present": bool(token),
+        "token_length": len(token),
+        "token_prefix": token_prefix,
+        "ebay_status": None,
+        "ebay_response": None,
+        "error": None,
+    }
+    try:
+        resp = ebay_http.get(
+            f"{auth.api_base}/sell/inventory/v1/location",
+            headers=_ebay_headers(auth),
+            timeout=20,
+        )
+        result["ebay_status"] = resp.status_code
+        try:
+            result["ebay_response"] = resp.json()
+        except Exception:
+            result["ebay_response"] = resp.text[:1000]
+    except Exception as exc:
+        result["error"] = str(exc)
+    return result
 
 
 # ── POST /api/listings/push/{sku} ─────────────────────────────────────────────
@@ -255,7 +289,7 @@ def push_to_ebay(sku: str, payload: PushPayload, session: Session = Depends(get_
         inv_payload["conditionDescription"] = item.condition_notes[:1000]
 
     try:
-        r1 = httpx.put(
+        r1 = ebay_http.put(
             f"{base}/sell/inventory/v1/inventory_item/{sku}",
             headers=headers,
             json=inv_payload,
@@ -304,7 +338,7 @@ def push_to_ebay(sku: str, payload: PushPayload, session: Session = Depends(get_
             "includeCatalogProductDetails": False,
         }
 
-        r2 = httpx.put(
+        r2 = ebay_http.put(
             f"{base}/sell/inventory/v1/offer/{item.offer_id}",
             headers=headers,
             json=offer_payload,
@@ -367,7 +401,7 @@ def end_listing(sku: str, session: Session = Depends(get_session)):
     base = auth.api_base
 
     try:
-        resp = httpx.delete(
+        resp = ebay_http.delete(
             f"{base}/sell/inventory/v1/offer/{item.offer_id}/withdraw",
             headers=headers,
             timeout=30,
@@ -508,7 +542,7 @@ def _get_or_create_merchant_location_key(base: str, headers: dict) -> str:
     if cached:
         return cached
 
-    list_resp = httpx.get(f"{base}/sell/inventory/v1/location", headers=headers, timeout=20)
+    list_resp = ebay_http.get(f"{base}/sell/inventory/v1/location", headers=headers, timeout=20)
     if list_resp.status_code == 200:
         locations = (list_resp.json() or {}).get("locations", [])
         if locations:
@@ -534,7 +568,7 @@ def _get_or_create_merchant_location_key(base: str, headers: dict) -> str:
         "name": "Default Location",
         "merchantLocationStatus": "ENABLED",
     }
-    create_resp = httpx.post(
+    create_resp = ebay_http.post(
         f"{base}/sell/inventory/v1/location/default",
         headers=headers,
         json=create_payload,

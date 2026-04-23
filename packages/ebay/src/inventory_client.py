@@ -14,8 +14,6 @@ import logging
 import re
 from pathlib import Path
 
-import httpx
-
 CATEGORY_MAP = {
     "books":        "29223",   # Books > Antiquarian & Collectible
     "clothing":     "11450",   # Clothing, Shoes & Accessories > Women > Clothing
@@ -39,6 +37,7 @@ CONDITION_MAP = {
 from packages.core.src.result import Result
 from packages.domain.src.entities.item import Item
 from packages.ebay.src.auth import EbayAuth
+from packages.ebay.src import http_client as ebay_http
 from packages.ebay.src.photo_uploader import PhotoUploader
 
 logger = logging.getLogger(__name__)
@@ -136,7 +135,7 @@ class EbayInventoryClient:
 
         for key, url, list_key in policy_endpoints:
             try:
-                resp = httpx.get(url, headers=headers, timeout=15)
+                resp = ebay_http.get(url, headers=headers, timeout=15)
                 if resp.status_code == 200:
                     items = resp.json().get(list_key, [])
                     if items:
@@ -343,7 +342,7 @@ class EbayInventoryClient:
 
         headers = self._headers()
         base = self.auth.api_base
-        list_resp = httpx.get(f"{base}/sell/inventory/v1/location", headers=headers, timeout=20)
+        list_resp = ebay_http.get(f"{base}/sell/inventory/v1/location", headers=headers, timeout=20)
         if list_resp.status_code == 200:
             locations = (list_resp.json() or {}).get("locations", [])
             if locations:
@@ -368,7 +367,7 @@ class EbayInventoryClient:
             "name": "Default Location",
             "merchantLocationStatus": "ENABLED",
         }
-        create_resp = httpx.post(
+        create_resp = ebay_http.post(
             f"{base}/sell/inventory/v1/location/default",
             headers=headers,
             json=create_payload,
@@ -392,14 +391,14 @@ class EbayInventoryClient:
         }
 
     def _put(self, url: str, headers: dict, payload: dict, sku: str = "", step: str = "") -> dict:
-        resp = httpx.put(url, headers=headers, json=payload, timeout=30)
+        resp = ebay_http.put(url, headers=headers, json=payload, timeout=30)
         if resp.status_code not in (200, 204):
             logger.error("eBay %s error %s for %s: %s", step, resp.status_code, sku, resp.text)
             raise _EbayApiError(resp.status_code, f"{step} failed", resp.text)
         return resp.json() if resp.content else {}
 
     def _post(self, url: str, headers: dict, payload: dict, sku: str = "", step: str = "") -> dict:
-        resp = httpx.post(url, headers=headers, json=payload, timeout=30)
+        resp = ebay_http.post(url, headers=headers, json=payload, timeout=30)
         if resp.status_code not in (200, 201):
             logger.error("eBay %s error %s for %s: %s", step, resp.status_code, sku, resp.text)
             raise _EbayApiError(resp.status_code, f"{step} failed", resp.text)

@@ -15,9 +15,8 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import urlencode
 
-import httpx
-
 from packages.core.src.config import get_settings
+from packages.ebay.src import http_client as ebay_http
 
 logger = logging.getLogger(__name__)
 
@@ -83,7 +82,7 @@ class EbayAuth:
         """Exchange an authorization code for access + refresh tokens. Saves to file."""
         s = self.settings
         credentials = _b64(s.ebay_app_id, s.ebay_cert_id)
-        resp = httpx.post(
+        resp = ebay_http.post(
             f"{s.ebay_api_base}/identity/v1/oauth2/token",
             headers={
                 "Content-Type": "application/x-www-form-urlencoded",
@@ -152,7 +151,7 @@ class EbayAuth:
         s = self.settings
         try:
             credentials = _b64(s.ebay_app_id, s.ebay_cert_id)
-            resp = httpx.post(
+            resp = ebay_http.post(
                 f"{s.ebay_api_base}/identity/v1/oauth2/token",
                 headers={
                     "Content-Type": "application/x-www-form-urlencoded",
