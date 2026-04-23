@@ -19,7 +19,7 @@ def _to_record(item: Item) -> dict:
     """Convert Item entity to flat dict for DB storage."""
     d = item.model_dump()
     # Serialize known list/dict fields to JSON strings
-    for field in ["features", "defects", "review_reasons", "image_paths",
+    for field in ["features", "defects", "review_reasons",
                   "missing_required_fields", "missing_recommended_fields"]:
         if isinstance(d.get(field), list):
             d[field] = json.dumps(d[field])
@@ -27,9 +27,8 @@ def _to_record(item: Item) -> dict:
         d["measurements"] = json.dumps(d["measurements"])
     if isinstance(d.get("item_specifics"), dict):
         d["item_specifics"] = json.dumps(d["item_specifics"])
-    # image_paths stored as pipe-separated
-    if item.image_paths:
-        d["image_paths"] = "|".join(item.image_paths)
+    # image_paths stored as pipe-separated (never JSON array)
+    d["image_paths"] = "|".join(item.image_paths or [])
     # Coerce any remaining list/dict values on string fields
     known_json_fields = {
         "features", "defects", "review_reasons", "image_paths", "measurements",

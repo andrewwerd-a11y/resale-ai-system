@@ -23,6 +23,7 @@ from packages.ebay.src.auth import EbayAuth
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+_LOCATION_KEY_CACHE: dict[str, str] = {}
 
 CONDITION_MAP = {
     "NEW": "NEW", "NEW_OTHER": "NEW_OTHER", "NEW_WITH_DEFECTS": "NEW_WITH_DEFECTS",
@@ -247,6 +248,9 @@ def push_to_ebay(sku: str, payload: PushPayload, session: Session = Depends(get_
         "condition": condition,
         "availability": {"shipToLocationAvailability": {"quantity": 1}},
     }
+    image_urls = _image_paths_to_urls(item.image_paths)
+    if image_urls:
+        inv_payload["product"]["imageUrls"] = image_urls[:12]
     if item.condition_notes:
         inv_payload["conditionDescription"] = item.condition_notes[:1000]
 
@@ -278,27 +282,28 @@ def push_to_ebay(sku: str, payload: PushPayload, session: Session = Depends(get_
         policies = {"fulfillment_id": "", "payment_id": "", "return_id": ""}
 
     category_id = str(item.ebay_category_id or "99")
-    offer_payload = {
-        "sku": sku,
-        "marketplaceId": marketplace_id,
-        "format": "FIXED_PRICE",
-        "availableQuantity": 1,
-        "categoryId": category_id,
-        "listingDescription": item.description_final or item.title_final or "",
-        "merchantLocationKey": "default",
-        "listingPolicies": {
-            "fulfillmentPolicyId": policies.get("fulfillment_id", ""),
-            "paymentPolicyId": policies.get("payment_id", ""),
-            "returnPolicyId": policies.get("return_id", ""),
-            "countryCode": country_code,
-        },
-        "pricingSummary": {
-            "price": {"currency": "USD", "value": f"{price:.2f}"}
-        },
-        "includeCatalogProductDetails": False,
-    }
-
     try:
+        merchant_location_key = _get_or_create_merchant_location_key(base, headers)
+        offer_payload = {
+            "sku": sku,
+            "marketplaceId": marketplace_id,
+            "format": "FIXED_PRICE",
+            "availableQuantity": 1,
+            "categoryId": category_id,
+            "listingDescription": item.description_final or item.title_final or "",
+            "merchantLocationKey": merchant_location_key,
+            "listingPolicies": {
+                "fulfillmentPolicyId": policies.get("fulfillment_id", ""),
+                "paymentPolicyId": policies.get("payment_id", ""),
+                "returnPolicyId": policies.get("return_id", ""),
+                "countryCode": country_code,
+            },
+            "pricingSummary": {
+                "price": {"currency": "USD", "value": f"{price:.2f}"}
+            },
+            "includeCatalogProductDetails": False,
+        }
+
         r2 = httpx.put(
             f"{base}/sell/inventory/v1/offer/{item.offer_id}",
             headers=headers,
@@ -488,6 +493,58 @@ def _parse_ebay_error(resp) -> str:
         return f"HTTP {resp.status_code}: {resp.text[:300]}"
     except Exception:
         return f"HTTP {resp.status_code}: {resp.text[:200]}"
+
+
+def _image_paths_to_urls(value) -> list[str]:
+    if isinstance(value, str):
+        return [p.strip() for p in value.split("|") if p.strip()]
+    if isinstance(value, list):
+        return [str(p).strip() for p in value if str(p).strip()]
+    return []
+
+
+def _get_or_create_merchant_location_key(base: str, headers: dict) -> str:
+    cached = _LOCATION_KEY_CACHE.get(base)
+    if cached:
+        return cached
+
+    list_resp = httpx.get(f"{base}/sell/inventory/v1/location", headers=headers, timeout=20)
+    if list_resp.status_code == 200:
+        locations = (list_resp.json() or {}).get("locations", [])
+        if locations:
+            first = locations[0] or {}
+            key = first.get("merchantLocationKey")
+            if key:
+                _LOCATION_KEY_CACHE[base] = key
+                return key
+    elif list_resp.status_code not in (200, 404):
+        raise RuntimeError(_parse_ebay_error(list_resp))
+
+    create_payload = {
+        "location": {
+            "address": {
+                "addressLine1": "123 Main St",
+                "city": "Rome",
+                "stateOrProvince": "NY",
+                "postalCode": "13440",
+                "country": "US",
+            }
+        },
+        "locationTypes": ["WAREHOUSE"],
+        "name": "Default Location",
+        "merchantLocationStatus": "ENABLED",
+    }
+    create_resp = httpx.post(
+        f"{base}/sell/inventory/v1/location/default",
+        headers=headers,
+        json=create_payload,
+        timeout=20,
+    )
+    if create_resp.status_code not in (200, 201, 204):
+        raise RuntimeError(_parse_ebay_error(create_resp))
+
+    _LOCATION_KEY_CACHE[base] = "default"
+    return "default"
 
 
 def _touch_synced_at(db_path, sku: str, now: str) -> None:

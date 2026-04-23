@@ -49,6 +49,7 @@ class EbayInventoryClient:
         self.auth = EbayAuth()
         self.uploader = PhotoUploader()
         self._policies_cache: dict | None = None  # {fulfillment_id, payment_id, return_id}
+        self._location_key_cache: str | None = None
 
     # ── Public ────────────────────────────────────────────────────────────────
 
@@ -320,7 +321,7 @@ class EbayInventoryClient:
             "availableQuantity": 1,
             "categoryId": category_id,
             "listingDescription": item.description_final or item.title_final or "",
-            "merchantLocationKey": "default",
+            "merchantLocationKey": self.get_merchant_location_key(),
             "listingPolicies": {
                 "fulfillmentPolicyId": policies.get("fulfillment_id", ""),
                 "paymentPolicyId":     policies.get("payment_id", ""),
@@ -335,6 +336,49 @@ class EbayInventoryClient:
             },
             "includeCatalogProductDetails": False,
         }
+
+    def get_merchant_location_key(self) -> str:
+        if self._location_key_cache:
+            return self._location_key_cache
+
+        headers = self._headers()
+        base = self.auth.api_base
+        list_resp = httpx.get(f"{base}/sell/inventory/v1/location", headers=headers, timeout=20)
+        if list_resp.status_code == 200:
+            locations = (list_resp.json() or {}).get("locations", [])
+            if locations:
+                key = (locations[0] or {}).get("merchantLocationKey")
+                if key:
+                    self._location_key_cache = key
+                    return key
+        elif list_resp.status_code not in (200, 404):
+            raise _EbayApiError(list_resp.status_code, "list_location failed", list_resp.text)
+
+        create_payload = {
+            "location": {
+                "address": {
+                    "addressLine1": "123 Main St",
+                    "city": "Rome",
+                    "stateOrProvince": "NY",
+                    "postalCode": "13440",
+                    "country": "US",
+                }
+            },
+            "locationTypes": ["WAREHOUSE"],
+            "name": "Default Location",
+            "merchantLocationStatus": "ENABLED",
+        }
+        create_resp = httpx.post(
+            f"{base}/sell/inventory/v1/location/default",
+            headers=headers,
+            json=create_payload,
+            timeout=20,
+        )
+        if create_resp.status_code not in (200, 201, 204):
+            raise _EbayApiError(create_resp.status_code, "create_location failed", create_resp.text)
+
+        self._location_key_cache = "default"
+        return "default"
 
     # ── HTTP helpers ──────────────────────────────────────────────────────────
 

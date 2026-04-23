@@ -4,7 +4,7 @@ import tempfile
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, UploadFile, File
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 from sqlmodel import Session
 
@@ -477,79 +477,96 @@ async def upload_photos(
     session: Session = Depends(get_session),
 ):
     """Upload one or more photos, append their URLs to image_paths."""
-    repo = ItemRepository(session)
-    item = repo.get_by_sku(sku)
-    if not item:
-        raise HTTPException(status_code=404, detail=f"Item {sku} not found")
+    try:
+        repo = ItemRepository(session)
+        item = repo.get_by_sku(sku)
+        if not item:
+            raise HTTPException(status_code=404, detail=f"Item {sku} not found")
 
-    from packages.ebay.src.photo_uploader import PhotoUploader
-    uploader = PhotoUploader()
-    new_urls = []
+        from packages.ebay.src.photo_uploader import PhotoUploader
+        uploader = PhotoUploader()
+        new_urls = []
 
-    for upload in files:
-        suffix = Path(upload.filename or "photo.jpg").suffix or ".jpg"
-        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-            tmp.write(await upload.read())
-            tmp_path = Path(tmp.name)
-        try:
-            result = uploader.upload(tmp_path)
-            if result.ok:
-                new_urls.append(result.value)
-            else:
-                # If Cloudinary not configured, skip gracefully
-                pass
-        finally:
+        for upload in files:
+            suffix = Path(upload.filename or "photo.jpg").suffix or ".jpg"
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                tmp.write(await upload.read())
+                tmp_path = Path(tmp.name)
             try:
-                tmp_path.unlink()
-            except Exception:
-                pass
+                result = uploader.upload(tmp_path)
+                if result.ok:
+                    new_urls.append(result.value)
+            finally:
+                try:
+                    tmp_path.unlink()
+                except Exception:
+                    pass
 
-    if new_urls:
-        existing = [p for p in (item.image_paths or "").split("|") if p.strip()]
-        all_paths = existing + new_urls
-        item.image_paths = "|".join(all_paths)
-        repo.upsert(item)
-
-    paths = [p for p in (item.image_paths or "").split("|") if p.strip()]
-    return {"image_paths": paths}
+        paths = _image_paths_to_list(item.image_paths)
+        if new_urls:
+            item.image_paths = paths + new_urls
+            repo.upsert(item)
+            paths = _image_paths_to_list(item.image_paths)
+        return {"image_paths": paths}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        return JSONResponse(status_code=500, content={"detail": str(exc)})
 
 
 class PhotoUrlBody(BaseModel):
     url: str
 
 
+def _image_paths_to_list(value) -> list[str]:
+    if isinstance(value, str):
+        return [p.strip() for p in value.split("|") if p.strip()]
+    if isinstance(value, list):
+        return [str(p).strip() for p in value if str(p).strip()]
+    return []
+
+
 @router.delete("/{sku}/photos")
 def delete_photo(sku: str, body: PhotoUrlBody, session: Session = Depends(get_session)):
     """Remove a photo URL from image_paths (does not delete from Cloudinary)."""
-    repo = ItemRepository(session)
-    item = repo.get_by_sku(sku)
-    if not item:
-        raise HTTPException(status_code=404, detail=f"Item {sku} not found")
+    try:
+        repo = ItemRepository(session)
+        item = repo.get_by_sku(sku)
+        if not item:
+            raise HTTPException(status_code=404, detail=f"Item {sku} not found")
 
-    paths = [p for p in (item.image_paths or "").split("|") if p.strip()]
-    paths = [p for p in paths if p != body.url]
-    item.image_paths = "|".join(paths)
-    repo.upsert(item)
-    return {"image_paths": paths}
+        paths = [p for p in _image_paths_to_list(item.image_paths) if p != body.url]
+        item.image_paths = paths
+        repo.upsert(item)
+        return {"image_paths": paths}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        return JSONResponse(status_code=500, content={"detail": str(exc)})
 
 
 @router.post("/{sku}/photos/set-cover")
 def set_cover_photo(sku: str, body: PhotoUrlBody, session: Session = Depends(get_session)):
     """Move a photo URL to index 0 in image_paths."""
-    repo = ItemRepository(session)
-    item = repo.get_by_sku(sku)
-    if not item:
-        raise HTTPException(status_code=404, detail=f"Item {sku} not found")
+    try:
+        repo = ItemRepository(session)
+        item = repo.get_by_sku(sku)
+        if not item:
+            raise HTTPException(status_code=404, detail=f"Item {sku} not found")
 
-    paths = [p for p in (item.image_paths or "").split("|") if p.strip()]
-    if body.url not in paths:
-        raise HTTPException(status_code=404, detail="URL not found in image_paths")
+        paths = _image_paths_to_list(item.image_paths)
+        if body.url not in paths:
+            raise HTTPException(status_code=404, detail="URL not found in image_paths")
 
-    paths.remove(body.url)
-    paths.insert(0, body.url)
-    item.image_paths = "|".join(paths)
-    repo.upsert(item)
-    return {"image_paths": paths}
+        paths.remove(body.url)
+        paths.insert(0, body.url)
+        item.image_paths = paths
+        repo.upsert(item)
+        return {"image_paths": paths}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        return JSONResponse(status_code=500, content={"detail": str(exc)})
 
 
 # ── Phase 5B — Claude Suggest ──────────────────────────────────────────────────
