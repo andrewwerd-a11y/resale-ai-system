@@ -3008,8 +3008,8 @@ function renderPhotoRow() {{
   <img src="${{esc(url)}}" onerror="this.src=''" title="${{esc(url)}}">
   ${{i === 0 ? '<div class="photo-cover-badge">Cover</div>' : ''}}
   <div class="photo-actions">
-    ${{i !== 0 ? '<button class="photo-btn" onclick="setCover(\'' + esc(url) + '\')">Set Cover</button>' : ''}}
-    <button class="photo-btn" style="color:#f09595" onclick="deletePhoto(\'' + esc(url) + '\')">Del</button>
+    ${{i !== 0 ? `<button class="photo-btn" onclick="setCover('${{esc(url)}}')">Set Cover</button>` : ''}}
+    <button class="photo-btn" style="color:#f09595" onclick="deletePhoto('${{esc(url)}}')">Del</button>
   </div>
 </div>`).join('');
 }}
