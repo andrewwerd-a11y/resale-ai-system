@@ -68,6 +68,9 @@ class Settings(BaseSettings):
     ebay_oauth_callback: str = ""
     ebay_environment: str = "sandbox"
     ebay_marketplace_id: str = "EBAY_US"
+    ebay_fulfillment_policy_id: str = ""
+    ebay_payment_policy_id: str = ""
+    ebay_return_policy_id: str = ""
 
     # Photo hosting
     imgur_client_id: str = ""

@@ -128,10 +128,11 @@ class EbayInventoryClient:
 
         base = self.auth.api_base
         headers = self._headers()
+        settings = self.auth.settings
         policies: dict[str, str] = {
-            "fulfillment_id": "",
-            "payment_id": "",
-            "return_id": "",
+            "fulfillment_id": str(settings.ebay_fulfillment_policy_id or "").strip(),
+            "payment_id": str(settings.ebay_payment_policy_id or "").strip(),
+            "return_id": str(settings.ebay_return_policy_id or "").strip(),
         }
 
         policy_endpoints = [
@@ -141,6 +142,9 @@ class EbayInventoryClient:
         ]
 
         for key, url, list_key in policy_endpoints:
+            if policies.get(key):
+                logger.info("Using configured %s = %s", key, policies[key])
+                continue
             try:
                 resp = ebay_http.get(url, headers=headers, timeout=15)
                 if resp.status_code == 200:
