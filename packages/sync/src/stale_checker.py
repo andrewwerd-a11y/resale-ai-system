@@ -24,11 +24,43 @@ class StaleChecker:
         """Return items with status='listed' listed longer than stale_days."""
         from sqlmodel import select
 
+        self.refresh_days_listed(session)
         stmt = select(ItemRecord).where(
             ItemRecord.status == "listed",
             ItemRecord.days_listed >= self.stale_days,
         )
         return list(session.exec(stmt).all())
+
+    def refresh_days_listed(self, session) -> int:
+        """
+        Recalculate days_listed for currently listed items using date_listed.
+        Returns number of rows changed.
+        """
+        from sqlmodel import select
+
+        now = datetime.utcnow()
+        changed = 0
+        listed_items = session.exec(
+            select(ItemRecord).where(ItemRecord.status == "listed")
+        ).all()
+
+        for item in listed_items:
+            new_days = self._compute_days_listed(item.date_listed, now)
+            if item.days_listed != new_days:
+                item.days_listed = new_days
+                item.updated_at = now
+                session.add(item)
+                changed += 1
+
+        if changed:
+            session.commit()
+        return changed
+
+    @staticmethod
+    def _compute_days_listed(date_listed: datetime | None, now: datetime) -> int | None:
+        if not date_listed:
+            return None
+        return max((now.date() - date_listed.date()).days, 0)
 
     def suggest_price_drop(self, item: ItemRecord) -> float | None:
         """Return suggested new price after applying the stale drop percentage."""
