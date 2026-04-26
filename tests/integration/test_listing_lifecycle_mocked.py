@@ -85,7 +85,16 @@ def test_publish_success_sets_listed_and_listing_fields_for_approved_sku(monkeyp
             }
         )
 
+    stats_calls: list[tuple[str, bool, float | None]] = []
+
+    def fake_update_stats(_self, category_id, item, sold=False, sold_price=None):
+        stats_calls.append((category_id, sold, sold_price))
+
     monkeypatch.setattr("packages.ebay.src.inventory_client.EbayInventoryClient.publish_item", fake_publish)
+    monkeypatch.setattr(
+        "packages.ebay.src.category_spreadsheet.CategorySpreadsheet.update_field_stats",
+        fake_update_stats,
+    )
 
     with _client() as client:
         resp = client.post("/api/ebay/publish/BK-000005")
@@ -96,6 +105,7 @@ def test_publish_success_sets_listed_and_listing_fields_for_approved_sku(monkeyp
     assert item.status == ItemStatus.LISTED
     assert item.listing_id == "L-BK-000005"
     assert item.listing_url == "https://example.test/BK-000005"
+    assert stats_calls == [("29223", False, None)]
 
 
 def test_publish_failure_does_not_write_listing_or_listed_status(monkeypatch, tmp_path):
@@ -107,7 +117,16 @@ def test_publish_failure_does_not_write_listing_or_listed_status(monkeypatch, tm
     def fake_publish_fail(_self, _item):
         return Result.failure("mocked publish failure", error_code="API_ERROR")
 
+    stats_calls: list[tuple[str, bool, float | None]] = []
+
+    def fake_update_stats(_self, category_id, item, sold=False, sold_price=None):
+        stats_calls.append((category_id, sold, sold_price))
+
     monkeypatch.setattr("packages.ebay.src.inventory_client.EbayInventoryClient.publish_item", fake_publish_fail)
+    monkeypatch.setattr(
+        "packages.ebay.src.category_spreadsheet.CategorySpreadsheet.update_field_stats",
+        fake_update_stats,
+    )
 
     with _client() as client:
         resp = client.post("/api/ebay/publish/BK-000008")
@@ -118,6 +137,7 @@ def test_publish_failure_does_not_write_listing_or_listed_status(monkeypatch, tm
     assert item.status == ItemStatus.APPROVED
     assert item.listing_id is None
     assert item.listing_url is None
+    assert stats_calls == []
 
 
 def test_revise_failure_does_not_persist_local_update_or_sync(monkeypatch, tmp_path):
@@ -163,6 +183,15 @@ def test_mark_sold_creates_sale_record_updates_profit_and_reports(monkeypatch, t
         "packages.sync.src.cross_platform_sync._load_platforms",
         lambda: {"ebay": {"active": True, "label": "eBay", "end_listing_supported": True}},
     )
+    stats_calls: list[tuple[str, bool, float | None]] = []
+
+    def fake_update_stats(_self, category_id, item, sold=False, sold_price=None):
+        stats_calls.append((category_id, sold, sold_price))
+
+    monkeypatch.setattr(
+        "packages.ebay.src.category_spreadsheet.CategorySpreadsheet.update_field_stats",
+        fake_update_stats,
+    )
 
     with Session(sqlite_db.engine) as session:
         repo = ItemRepository(session)
@@ -192,11 +221,43 @@ def test_mark_sold_creates_sale_record_updates_profit_and_reports(monkeypatch, t
         recs = session.exec(select(SaleRecord)).all()
         assert len(recs) == 1
         assert recs[0].sku == "BK-000009"
+    assert stats_calls == [("29223", True, 30.0)]
 
     assert summary.status_code == 200
     summary_json = summary.json()
     assert summary_json["total_sales"] == 1
     assert summary_json["total_net_profit"] == 20.0
+
+
+def test_publish_success_still_returns_200_when_category_stats_update_fails(monkeypatch, tmp_path):
+    monkeypatch.setenv("E2E_ROUTE_GUARD_ENABLED", "true")
+    monkeypatch.setenv("APPROVED_E2E_SKUS", "BK-000005,BK-000008,BK-000009")
+    _configure_temp_db(monkeypatch, tmp_path)
+    _seed_item("BK-000005", ItemStatus.APPROVED)
+
+    def fake_publish(_self, item):
+        return Result.success(
+            {
+                "listing_id": f"L-{item.sku}",
+                "listing_url": f"https://example.test/{item.sku}",
+                "offer_id": f"O-{item.sku}",
+                "photo_urls": [],
+            }
+        )
+
+    monkeypatch.setattr("packages.ebay.src.inventory_client.EbayInventoryClient.publish_item", fake_publish)
+    monkeypatch.setattr(
+        "packages.ebay.src.category_spreadsheet.CategorySpreadsheet.update_field_stats",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("stats write failed")),
+    )
+
+    with _client() as client:
+        resp = client.post("/api/ebay/publish/BK-000005")
+
+    assert resp.status_code == 200
+    item = _get_item("BK-000005")
+    assert item is not None
+    assert item.status == ItemStatus.LISTED
 
 
 def test_non_approved_sku_blocked_under_route_guard(monkeypatch, tmp_path):

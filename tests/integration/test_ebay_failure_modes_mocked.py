@@ -354,6 +354,15 @@ def test_sync_sold_known_sku_creates_single_sale_record_and_updates_reports(monk
         ]
 
     monkeypatch.setattr("packages.ebay.src.sold_sync.SoldSync._fetch_sold_orders", fake_orders)
+    stats_calls: list[tuple[str, bool, float | None]] = []
+
+    def fake_update_stats(_self, category_id, item, sold=False, sold_price=None):
+        stats_calls.append((category_id, sold, sold_price))
+
+    monkeypatch.setattr(
+        "packages.ebay.src.category_spreadsheet.CategorySpreadsheet.update_field_stats",
+        fake_update_stats,
+    )
 
     with _client() as client:
         first = client.post("/api/ebay/sync-sold", params={"skus": "BK-000005", "e2e_only": "true"})
@@ -372,6 +381,7 @@ def test_sync_sold_known_sku_creates_single_sale_record_and_updates_reports(monk
     records = _sale_records_for_sku("BK-000005")
     assert len(records) == 1
     assert records[0].source_report == "ebay_order:ORDER-1001|line:LINE-1|sku:BK-000005"
+    assert stats_calls == [("29223", True, 30.0)]
 
     item = _get_item("BK-000005")
     assert item is not None
@@ -416,3 +426,36 @@ def test_sync_sold_counts_blocked_skus_when_selected_subset(monkeypatch, tmp_pat
     records_8 = _sale_records_for_sku("BK-000008")
     assert len(records_5) == 1
     assert len(records_8) == 0
+
+
+def test_sync_sold_stats_update_failure_does_not_break_core_sync(monkeypatch, tmp_path):
+    monkeypatch.setenv("E2E_ROUTE_GUARD_ENABLED", "true")
+    monkeypatch.setenv("APPROVED_E2E_SKUS", "BK-000005,BK-000008,BK-000009")
+    _configure_temp_db(monkeypatch, tmp_path)
+    _seed_item("BK-000005", ItemStatus.LISTED)
+
+    def fake_orders(_self):
+        return [
+            {
+                "orderId": "ORDER-STAT-FAIL",
+                "pricingSummary": {"total": {"value": "20.00"}, "fee": {"value": "2.00"}},
+                "lineItems": [
+                    {"lineItemId": "LINE-STAT-1", "sku": "BK-000005", "lineItemCost": {"value": "20.00"}}
+                ],
+            }
+        ]
+
+    monkeypatch.setattr("packages.ebay.src.sold_sync.SoldSync._fetch_sold_orders", fake_orders)
+    monkeypatch.setattr(
+        "packages.ebay.src.category_spreadsheet.CategorySpreadsheet.update_field_stats",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("stats write failed")),
+    )
+
+    with _client() as client:
+        resp = client.post("/api/ebay/sync-sold", params={"skus": "BK-000005", "e2e_only": "true"})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["synced"] == 1
+    records = _sale_records_for_sku("BK-000005")
+    assert len(records) == 1

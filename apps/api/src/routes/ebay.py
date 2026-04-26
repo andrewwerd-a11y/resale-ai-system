@@ -2,6 +2,7 @@
 eBay API routes — OAuth flow, publish listings, sync sold orders, check status.
 """
 from __future__ import annotations
+import logging
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlmodel import Session
@@ -21,6 +22,23 @@ from packages.testing.src.e2e_guard import (
 )
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
+
+
+def _try_update_category_stats(item, sold: bool = False, sold_price: float | None = None) -> None:
+    try:
+        category_id = str(item.ebay_category_id or "").strip()
+        if not category_id:
+            return
+        from packages.ebay.src.category_spreadsheet import CategorySpreadsheet
+        CategorySpreadsheet().update_field_stats(
+            category_id=category_id,
+            item=item,
+            sold=sold,
+            sold_price=sold_price,
+        )
+    except Exception as exc:  # non-fatal
+        logger.warning("Category stats update skipped for %s: %s", getattr(item, "sku", "?"), exc)
 
 # ── OAuth 2.0 flow ────────────────────────────────────────────────────────────
 
@@ -124,6 +142,7 @@ def publish_batch(
             if data["photo_urls"]:
                 item.image_paths = data["photo_urls"]
             repo.upsert(item)
+            _try_update_category_stats(item, sold=False)
             results["published"] += 1
         else:
             results["failed"] += 1
@@ -164,6 +183,7 @@ def publish_item(sku: str, session: Session = Depends(get_session)):
     if data["photo_urls"]:
         item.image_paths = data["photo_urls"]
     repo.upsert(item)
+    _try_update_category_stats(item, sold=False)
     return {
         "sku": sku,
         "listing_id": data["listing_id"],
@@ -212,6 +232,9 @@ def mark_sold_manual(
     if not result.ok:
         status = 404 if "not found" in (result.error or "") else 500
         raise HTTPException(status_code=status, detail=result.error)
+    item = ItemRepository(session).get_by_sku(sku)
+    if item:
+        _try_update_category_stats(item, sold=True, sold_price=sold_price)
     # Notify
     try:
         from packages.notifications.src.notifier import Notifier

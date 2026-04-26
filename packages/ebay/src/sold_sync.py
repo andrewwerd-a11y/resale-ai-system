@@ -18,6 +18,7 @@ from packages.data.src.models.sale_record import SaleRecord
 from packages.data.src.repositories.item_repo import ItemRepository
 from packages.ebay.src.auth import EbayAuth
 from packages.ebay.src import http_client as ebay_http
+from packages.ebay.src.category_spreadsheet import CategorySpreadsheet
 
 
 class SoldSync:
@@ -185,6 +186,7 @@ class SoldSync:
             )
             session.add(sale)
             session.commit()
+            self._try_update_category_stats(item, sold_price=sold_price)
             result["synced_items"] += 1
 
         return result
@@ -211,3 +213,19 @@ class SoldSync:
             return float(node or 0)
         except (TypeError, ValueError):
             return default
+
+    @staticmethod
+    def _try_update_category_stats(item, sold_price: float) -> None:
+        try:
+            category_id = str(item.ebay_category_id or "").strip()
+            if not category_id:
+                return
+            CategorySpreadsheet().update_field_stats(
+                category_id=category_id,
+                item=item,
+                sold=True,
+                sold_price=sold_price,
+            )
+        except Exception:
+            # Stats should never block sold reconciliation.
+            return
