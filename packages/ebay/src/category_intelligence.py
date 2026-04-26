@@ -20,11 +20,10 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime
 
-import httpx
-
 from packages.core.src.result import Result
 from packages.domain.src.entities.item import Item
 from packages.ebay.src.auth import EbayAuth
+from packages.ebay.src import http_client as ebay_http
 
 logger = logging.getLogger(__name__)
 
@@ -110,7 +109,7 @@ class CategoryIntelligence:
         )
         print(f"[CategoryIntelligence] SUGGEST {url}?q={title[:60]!r}")
         try:
-            resp = httpx.get(
+            resp = ebay_http.get(
                 url,
                 headers={
                     "Authorization": f"Bearer {token}",
@@ -176,7 +175,7 @@ class CategoryIntelligence:
         )
         print(f"[CategoryIntelligence] ASPECTS {url}")
         try:
-            resp = httpx.get(
+            resp = ebay_http.get(
                 url,
                 headers={
                     "Authorization": f"Bearer {token}",
@@ -278,7 +277,7 @@ class CategoryIntelligence:
         )
         print(f"[CategoryIntelligence] ASPECTS {url}  (fallback)")
         try:
-            resp = httpx.get(
+            resp = ebay_http.get(
                 url,
                 headers={
                     "Authorization": f"Bearer {token}",
@@ -303,7 +302,7 @@ class CategoryIntelligence:
             f"{s.ebay_app_id}:{s.ebay_cert_id}".encode()
         ).decode()
         try:
-            resp = httpx.post(
+            resp = ebay_http.post(
                 f"{s.ebay_api_base}/identity/v1/oauth2/token",
                 headers={
                     "Content-Type": "application/x-www-form-urlencoded",

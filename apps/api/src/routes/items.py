@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+from datetime import datetime
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, UploadFile, File
@@ -10,6 +11,13 @@ from sqlmodel import Session
 
 from packages.data.src.db.sqlite import get_session
 from packages.data.src.repositories.item_repo import ItemRepository
+from packages.testing.src.e2e_guard import (
+    E2ESafetyError,
+    assert_route_sku_allowed,
+    assert_route_skus_allowed,
+    is_route_guard_enabled,
+    parse_sku_list,
+)
 
 router = APIRouter()
 
@@ -60,11 +68,45 @@ def get_stale(session: Session = Depends(get_session)):
 
 
 @router.post("/apply-stale-drops")
-def apply_stale_drops(session: Session = Depends(get_session)):
+def apply_stale_drops(
+    skus: str = "",
+    e2e_only: bool = False,
+    session: Session = Depends(get_session),
+):
     """Apply configured price drop to all stale listings."""
     from packages.sync.src.stale_checker import StaleChecker
+
+    filtered_skus = parse_sku_list(skus)
+    if is_route_guard_enabled():
+        try:
+            filtered_skus = assert_route_skus_allowed(
+                filtered_skus,
+                "items.apply_stale_drops",
+                require_non_empty=True,
+            )
+        except E2ESafetyError as exc:
+            raise HTTPException(status_code=403, detail=str(exc))
+    if e2e_only and not filtered_skus:
+        raise HTTPException(status_code=400, detail="e2e_only requires explicit skus")
+
     checker = StaleChecker()
-    count = checker.apply_price_drops(session)
+    if filtered_skus:
+        count = 0
+        stale = checker.get_stale_items(session)
+        allowed = set(filtered_skus)
+        for item in stale:
+            if (item.sku or "").upper() not in allowed:
+                continue
+            new_price = checker.suggest_price_drop(item)
+            if new_price is not None and new_price != item.list_price:
+                item.list_price = new_price
+                item.updated_at = datetime.utcnow()
+                session.add(item)
+                count += 1
+        if count:
+            session.commit()
+    else:
+        count = checker.apply_price_drops(session)
     return {"updated": count, "drop_percent": checker.stale_drop}
 
 
@@ -141,6 +183,10 @@ def get_item(sku: str, session: Session = Depends(get_session)):
 @router.patch("/{sku}")
 def update_item(sku: str, updates: dict, session: Session = Depends(get_session)):
     """Manual field override — sets manual_override=True to protect from AI reprocessing."""
+    try:
+        assert_route_sku_allowed(sku, "items.update_item")
+    except E2ESafetyError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
     repo = ItemRepository(session)
     item = repo.get_by_sku(sku)
     if not item:
@@ -156,6 +202,10 @@ def update_item(sku: str, updates: dict, session: Session = Depends(get_session)
 @router.patch("/{sku}/cost")
 def update_cost(sku: str, updates: dict, session: Session = Depends(get_session)):
     """Set cost for an item. Sets cost_manual=True but does NOT set manual_override."""
+    try:
+        assert_route_sku_allowed(sku, "items.update_cost")
+    except E2ESafetyError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
     repo = ItemRepository(session)
     item = repo.get_by_sku(sku)
     if not item:
@@ -190,6 +240,11 @@ def analyze_single(sku: str, session: Session = Depends(get_session)):
     from packages.vision.src.ollama_provider import OllamaProvider
     from packages.vision.src.prompt_builder import build_extraction_prompt
     from packages.vision.src.response_parser import ResponseParser
+
+    try:
+        assert_route_sku_allowed(sku, "items.analyze")
+    except E2ESafetyError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
 
     repo = ItemRepository(session)
     item = repo.get_by_sku(sku)
@@ -255,6 +310,10 @@ def analyze_single(sku: str, session: Session = Depends(get_session)):
 @router.post("/{sku}/enrich")
 def enrich_item(sku: str, session: Session = Depends(get_session)):
     """Run Claude enrichment pipeline on a single item."""
+    try:
+        assert_route_sku_allowed(sku, "items.enrich")
+    except E2ESafetyError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
     from packages.enrichment.src.enricher import ItemEnricher
     repo = ItemRepository(session)
     item = repo.get_by_sku(sku)
@@ -293,6 +352,11 @@ def run_category_intelligence(sku: str, session: Session = Depends(get_session))
     from datetime import datetime
     from packages.ebay.src.category_intelligence import CategoryIntelligence
     from packages.ebay.src.category_spreadsheet import CategorySpreadsheet
+
+    try:
+        assert_route_sku_allowed(sku, "items.category_intelligence")
+    except E2ESafetyError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
 
     repo = ItemRepository(session)
     item = repo.get_by_sku(sku)
@@ -409,8 +473,25 @@ def get_category_template(sku: str, session: Session = Depends(get_session)):
 
 
 @router.post("/process")
-def trigger_worker(background_tasks: BackgroundTasks):
+def trigger_worker(
+    background_tasks: BackgroundTasks,
+    skus: str = "",
+    e2e_only: bool = False,
+):
     """Trigger the intake worker in the background."""
+    filtered_skus = parse_sku_list(skus)
+    if is_route_guard_enabled():
+        try:
+            assert_route_skus_allowed(filtered_skus, "items.process", require_non_empty=True)
+        except E2ESafetyError as exc:
+            raise HTTPException(status_code=403, detail=str(exc))
+        raise HTTPException(
+            status_code=400,
+            detail="E2E route guard enabled: /api/items/process is global and requires a constrained implementation.",
+        )
+    if e2e_only and not filtered_skus:
+        raise HTTPException(status_code=400, detail="e2e_only requires explicit skus")
+
     def _run():
         import subprocess, sys
         subprocess.run([sys.executable, "apps/worker/src/main.py"])
@@ -426,6 +507,10 @@ class BulkSkuRequest(BaseModel):
 def bulk_approve(body: BulkSkuRequest, session: Session = Depends(get_session)):
     """Approve multiple items at once."""
     from packages.core.src.constants import ItemStatus
+    try:
+        body.skus = assert_route_skus_allowed(body.skus, "items.bulk_approve", require_non_empty=True)
+    except E2ESafetyError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
     repo = ItemRepository(session)
     updated = []
     for sku in body.skus:
@@ -441,6 +526,10 @@ def bulk_approve(body: BulkSkuRequest, session: Session = Depends(get_session)):
 def bulk_review(body: BulkSkuRequest, session: Session = Depends(get_session)):
     """Send multiple items back to review queue."""
     from packages.core.src.constants import ItemStatus
+    try:
+        body.skus = assert_route_skus_allowed(body.skus, "items.bulk_review", require_non_empty=True)
+    except E2ESafetyError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
     repo = ItemRepository(session)
     updated = []
     for sku in body.skus:
@@ -457,6 +546,10 @@ def bulk_review(body: BulkSkuRequest, session: Session = Depends(get_session)):
 def bulk_reject(body: BulkSkuRequest, session: Session = Depends(get_session)):
     """Reject multiple items at once."""
     from packages.core.src.constants import ItemStatus
+    try:
+        body.skus = assert_route_skus_allowed(body.skus, "items.bulk_reject", require_non_empty=True)
+    except E2ESafetyError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
     repo = ItemRepository(session)
     updated = []
     for sku in body.skus:
@@ -478,6 +571,7 @@ async def upload_photos(
 ):
     """Upload one or more photos, append their URLs to image_paths."""
     try:
+        assert_route_sku_allowed(sku, "items.upload_photos")
         repo = ItemRepository(session)
         item = repo.get_by_sku(sku)
         if not item:
@@ -508,6 +602,8 @@ async def upload_photos(
             repo.upsert(item)
             paths = _image_paths_to_list(item.image_paths)
         return {"image_paths": paths}
+    except E2ESafetyError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
     except HTTPException:
         raise
     except Exception as exc:
@@ -530,6 +626,7 @@ def _image_paths_to_list(value) -> list[str]:
 def delete_photo(sku: str, body: PhotoUrlBody, session: Session = Depends(get_session)):
     """Remove a photo URL from image_paths (does not delete from Cloudinary)."""
     try:
+        assert_route_sku_allowed(sku, "items.delete_photo")
         repo = ItemRepository(session)
         item = repo.get_by_sku(sku)
         if not item:
@@ -539,6 +636,8 @@ def delete_photo(sku: str, body: PhotoUrlBody, session: Session = Depends(get_se
         item.image_paths = paths
         repo.upsert(item)
         return {"image_paths": paths}
+    except E2ESafetyError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
     except HTTPException:
         raise
     except Exception as exc:
@@ -549,6 +648,7 @@ def delete_photo(sku: str, body: PhotoUrlBody, session: Session = Depends(get_se
 def set_cover_photo(sku: str, body: PhotoUrlBody, session: Session = Depends(get_session)):
     """Move a photo URL to index 0 in image_paths."""
     try:
+        assert_route_sku_allowed(sku, "items.set_cover_photo")
         repo = ItemRepository(session)
         item = repo.get_by_sku(sku)
         if not item:
@@ -563,6 +663,8 @@ def set_cover_photo(sku: str, body: PhotoUrlBody, session: Session = Depends(get
         item.image_paths = paths
         repo.upsert(item)
         return {"image_paths": paths}
+    except E2ESafetyError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
     except HTTPException:
         raise
     except Exception as exc:

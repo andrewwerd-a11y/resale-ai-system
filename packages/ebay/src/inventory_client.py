@@ -80,7 +80,14 @@ class EbayInventoryClient:
         photo_urls = self.uploader.upload_all(image_paths) if image_paths else []
 
         try:
-            listing_id, listing_url, offer_id = self._publish_via_api(item, photo_urls)
+            publish_result = self._publish_via_api(item, photo_urls)
+            if isinstance(publish_result, tuple) and len(publish_result) == 3:
+                listing_id, listing_url, offer_id = publish_result
+            elif isinstance(publish_result, tuple) and len(publish_result) == 2:
+                listing_id, listing_url = publish_result
+                offer_id = ""
+            else:
+                raise ValueError("Unexpected publish result shape")
 
             # Resolve promotion percentage: item-level overrides DB default
             promo_pct = 0.0

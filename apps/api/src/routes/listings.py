@@ -20,6 +20,13 @@ from packages.data.src.models.item_record import ItemRecord
 from packages.data.src.repositories.item_repo import ItemRepository
 from packages.ebay.src.auth import EbayAuth
 from packages.ebay.src import http_client as ebay_http
+from packages.testing.src.e2e_guard import (
+    E2ESafetyError,
+    assert_route_sku_allowed,
+    assert_route_skus_allowed,
+    is_route_guard_enabled,
+    parse_sku_list,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -97,8 +104,21 @@ def get_listings(
 # ── GET /api/listings/sync ─────────────────────────────────────────────────────
 
 @router.get("/sync")
-def sync_listings(session: Session = Depends(get_session)):
+def sync_listings(
+    skus: str = "",
+    e2e_only: bool = False,
+    session: Session = Depends(get_session),
+):
     """Sync active listings from eBay inventory API (paginated)."""
+    selected = parse_sku_list(skus)
+    if is_route_guard_enabled():
+        try:
+            selected = assert_route_skus_allowed(selected, "listings.sync", require_non_empty=True)
+        except E2ESafetyError as exc:
+            raise HTTPException(status_code=403, detail=str(exc))
+    if e2e_only and not selected:
+        raise HTTPException(status_code=400, detail="e2e_only requires explicit skus")
+
     auth = EbayAuth()
     if not auth.is_configured():
         raise HTTPException(status_code=503, detail="eBay not configured")
@@ -137,9 +157,12 @@ def sync_listings(session: Session = Depends(get_session)):
     now = datetime.utcnow().isoformat()
     cfg = get_settings()
 
+    allowed = set(selected)
     for ebay_item in all_ebay_items:
         sku = ebay_item.get("sku", "")
         if not sku:
+            continue
+        if allowed and sku.upper() not in allowed:
             continue
         synced += 1
         local = repo.get_by_sku(sku)
@@ -236,6 +259,11 @@ def push_to_ebay(sku: str, payload: PushPayload, session: Session = Depends(get_
     Returns per-step results so the UI can show progress.
     Steps: inventory_item, offer, promotion.
     """
+    try:
+        assert_route_sku_allowed(sku, "listings.push")
+    except E2ESafetyError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+
     repo = ItemRepository(session)
     item = repo.get_by_sku(sku)
     if not item:
@@ -386,6 +414,10 @@ def push_to_ebay(sku: str, payload: PushPayload, session: Session = Depends(get_
 @router.delete("/end/{sku}")
 def end_listing(sku: str, session: Session = Depends(get_session)):
     """Withdraw offer from eBay (ends listing, keeps inventory item)."""
+    try:
+        assert_route_sku_allowed(sku, "listings.end")
+    except E2ESafetyError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
     repo = ItemRepository(session)
     item = repo.get_by_sku(sku)
     if not item:
@@ -427,6 +459,10 @@ class BulkPricePayload(BaseModel):
 
 @router.post("/bulk/price")
 def bulk_set_price(payload: BulkPricePayload, session: Session = Depends(get_session)):
+    try:
+        payload.skus = assert_route_skus_allowed(payload.skus, "listings.bulk_price", require_non_empty=True)
+    except E2ESafetyError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
     repo = ItemRepository(session)
     updated = []
     for sku in payload.skus:
@@ -445,6 +481,10 @@ class BulkPromoPayload(BaseModel):
 
 @router.post("/bulk/promo")
 def bulk_set_promo(payload: BulkPromoPayload, session: Session = Depends(get_session)):
+    try:
+        payload.skus = assert_route_skus_allowed(payload.skus, "listings.bulk_promo", require_non_empty=True)
+    except E2ESafetyError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
     repo = ItemRepository(session)
     updated = []
     for sku in payload.skus:

@@ -8,7 +8,6 @@ item status to SOLD with sold_price, fees, date_sold, net_profit.
 """
 from __future__ import annotations
 
-import json
 from datetime import datetime, timedelta
 
 from sqlmodel import Session
@@ -17,6 +16,7 @@ from packages.core.src.config import get_settings
 from packages.core.src.constants import ItemStatus
 from packages.data.src.repositories.item_repo import ItemRepository
 from packages.ebay.src.auth import EbayAuth
+from packages.ebay.src import http_client as ebay_http
 
 
 class SoldSync:
@@ -24,7 +24,7 @@ class SoldSync:
         self.auth = EbayAuth()
         self.settings = get_settings()
 
-    def reconcile(self, session: Session) -> dict:
+    def reconcile(self, session: Session, allowed_skus: set[str] | None = None) -> dict:
         """
         Fetch recent sold orders from eBay and mark matching items as SOLD.
         Returns stats dict: {synced, skipped, errors, not_configured}.
@@ -48,7 +48,7 @@ class SoldSync:
 
         for order in orders:
             try:
-                self._process_order(order, repo)
+                self._process_order(order, repo, allowed_skus=allowed_skus)
                 stats["synced"] += 1
             except Exception as exc:
                 stats["errors"].append(str(exc))
@@ -58,32 +58,38 @@ class SoldSync:
 
     def _fetch_sold_orders(self) -> list[dict]:
         """Fetch orders with FULFILLED status from the last 90 days."""
-        import urllib.request
-        import urllib.parse
-
         since = (datetime.utcnow() - timedelta(days=90)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
-        params = urllib.parse.urlencode({
+        params = {
             "filter": f"orderfulfillmentstatus:{{FULFILLED}},creationdate:[{since}]",
             "limit": "200",
-        })
-        url = f"{self.auth.api_base}/sell/fulfillment/v1/order?{params}"
-        req = urllib.request.Request(
-            url,
+        }
+        resp = ebay_http.get(
+            f"{self.auth.api_base}/sell/fulfillment/v1/order",
             headers={
                 "Authorization": f"Bearer {self.auth.user_token}",
                 "Accept": "application/json",
                 "X-EBAY-C-MARKETPLACE-ID": self.auth.marketplace_id,
             },
+            params=params,
+            timeout=30,
         )
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            data = json.loads(resp.read())
+        if resp.status_code != 200:
+            raise RuntimeError(f"Sold sync failed: {resp.status_code} {resp.text[:300]}")
+        data = resp.json()
         return data.get("orders", [])
 
-    def _process_order(self, order: dict, repo: ItemRepository) -> None:
+    def _process_order(
+        self,
+        order: dict,
+        repo: ItemRepository,
+        allowed_skus: set[str] | None = None,
+    ) -> None:
         """Match order line items to local SKUs and update status."""
         for line in order.get("lineItems", []):
             sku = line.get("sku") or line.get("legacySku")
             if not sku:
+                continue
+            if allowed_skus is not None and sku not in allowed_skus:
                 continue
             item = repo.get_by_sku(sku)
             if not item or item.status == ItemStatus.SOLD:

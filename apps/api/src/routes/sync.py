@@ -9,6 +9,13 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session
 
 from packages.data.src.db.sqlite import get_session
+from packages.testing.src.e2e_guard import (
+    E2ESafetyError,
+    assert_route_sku_allowed,
+    assert_route_skus_allowed,
+    is_route_guard_enabled,
+    parse_sku_list,
+)
 
 router = APIRouter()
 
@@ -39,6 +46,11 @@ def relist_item(
     from packages.data.src.repositories.item_repo import ItemRepository
     from packages.sync.src.relister import AutoRelister
 
+    try:
+        assert_route_sku_allowed(sku, "sync.relist")
+    except E2ESafetyError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+
     repo = ItemRepository(session)
     item = repo.get_by_sku(sku)
     if not item:
@@ -58,15 +70,29 @@ def relist_item(
 
 @router.post("/relist-all")
 def relist_all(
+    skus: str = "",
+    e2e_only: bool = False,
     price_adjustment: float = -0.10,
     session: Session = Depends(get_session),
 ):
     from packages.data.src.repositories.item_repo import ItemRepository
     from packages.sync.src.relister import AutoRelister
 
+    selected = parse_sku_list(skus)
+    if is_route_guard_enabled():
+        try:
+            selected = assert_route_skus_allowed(selected, "sync.relist_all", require_non_empty=True)
+        except E2ESafetyError as exc:
+            raise HTTPException(status_code=403, detail=str(exc))
+    if e2e_only and not selected:
+        raise HTTPException(status_code=400, detail="e2e_only requires explicit skus")
+
     relister = AutoRelister()
     repo = ItemRepository(session)
     ended = relister.get_ended_listings(session)
+    if selected:
+        allowed = set(selected)
+        ended = [item for item in ended if (item.sku or "").upper() in allowed]
 
     results: dict = {"relisted": 0, "failed": 0, "errors": []}
     for item in ended:

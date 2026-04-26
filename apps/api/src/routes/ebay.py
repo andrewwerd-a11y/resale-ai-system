@@ -10,7 +10,15 @@ from packages.core.src.constants import ItemStatus
 from packages.data.src.db.sqlite import get_session
 from packages.data.src.repositories.item_repo import ItemRepository
 from packages.ebay.src.auth import EbayAuth
+from packages.ebay.src import http_client as ebay_http
 from packages.ebay.src.photo_uploader import PhotoUploader
+from packages.testing.src.e2e_guard import (
+    E2ESafetyError,
+    assert_route_sku_allowed,
+    assert_route_skus_allowed,
+    is_route_guard_enabled,
+    parse_sku_list,
+)
 
 router = APIRouter()
 
@@ -78,11 +86,27 @@ def ebay_status():
     }
 
 @router.post("/publish/batch")
-def publish_batch(session: Session = Depends(get_session)):
+def publish_batch(
+    skus: str = "",
+    e2e_only: bool = False,
+    session: Session = Depends(get_session),
+):
     from packages.ebay.src.inventory_client import EbayInventoryClient
     import datetime
+    selected = parse_sku_list(skus)
+    if is_route_guard_enabled():
+        try:
+            selected = assert_route_skus_allowed(selected, "ebay.publish_batch", require_non_empty=True)
+        except E2ESafetyError as exc:
+            raise HTTPException(status_code=403, detail=str(exc))
+    if e2e_only and not selected:
+        raise HTTPException(status_code=400, detail="e2e_only requires explicit skus")
+
     repo = ItemRepository(session)
     items = repo.list_by_status(ItemStatus.EXPORT_READY) + repo.list_by_status(ItemStatus.APPROVED)
+    if selected:
+        allowed = set(selected)
+        items = [item for item in items if (item.sku or "").upper() in allowed]
     if not items:
         return {"message": "No items ready to publish", "count": 0}
     client = EbayInventoryClient()
@@ -113,6 +137,10 @@ def publish_batch(session: Session = Depends(get_session)):
 def publish_item(sku: str, session: Session = Depends(get_session)):
     from packages.ebay.src.inventory_client import EbayInventoryClient
     import datetime
+    try:
+        assert_route_sku_allowed(sku, "ebay.publish_item")
+    except E2ESafetyError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
     repo = ItemRepository(session)
     item = repo.get_by_sku(sku)
     if not item:
@@ -146,10 +174,23 @@ def publish_item(sku: str, session: Session = Depends(get_session)):
     }
 
 @router.post("/sync-sold")
-def sync_sold(session: Session = Depends(get_session)):
+def sync_sold(
+    skus: str = "",
+    e2e_only: bool = False,
+    session: Session = Depends(get_session),
+):
     from packages.ebay.src.sold_sync import SoldSync
+    selected = parse_sku_list(skus)
+    if is_route_guard_enabled():
+        try:
+            selected = assert_route_skus_allowed(selected, "ebay.sync_sold", require_non_empty=True)
+        except E2ESafetyError as exc:
+            raise HTTPException(status_code=403, detail=str(exc))
+    if e2e_only and not selected:
+        raise HTTPException(status_code=400, detail="e2e_only requires explicit skus")
+
     sync = SoldSync()
-    stats = sync.reconcile(session)
+    stats = sync.reconcile(session, allowed_skus=set(selected) if selected else None)
     return stats
 
 @router.post("/mark-sold/{sku}")
@@ -161,6 +202,10 @@ def mark_sold_manual(
     session: Session = Depends(get_session),
 ):
     """Manually mark an item as sold with price and fees. Creates a SaleRecord."""
+    try:
+        assert_route_sku_allowed(sku, "ebay.mark_sold")
+    except E2ESafetyError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
     from packages.sync.src.cross_platform_sync import CrossPlatformSync
     sync = CrossPlatformSync()
     result = sync.mark_sold(sku, platform, sold_price, fees, session)
@@ -187,6 +232,10 @@ def update_listing(sku: str, updates: dict, session: Session = Depends(get_sessi
     """
     import json
     from packages.ebay.src.inventory_client import EbayInventoryClient
+    try:
+        assert_route_sku_allowed(sku, "ebay.update_listing")
+    except E2ESafetyError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
 
     repo = ItemRepository(session)
     item = repo.get_by_sku(sku)
@@ -244,8 +293,7 @@ def update_listing(sku: str, updates: dict, session: Session = Depends(get_sessi
         "availability": {"shipToLocationAvailability": {"quantity": 1}},
     }
 
-    import httpx
-    resp = httpx.put(
+    resp = ebay_http.put(
         f"{base}/sell/inventory/v1/inventory_item/{sku}",
         headers=headers,
         json=inventory_payload,
