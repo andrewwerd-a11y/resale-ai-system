@@ -2,7 +2,7 @@
 # Requires: uv  (https://docs.astral.sh/uv/getting-started/installation/)
 # On Windows, run these inside PowerShell or Git Bash.
 
-.PHONY: install dev api worker migrate lint test clean help
+.PHONY: install dev api worker migrate lint test docs clean help
 
 help:
 	@echo ""
@@ -13,6 +13,7 @@ help:
 	@echo "  migrate    Run database migrations"
 	@echo "  lint       Run ruff + mypy"
 	@echo "  test       Run test suite"
+	@echo "  docs       Regenerate docs/openapi.json from FastAPI app"
 	@echo "  clean      Remove generated files (not intake folders)"
 	@echo ""
 
@@ -37,6 +38,9 @@ lint:
 
 test:
 	uv run pytest tests/ -v --cov=packages --cov-report=term-missing
+
+docs:
+	uv run python scripts/export_openapi.py
 
 clean:
 	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
