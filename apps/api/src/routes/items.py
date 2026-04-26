@@ -482,15 +482,28 @@ def trigger_worker(
     filtered_skus = parse_sku_list(skus)
     if is_route_guard_enabled():
         try:
-            assert_route_skus_allowed(filtered_skus, "items.process", require_non_empty=True)
+            filtered_skus = assert_route_skus_allowed(
+                filtered_skus,
+                "items.process",
+                require_non_empty=True,
+            )
         except E2ESafetyError as exc:
             raise HTTPException(status_code=403, detail=str(exc))
-        raise HTTPException(
-            status_code=400,
-            detail="E2E route guard enabled: /api/items/process is global and requires a constrained implementation.",
-        )
     if e2e_only and not filtered_skus:
         raise HTTPException(status_code=400, detail="e2e_only requires explicit skus")
+
+    if filtered_skus:
+        from apps.worker.src.main import run_worker_for_skus
+
+        result = run_worker_for_skus(filtered_skus)
+        if not result.get("ok", False):
+            error = str(result.get("error", "intake_processing_failed"))
+            status_code = 503 if error == "ollama_unavailable" else 500
+            raise HTTPException(
+                status_code=status_code,
+                detail=result.get("message") or error,
+            )
+        return result
 
     def _run():
         import subprocess, sys

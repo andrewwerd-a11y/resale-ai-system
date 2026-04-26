@@ -140,36 +140,28 @@ def process_item(
     return True, f"status={item.status} mode={item.item_mode}"
 
 
-def run_worker() -> None:
+def _process_manifests(manifests: list, batch_name: str) -> dict[str, object]:
     settings = get_settings()
-    init_db()
-
-    console.rule("[bold]Resale AI — Processing Worker[/bold]")
-
-    # Check Ollama availability
     provider = OllamaProvider()
     if not settings.dry_run and not provider.is_available():
-        console.print("[red]Ollama is not running.[/red]")
-        console.print("Start it with: [cyan]ollama serve[/cyan]")
-        console.print("Or set DRY_RUN=true in .env to test without it.")
-        sys.exit(1)
+        return {
+            "ok": False,
+            "error": "ollama_unavailable",
+            "message": "Ollama is not running and DRY_RUN is false.",
+            "requested_skus": [],
+            "found_skus": [],
+            "missing_skus": [],
+            "processed_count": 0,
+            "approved_count": 0,
+            "review_count": 0,
+            "rejected_count": 0,
+            "failed_count": 0,
+        }
 
-    console.print(f"Model: [cyan]{provider.model_id}[/cyan]")
-    console.print(f"Dry run: [yellow]{settings.dry_run}[/yellow]\n")
-
-    scanner = FolderScanner()
     normalizer = ImageNormalizer()
     parser = ResponseParser()
     mapper = CategoryMapper()
     router = TriageRouter()
-
-    manifests = scanner.scan_pending()
-    if not manifests:
-        console.print("[yellow]No items in intake/pending/ — nothing to process.[/yellow]")
-        console.print(f"Add item folders to: [cyan]{settings.intake_root / 'pending'}[/cyan]")
-        return
-
-    console.print(f"Found [green]{len(manifests)}[/green] items to process.\n")
 
     batch_id = str(uuid.uuid4())
     stats = {"ok": 0, "review": 0, "rejected": 0, "failed": 0}
@@ -177,7 +169,7 @@ def run_worker() -> None:
     with Session(engine) as session:
         batch = BatchRecord(
             batch_id=batch_id,
-            batch_name=f"worker_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}",
+            batch_name=batch_name,
             item_count=len(manifests),
             status="running",
         )
@@ -211,9 +203,9 @@ def run_worker() -> None:
                     else:
                         stats["failed"] += 1
                         console.print(f"  [red]FAIL {desc}: {msg}[/red]")
-                except Exception as e:
+                except Exception as exc:  # noqa: BLE001
                     stats["failed"] += 1
-                    console.print(f"  [red]ERROR {desc}: {e}[/red]")
+                    console.print(f"  [red]ERROR {desc}: {exc}[/red]")
 
                 progress.advance(task)
 
@@ -223,6 +215,101 @@ def run_worker() -> None:
         batch.finished_at = datetime.utcnow()
         session.add(batch)
         session.commit()
+
+    return {
+        "ok": True,
+        "error": None,
+        "message": "processing_complete",
+        "requested_skus": [],
+        "found_skus": [],
+        "missing_skus": [],
+        "processed_count": stats["ok"] + stats["review"] + stats["rejected"],
+        "approved_count": stats["ok"],
+        "review_count": stats["review"],
+        "rejected_count": stats["rejected"],
+        "failed_count": stats["failed"],
+    }
+
+
+def run_worker_for_skus(requested_skus: list[str]) -> dict[str, object]:
+    """
+    Process only matching SKU folders from intake/pending.
+    This is intended for constrained E2E-safe execution paths.
+    """
+    init_db()
+    scanner = FolderScanner()
+    manifests = scanner.scan_pending()
+
+    normalized_requested = sorted({(sku or "").strip().upper() for sku in requested_skus if sku})
+    by_sku = {
+        (m.detected_sku or "").upper(): m
+        for m in manifests
+        if m.detected_sku
+    }
+    selected = [by_sku[sku] for sku in normalized_requested if sku in by_sku]
+    found = sorted([(m.detected_sku or "").upper() for m in selected if m.detected_sku])
+    missing = [sku for sku in normalized_requested if sku not in set(found)]
+
+    if not selected:
+        return {
+            "ok": True,
+            "error": None,
+            "message": "no_matching_pending_folders",
+            "requested_skus": normalized_requested,
+            "found_skus": found,
+            "missing_skus": missing,
+            "processed_count": 0,
+            "approved_count": 0,
+            "review_count": 0,
+            "rejected_count": 0,
+            "failed_count": 0,
+        }
+
+    result = _process_manifests(
+        selected,
+        batch_name=f"worker_constrained_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}",
+    )
+    result["requested_skus"] = normalized_requested
+    result["found_skus"] = found
+    result["missing_skus"] = missing
+    return result
+
+
+def run_worker() -> None:
+    settings = get_settings()
+    init_db()
+
+    console.rule("[bold]Resale AI — Processing Worker[/bold]")
+
+    # Check Ollama availability
+    provider = OllamaProvider()
+    if not settings.dry_run and not provider.is_available():
+        console.print("[red]Ollama is not running.[/red]")
+        console.print("Start it with: [cyan]ollama serve[/cyan]")
+        console.print("Or set DRY_RUN=true in .env to test without it.")
+        sys.exit(1)
+
+    console.print(f"Model: [cyan]{provider.model_id}[/cyan]")
+    console.print(f"Dry run: [yellow]{settings.dry_run}[/yellow]\n")
+
+    scanner = FolderScanner()
+    manifests = scanner.scan_pending()
+    if not manifests:
+        console.print("[yellow]No items in intake/pending/ — nothing to process.[/yellow]")
+        console.print(f"Add item folders to: [cyan]{settings.intake_root / 'pending'}[/cyan]")
+        return
+
+    console.print(f"Found [green]{len(manifests)}[/green] items to process.\n")
+    result = _process_manifests(
+        manifests,
+        batch_name=f"worker_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}",
+    )
+    stats = {
+        "ok": int(result.get("approved_count", 0)),
+        "review": int(result.get("review_count", 0)),
+        "rejected": int(result.get("rejected_count", 0)),
+        "failed": int(result.get("failed_count", 0)),
+    }
 
     console.print()
     console.rule("Done")

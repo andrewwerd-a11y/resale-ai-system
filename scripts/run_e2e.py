@@ -442,14 +442,35 @@ class E2ERunner:
                 fn=lambda: {"status": "SKIP", "notes": "--skip-intake was provided"},
             )
             return
+
+        def constrained_intake():
+            before_unapproved = self._non_approved_fingerprint()
+            resp = self._api(
+                "POST",
+                "/api/items/process",
+                params={"skus": ",".join(self.selected_skus), "e2e_only": "true"},
+            )
+            body = resp.get("body", {})
+            after_unapproved = self._non_approved_fingerprint()
+            if before_unapproved != after_unapproved:
+                raise RuntimeError("Constrained intake changed non-approved SKU state")
+            return {
+                "status_code": resp.get("status_code"),
+                "requested_skus": body.get("requested_skus", self.selected_skus),
+                "found_skus": body.get("found_skus", []),
+                "missing_skus": body.get("missing_skus", []),
+                "processed_count": body.get("processed_count"),
+                "approved_count": body.get("approved_count"),
+                "review_count": body.get("review_count"),
+                "failed_count": body.get("failed_count"),
+                "notes": "Constrained intake path executed.",
+            }
+
         self._step(
-            "intake_process_skip",
+            "intake_process_constrained",
             "Intake workflow",
             "POST /api/items/process",
-            fn=lambda: {
-                "status": "SKIP",
-                "notes": "Unsafe global worker trigger; route processes all pending intake folders.",
-            },
+            fn=constrained_intake,
         )
 
     def _run_ai_integration_workflow(self) -> None:

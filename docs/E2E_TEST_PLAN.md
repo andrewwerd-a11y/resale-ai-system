@@ -41,17 +41,17 @@ Any mutation attempt outside this allowlist is blocked by the central E2E guard.
 - Reports and settings read checks
 - Capture status checks
 - Sync/ended listings read checks
+- Constrained intake processing for approved SKUs via `POST /api/items/process?skus=...&e2e_only=true`
 
 ## Skipped Workflows and Why
 Skipped when unconstrained/global:
-- `POST /api/items/process` (global intake processing)
 - `POST /api/ebay/publish/batch` (global publish)
 - `POST /api/export/ebay-csv` and `POST /api/export/master-sheet` (global exports)
 - `POST /api/ebay/sync-sold` (global sold sync)
 - `POST /api/items/apply-stale-drops` (global stale drop mutation)
 - `POST /api/sync/relist-all` (global relist)
 
-These are marked `SKIP` unless safely constrained.
+These are marked `SKIP` unless safely constrained. Intake has a constrained path and is tested through it.
 
 ## External Integration Rules
 - Ollama: optional; if unavailable, skip or run dry checks.
@@ -79,6 +79,10 @@ These are marked `SKIP` unless safely constrained.
 - Never mutate non-approved SKUs.
 - Avoid destructive operations.
 - Prefer API mutation plus DB verification.
+- Intake safety:
+  - In `E2E_ROUTE_GUARD_ENABLED=true`, global intake without explicit `skus` is blocked.
+  - Constrained intake only processes pending folders whose folder name matches requested approved SKUs.
+  - Missing requested SKU folders are reported explicitly and do not cause broad fallback processing.
 
 ## Investigating `missing_cloudinary_upload`
 Harness traces:
