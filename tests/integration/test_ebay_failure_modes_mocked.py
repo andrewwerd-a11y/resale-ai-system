@@ -247,6 +247,10 @@ def test_sync_sold_unknown_sku_does_not_mutate_known_items(monkeypatch, tmp_path
         resp = client.post("/api/ebay/sync-sold", params={"skus": "BK-000005", "e2e_only": "true"})
 
     assert resp.status_code == 200
+    body = resp.json()
+    assert body["synced"] == 0
+    assert body["unknown_skus"] == 1
+    assert body["skipped"] >= 1
     item = _get_item("BK-000005")
     assert item is not None
     assert item.status == ItemStatus.LISTED
@@ -317,6 +321,98 @@ def test_sync_sold_duplicate_orders_do_not_duplicate_sale_records(monkeypatch, t
         resp = client.post("/api/ebay/sync-sold", params={"skus": "BK-000009", "e2e_only": "true"})
 
     assert resp.status_code == 200
+    body = resp.json()
+    assert body["synced"] == 0
+    assert body["duplicate_items"] >= 1
     records = _sale_records_for_sku("BK-000009")
     assert len(records) == 1
 
+
+def test_sync_sold_known_sku_creates_single_sale_record_and_updates_reports(monkeypatch, tmp_path):
+    monkeypatch.setenv("E2E_ROUTE_GUARD_ENABLED", "true")
+    monkeypatch.setenv("APPROVED_E2E_SKUS", "BK-000005,BK-000008,BK-000009")
+    _configure_temp_db(monkeypatch, tmp_path)
+    _seed_item("BK-000005", ItemStatus.LISTED)
+
+    def fake_orders(_self):
+        return [
+            {
+                "orderId": "ORDER-1001",
+                "pricingSummary": {
+                    "total": {"value": "30.00"},
+                    "fee": {"value": "3.00"},
+                    "deliveryCost": {"value": "2.00"},
+                },
+                "lineItems": [
+                    {
+                        "lineItemId": "LINE-1",
+                        "sku": "BK-000005",
+                        "lineItemCost": {"value": "30.00"},
+                    }
+                ],
+            }
+        ]
+
+    monkeypatch.setattr("packages.ebay.src.sold_sync.SoldSync._fetch_sold_orders", fake_orders)
+
+    with _client() as client:
+        first = client.post("/api/ebay/sync-sold", params={"skus": "BK-000005", "e2e_only": "true"})
+        second = client.post("/api/ebay/sync-sold", params={"skus": "BK-000005", "e2e_only": "true"})
+        sales = client.get("/api/reports/sales")
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    first_body = first.json()
+    second_body = second.json()
+    assert first_body["synced"] == 1
+    assert first_body["synced_items"] == 1
+    assert second_body["synced"] == 0
+    assert second_body["duplicate_items"] >= 1
+
+    records = _sale_records_for_sku("BK-000005")
+    assert len(records) == 1
+    assert records[0].source_report == "ebay_order:ORDER-1001|line:LINE-1|sku:BK-000005"
+
+    item = _get_item("BK-000005")
+    assert item is not None
+    assert item.status == ItemStatus.SOLD
+
+    assert sales.status_code == 200
+    assert any(row.get("sku") == "BK-000005" for row in sales.json())
+
+
+def test_sync_sold_counts_blocked_skus_when_selected_subset(monkeypatch, tmp_path):
+    monkeypatch.setenv("E2E_ROUTE_GUARD_ENABLED", "true")
+    monkeypatch.setenv("APPROVED_E2E_SKUS", "BK-000005,BK-000008,BK-000009")
+    _configure_temp_db(monkeypatch, tmp_path)
+    _seed_item("BK-000005", ItemStatus.LISTED)
+    _seed_item("BK-000008", ItemStatus.LISTED)
+
+    def fake_orders(_self):
+        return [
+            {
+                "orderId": "ORDER-2001",
+                "pricingSummary": {"total": {"value": "12.00"}, "fee": {"value": "1.00"}},
+                "lineItems": [
+                    {"lineItemId": "L1", "sku": "BK-000005", "lineItemCost": {"value": "12.00"}},
+                    {"lineItemId": "L2", "sku": "BK-000008", "lineItemCost": {"value": "10.00"}},
+                ],
+            }
+        ]
+
+    monkeypatch.setattr("packages.ebay.src.sold_sync.SoldSync._fetch_sold_orders", fake_orders)
+
+    with _client() as client:
+        resp = client.post("/api/ebay/sync-sold", params={"skus": "BK-000005", "e2e_only": "true"})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["synced"] == 1
+    assert body["blocked_skus"] == 1
+    assert body["synced_items"] == 1
+    assert body["skipped_items"] >= 1
+
+    records_5 = _sale_records_for_sku("BK-000005")
+    records_8 = _sale_records_for_sku("BK-000008")
+    assert len(records_5) == 1
+    assert len(records_8) == 0
