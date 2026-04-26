@@ -119,12 +119,24 @@ class CategoryIntelligence:
                 timeout=15,
             )
         except Exception as exc:
-            return Result.failure(f"suggestion_error: {exc}")
+            code = self._classify_exception(exc)
+            return Result.failure(f"suggestion_error: {exc}", error_code=code)
 
         if resp.status_code != 200:
-            return Result.failure(f"suggestion_failed: {resp.status_code} {resp.text[:200]}")
+            code = "AUTH_FAILED" if resp.status_code in (401, 403) else "SUGGESTION_API_ERROR"
+            return Result.failure(
+                f"suggestion_failed: {resp.status_code} {resp.text[:200]}",
+                error_code=code,
+            )
 
-        suggestions = resp.json().get("categorySuggestions", [])
+        try:
+            payload = resp.json()
+        except Exception as exc:
+            return Result.failure(
+                f"suggestion_malformed_response: {exc}",
+                error_code="MALFORMED_RESPONSE",
+            )
+        suggestions = payload.get("categorySuggestions", [])
         if not suggestions:
             return Result.failure("suggestion_empty: no results returned")
 
@@ -186,7 +198,10 @@ class CategoryIntelligence:
             )
         except Exception as exc:
             logger.error("Category template fetch error for %s: %s", category_id, exc)
-            return Result.failure(str(exc), error_code="FETCH_ERROR")
+            return Result.failure(
+                f"template_fetch_error: {exc}",
+                error_code=self._classify_exception(exc),
+            )
 
         if resp.status_code != 200:
             logger.warning(
@@ -206,10 +221,16 @@ class CategoryIntelligence:
                     return Result.success(template)
             return Result.failure(
                 f"eBay API {resp.status_code}: {resp.text[:200]}",
-                error_code="API_ERROR",
+                error_code="AUTH_FAILED" if resp.status_code in (401, 403) else "API_ERROR",
             )
 
-        raw = resp.json()
+        try:
+            raw = resp.json()
+        except Exception as exc:
+            return Result.failure(
+                f"template_malformed_response: {exc}",
+                error_code="MALFORMED_RESPONSE",
+            )
         template = self._parse_template(category_id, raw)
         self._template_cache[category_id] = template
         logger.info(
@@ -358,6 +379,23 @@ class CategoryIntelligence:
             fetched_at=datetime.utcnow(),
             raw_response=raw,
         )
+
+    @staticmethod
+    def _classify_exception(exc: Exception) -> str:
+        text = f"{type(exc).__name__}: {exc}".lower()
+        if "timeout" in text:
+            return "UPSTREAM_TIMEOUT"
+        if (
+            "connect" in text
+            or "connection" in text
+            or "dns" in text
+            or "name or service not known" in text
+            or "winerror 10061" in text
+        ):
+            return "UPSTREAM_CONNECTION"
+        if "proxy" in text:
+            return "UPSTREAM_PROXY"
+        return "UPSTREAM_ERROR"
 
     def _flatten_item_values(self, item: Item) -> dict[str, str]:
         """Build a flat case-normalised dict of all item field values."""

@@ -22,6 +22,23 @@ from packages.testing.src.e2e_guard import (
 router = APIRouter()
 
 
+def _category_intel_error_response(result) -> tuple[int, dict]:
+    code = str(result.error_code or "CATEGORY_INTELLIGENCE_ERROR")
+    message = str(result.error or "Category intelligence failed")
+    status = 502
+    if code == "NO_TOKEN":
+        status = 503
+    elif code == "AUTH_FAILED":
+        status = 502
+    elif code == "UPSTREAM_TIMEOUT":
+        status = 504
+    elif code in {"UPSTREAM_CONNECTION", "UPSTREAM_PROXY"}:
+        status = 502
+    elif code == "MALFORMED_RESPONSE":
+        status = 502
+    return status, {"code": code, "message": message}
+
+
 @router.get("/stats")
 def get_stats(session: Session = Depends(get_session)):
     from collections import Counter
@@ -368,7 +385,8 @@ def run_category_intelligence(sku: str, session: Session = Depends(get_session))
     cat_id, cat_name = cat_intel.get_category_id(item)
     result = cat_intel.get_template(cat_id)
     if not result.ok:
-        raise HTTPException(status_code=502, detail=result.error)
+        status, detail = _category_intel_error_response(result)
+        raise HTTPException(status_code=status, detail=detail)
 
     template = result.value
     item.ebay_category_id = cat_id
@@ -838,7 +856,8 @@ def recategorize_item(sku: str, session: Session = Depends(get_session)):
     cat_id, cat_name = cat_intel.get_category_id(item)
     result = cat_intel.get_template(cat_id)
     if not result.ok:
-        raise HTTPException(status_code=502, detail=result.error)
+        status, detail = _category_intel_error_response(result)
+        raise HTTPException(status_code=status, detail=detail)
 
     template = result.value
     item.ebay_category_id = cat_id
