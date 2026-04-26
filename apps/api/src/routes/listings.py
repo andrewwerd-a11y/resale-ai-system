@@ -7,6 +7,7 @@ from __future__ import annotations
 import logging
 import re
 import sqlite3
+import time
 from datetime import datetime
 from typing import Optional
 
@@ -31,6 +32,8 @@ from packages.testing.src.e2e_guard import (
 logger = logging.getLogger(__name__)
 router = APIRouter()
 _LOCATION_KEY_CACHE: dict[str, str] = {}
+_LISTINGS_SYNC_MAX_PAGES = 20
+_LISTINGS_SYNC_MAX_SECONDS = 20.0
 
 CONDITION_MAP = {
     "NEW": "NEW", "NEW_OTHER": "NEW_OTHER", "NEW_WITH_DEFECTS": "NEW_WITH_DEFECTS",
@@ -126,29 +129,12 @@ def sync_listings(
     headers = _ebay_headers(auth)
     base = auth.api_base
 
-    all_ebay_items = []
-    offset = 0
-    limit = 25
-    while True:
-        try:
-            resp = ebay_http.get(
-                f"{base}/sell/inventory/v1/inventory_item",
-                headers=headers,
-                params={"limit": limit, "offset": offset},
-                timeout=20,
-            )
-            if resp.status_code not in (200, 204):
-                logger.warning("eBay sync error %s: %s", resp.status_code, resp.text[:200])
-                break
-            data = resp.json()
-            batch = data.get("inventoryItems", [])
-            all_ebay_items.extend(batch)
-            if len(batch) < limit:
-                break
-            offset += limit
-        except Exception as exc:
-            logger.warning("eBay inventory sync error: %s", exc)
-            break
+    sync_errors: list[str] = []
+    pages_fetched = 0
+    if selected:
+        all_ebay_items, sync_errors = _fetch_inventory_items_for_skus(base, headers, selected)
+    else:
+        all_ebay_items, sync_errors, pages_fetched = _fetch_inventory_items_paginated(base, headers)
 
     repo = ItemRepository(session)
     synced = 0
@@ -193,7 +179,12 @@ def sync_listings(
                     if ebay_price and ebay_price != local.list_price:
                         local.list_price = ebay_price
                         changed = True
+            else:
+                sync_errors.append(
+                    f"{sku}: offer lookup failed {offer_resp.status_code}: {offer_resp.text[:200]}"
+                )
         except Exception as exc:
+            sync_errors.append(f"{sku}: offer lookup error: {exc}")
             logger.warning("Failed to fetch offer for SKU %s: %s", sku, exc)
 
         if changed:
@@ -202,7 +193,15 @@ def sync_listings(
 
         _touch_synced_at(cfg.db_path, sku, now)
 
-    return {"synced": synced, "updated": updated, "not_found": not_found}
+    result: dict = {"synced": synced, "updated": updated, "not_found": not_found}
+    if selected:
+        result["constrained"] = True
+        result["requested_skus"] = selected
+    else:
+        result["pages_fetched"] = pages_fetched
+    if sync_errors:
+        result["errors"] = sync_errors
+    return result
 
 
 @router.get("/ebay-connectivity")
@@ -629,3 +628,71 @@ def _touch_synced_at(db_path, sku: str, now: str) -> None:
         conn.close()
     except Exception:
         pass
+
+
+def _fetch_inventory_items_for_skus(base: str, headers: dict, skus: list[str]) -> tuple[list[dict], list[str]]:
+    items: list[dict] = []
+    errors: list[str] = []
+    for sku in skus:
+        try:
+            resp = ebay_http.get(
+                f"{base}/sell/inventory/v1/inventory_item/{sku}",
+                headers=headers,
+                timeout=15,
+            )
+        except Exception as exc:
+            errors.append(f"{sku}: inventory lookup error: {exc}")
+            continue
+        if resp.status_code == 200:
+            try:
+                payload = resp.json() or {}
+            except Exception:
+                payload = {}
+            if not isinstance(payload, dict):
+                payload = {}
+            payload["sku"] = payload.get("sku") or sku
+            items.append(payload)
+            continue
+        if resp.status_code == 404:
+            continue
+        errors.append(f"{sku}: inventory lookup failed {resp.status_code}: {resp.text[:200]}")
+    return items, errors
+
+
+def _fetch_inventory_items_paginated(base: str, headers: dict) -> tuple[list[dict], list[str], int]:
+    all_items: list[dict] = []
+    errors: list[str] = []
+    offset = 0
+    limit = 25
+    pages = 0
+    started = time.monotonic()
+    while True:
+        if pages >= _LISTINGS_SYNC_MAX_PAGES:
+            errors.append(f"sync pagination capped at {_LISTINGS_SYNC_MAX_PAGES} pages")
+            break
+        if time.monotonic() - started >= _LISTINGS_SYNC_MAX_SECONDS:
+            errors.append(f"sync pagination timed out after {_LISTINGS_SYNC_MAX_SECONDS:.1f}s")
+            break
+        try:
+            resp = ebay_http.get(
+                f"{base}/sell/inventory/v1/inventory_item",
+                headers=headers,
+                params={"limit": limit, "offset": offset},
+                timeout=20,
+            )
+        except Exception as exc:
+            errors.append(f"inventory pagination error: {exc}")
+            logger.warning("eBay inventory sync error: %s", exc)
+            break
+        if resp.status_code not in (200, 204):
+            errors.append(f"inventory pagination failed {resp.status_code}: {resp.text[:200]}")
+            logger.warning("eBay sync error %s: %s", resp.status_code, resp.text[:200])
+            break
+        pages += 1
+        data = resp.json()
+        batch = data.get("inventoryItems", [])
+        all_items.extend(batch)
+        if len(batch) < limit:
+            break
+        offset += limit
+    return all_items, errors, pages
