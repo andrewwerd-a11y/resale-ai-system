@@ -159,6 +159,51 @@ class EbayInventoryClient:
         self._policies_cache = policies
         return policies
 
+    def get_listing_status(self, listing_id: str) -> Result[dict]:
+        """
+        Resolve listing status from Inventory offers by listing ID.
+        Returns Result.success({"status": "<STATUS>", "offer_id": "<id>"}) on success.
+        """
+        if not listing_id:
+            return Result.failure("listing_id_required", error_code="INVALID_INPUT")
+        if not self.auth.is_configured():
+            return Result.failure("eBay credentials not configured.", error_code="NOT_CONFIGURED")
+
+        try:
+            resp = ebay_http.get(
+                f"{self.auth.api_base}/sell/inventory/v1/offer",
+                headers=self._headers(),
+                params={"listing_id": listing_id, "limit": "1"},
+                timeout=20,
+            )
+        except Exception as exc:
+            return Result.failure(f"listing_status_request_failed: {exc}", error_code="REQUEST_FAILED")
+
+        if resp.status_code != 200:
+            return Result.failure(
+                f"listing_status_http_{resp.status_code}",
+                error_code="API_ERROR",
+                body=resp.text[:500],
+            )
+
+        try:
+            payload = resp.json() if resp.content else {}
+        except Exception as exc:
+            return Result.failure(f"listing_status_parse_failed: {exc}", error_code="PARSE_ERROR")
+
+        offers = payload.get("offers") or []
+        if not offers:
+            return Result.failure("listing_not_found", error_code="NOT_FOUND", body=payload)
+
+        offer = offers[0] or {}
+        status = str(offer.get("status") or "UNKNOWN").upper()
+        return Result.success(
+            {
+                "status": status,
+                "offer_id": str(offer.get("offerId") or ""),
+            }
+        )
+
     # ── Internal flow ─────────────────────────────────────────────────────────
 
     def _publish_via_api(self, item: Item, photo_urls: list[str]) -> tuple[str, str]:

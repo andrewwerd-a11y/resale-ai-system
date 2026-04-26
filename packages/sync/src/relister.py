@@ -14,6 +14,15 @@ logger = logging.getLogger(__name__)
 
 
 class AutoRelister:
+    ACTIVE_STATUSES = {"ACTIVE"}
+    INACTIVE_STATUSES = {
+        "ENDED",
+        "UNPUBLISHED",
+        "OUT_OF_STOCK",
+        "INACTIVE",
+        "WITHDRAWN",
+    }
+
     def get_ended_listings(self, session) -> list[Item]:
         """
         Return items with status='listed' whose eBay listing has ended.
@@ -43,10 +52,16 @@ class AutoRelister:
         try:
             from packages.ebay.src.inventory_client import EbayInventoryClient
             client = EbayInventoryClient()
-            if hasattr(client, "get_listing_status"):
-                result = client.get_listing_status(item.listing_id)
-                if result.ok:
-                    return result.value.get("status") == "ACTIVE"
+            result = client.get_listing_status(item.listing_id)
+            if not result.ok:
+                return True
+            status = str((result.value or {}).get("status") or "").upper()
+            if status in self.ACTIVE_STATUSES:
+                return True
+            if status in self.INACTIVE_STATUSES:
+                return False
+            # Unknown statuses are treated as active to avoid risky relists.
+            return True
         except Exception as e:
             logger.debug("Could not check listing %s: %s", item.listing_id, e)
         return True  # Assume active if check fails
