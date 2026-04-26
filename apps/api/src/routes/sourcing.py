@@ -12,6 +12,12 @@ from sqlmodel import Session, select
 from packages.data.src.db.sqlite import get_session
 from packages.data.src.models.sourcing_batch import SourcingBatch
 from packages.data.src.repositories.item_repo import ItemRepository
+from packages.testing.src.e2e_guard import (
+    E2ESafetyError,
+    assert_route_sku_allowed,
+    assert_route_skus_allowed,
+    is_route_guard_enabled,
+)
 
 router = APIRouter()
 
@@ -37,6 +43,13 @@ class SetCostBody(BaseModel):
 
 @router.post("/batch")
 def create_batch(body: BatchCreate, session: Session = Depends(get_session)):
+    if is_route_guard_enabled():
+        try:
+            # This route has no SKU filter; block in guarded E2E mode.
+            assert_route_skus_allowed([], "sourcing.create_batch", require_non_empty=True)
+        except E2ESafetyError as exc:
+            raise HTTPException(status_code=403, detail=str(exc))
+
     item_count = max(body.item_count, 1)
     cost_per_item = round(body.total_cost / item_count, 2)
     try:
@@ -71,6 +84,11 @@ def assign_batch(
     body: AssignBatchBody,
     session: Session = Depends(get_session),
 ):
+    try:
+        body.skus = assert_route_skus_allowed(body.skus, "sourcing.assign_batch", require_non_empty=True)
+    except E2ESafetyError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+
     batch = session.get(SourcingBatch, batch_id)
     if not batch:
         raise HTTPException(status_code=404, detail=f"Batch {batch_id} not found")
@@ -102,6 +120,11 @@ def set_item_cost(
     body: SetCostBody,
     session: Session = Depends(get_session),
 ):
+    try:
+        assert_route_sku_allowed(sku, "sourcing.set_item_cost")
+    except E2ESafetyError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+
     repo = ItemRepository(session)
     item = repo.get_by_sku(sku)
     if not item:

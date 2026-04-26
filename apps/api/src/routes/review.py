@@ -6,6 +6,7 @@ from sqlmodel import Session
 from packages.core.src.constants import ItemStatus
 from packages.data.src.db.sqlite import get_session
 from packages.data.src.repositories.item_repo import ItemRepository
+from packages.testing.src.e2e_guard import E2ESafetyError, assert_route_sku_allowed
 
 router = APIRouter()
 
@@ -24,6 +25,10 @@ def list_review_queue(session: Session = Depends(get_session)):
 
 @router.post("/{sku}/approve")
 def approve_item(sku: str, session: Session = Depends(get_session)):
+    try:
+        assert_route_sku_allowed(sku, "review.approve_item")
+    except E2ESafetyError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
     repo = ItemRepository(session)
     item = repo.get_by_sku(sku)
     if not item:
@@ -36,6 +41,10 @@ def approve_item(sku: str, session: Session = Depends(get_session)):
 
 @router.post("/{sku}/reject")
 def reject_item(sku: str, session: Session = Depends(get_session)):
+    try:
+        assert_route_sku_allowed(sku, "review.reject_item")
+    except E2ESafetyError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
     repo = ItemRepository(session)
     ok = repo.update_status(sku, ItemStatus.REJECTED)
     if not ok:
@@ -46,6 +55,10 @@ def reject_item(sku: str, session: Session = Depends(get_session)):
 @router.patch("/{sku}/edit")
 def edit_and_approve(sku: str, updates: dict, session: Session = Depends(get_session)):
     """Edit fields and immediately approve."""
+    try:
+        assert_route_sku_allowed(sku, "review.edit_and_approve")
+    except E2ESafetyError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
     repo = ItemRepository(session)
     item = repo.get_by_sku(sku)
     if not item:
