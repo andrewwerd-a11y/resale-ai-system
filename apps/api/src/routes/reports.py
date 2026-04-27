@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 from sqlmodel import Session, select
 
+from apps.api.src.services.ebay_auth_diagnostics import get_ebay_auth_readiness
 from packages.data.src.db.sqlite import get_session
 from packages.data.src.models.sale_record import SaleRecord
 
@@ -67,6 +68,46 @@ def _parse_dt(s: str | None) -> datetime | None:
         return datetime.fromisoformat(s)
     except (ValueError, TypeError):
         return None
+
+
+@router.get("/sold-readiness")
+def sold_readiness(session: Session = Depends(get_session)):
+    records = session.exec(select(SaleRecord)).all()
+    ebay_records = [record for record in records if (record.platform or "").lower() == "ebay"]
+    ebay_sync_records = [record for record in ebay_records if str(record.source_report or "").startswith("ebay_order:")]
+    last_sync_candidates = [record.created_at for record in ebay_sync_records if record.created_at]
+    last_sync_at = max(last_sync_candidates).isoformat() if last_sync_candidates else None
+
+    auth_readiness = get_ebay_auth_readiness()
+    sold_sync_ready = bool(auth_readiness.get("checks", {}).get("access_token_present")) and not auth_readiness.get("blockers")
+    warnings: list[str] = []
+
+    if not records:
+        warnings.append("No sold records yet.")
+    if not sold_sync_ready:
+        warnings.append("Sold sync is not ready because eBay auth needs attention.")
+
+    return {
+        "ready": sold_sync_ready,
+        "total_sold_records": len(records),
+        "ebay_sold_records": len(ebay_records),
+        "last_sold_sync_at": last_sync_at,
+        "duplicate_protection": {
+            "enabled": True,
+            "mode": "source_report_idempotency",
+            "detail": "eBay sold sync deduplicates using order/line source_report keys when available.",
+        },
+        "unknown_sku_count": None,
+        "unknown_sku_count_tracked": False,
+        "sold_sync_auth": {
+            "ready": sold_sync_ready,
+            "code": auth_readiness.get("code"),
+            "message": auth_readiness.get("message"),
+            "next_action": auth_readiness.get("next_action"),
+            "environment": auth_readiness.get("checks", {}).get("environment"),
+        },
+        "warnings": warnings,
+    }
 
 
 @router.get("/sales")
