@@ -72,7 +72,9 @@ def test_publish_readiness_returns_ready_true_for_complete_approved_item(monkeyp
     monkeypatch.setenv("EBAY_RETURN_POLICY_ID", "return-1")
     _configure_temp_db(monkeypatch, tmp_path)
     _block_external_calls(monkeypatch)
-    _seed_item()
+    local_photo = tmp_path / "BK-000005-01.jpg"
+    local_photo.write_bytes(b"ready")
+    _seed_item(image_paths=[str(local_photo)])
 
     with _client() as client:
         resp = client.get("/api/listings/BK-000005/publish-readiness")
@@ -158,3 +160,67 @@ def test_publish_readiness_keeps_backward_compatibility_when_guard_disabled(monk
     assert body["sku"] == "BK-999999"
     assert body["ready"] is False
     assert any("not publishable" in blocker for blocker in body["blockers"])
+
+
+def test_publish_readiness_hosted_photo_urls_satisfy_photo_hosting(monkeypatch, tmp_path):
+    monkeypatch.delenv("E2E_ROUTE_GUARD_ENABLED", raising=False)
+    monkeypatch.delenv("APPROVED_E2E_SKUS", raising=False)
+    _configure_temp_db(monkeypatch, tmp_path)
+    _block_external_calls(monkeypatch)
+    _seed_item(image_paths=["https://images.example.test/BK-000005-01.jpg"])
+
+    with _client() as client:
+        resp = client.get("/api/listings/BK-000005/publish-readiness")
+
+    assert resp.status_code == 200
+    photo_check = next(check for check in resp.json()["checks"] if check["name"] == "photo_hosting_readiness")
+    assert photo_check["ok"] is True
+    assert photo_check["context"]["has_hosted_photo_urls"] is True
+    assert photo_check["context"]["needs_hosting"] is False
+
+
+def test_publish_readiness_local_only_photos_require_hosting_without_upload(monkeypatch, tmp_path):
+    monkeypatch.delenv("E2E_ROUTE_GUARD_ENABLED", raising=False)
+    monkeypatch.delenv("APPROVED_E2E_SKUS", raising=False)
+    monkeypatch.setenv("CLOUDINARY_CLOUD_NAME", "")
+    monkeypatch.setenv("CLOUDINARY_API_KEY", "")
+    monkeypatch.setenv("CLOUDINARY_API_SECRET", "")
+    _configure_temp_db(monkeypatch, tmp_path)
+    _block_external_calls(monkeypatch)
+    local_photo = tmp_path / "BK-000005-local.jpg"
+    local_photo.write_bytes(b"local")
+    _seed_item(image_paths=[str(local_photo)])
+
+    with _client() as client:
+        resp = client.get("/api/listings/BK-000005/publish-readiness")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    photo_check = next(check for check in body["checks"] if check["name"] == "photo_hosting_readiness")
+    assert body["ready"] is True
+    assert photo_check["ok"] is True
+    assert photo_check["context"]["has_local_photos"] is True
+    assert photo_check["context"]["needs_hosting"] is True
+    assert photo_check["context"]["cloudinary_config_present"] is False
+    assert "Host local photos before sandbox or live publish." in body["required_actions"]
+    assert "Cloudinary is not configured" in " ".join(body["warnings"])
+
+
+def test_publish_readiness_missing_local_photo_files_are_surfaced(monkeypatch, tmp_path):
+    monkeypatch.delenv("E2E_ROUTE_GUARD_ENABLED", raising=False)
+    monkeypatch.delenv("APPROVED_E2E_SKUS", raising=False)
+    _configure_temp_db(monkeypatch, tmp_path)
+    _block_external_calls(monkeypatch)
+    missing_path = tmp_path / "missing-photo.jpg"
+    _seed_item(image_paths=[str(missing_path)])
+
+    with _client() as client:
+        resp = client.get("/api/listings/BK-000005/publish-readiness")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    photo_check = next(check for check in body["checks"] if check["name"] == "photo_hosting_readiness")
+    assert body["ready"] is False
+    assert photo_check["ok"] is False
+    assert photo_check["context"]["missing_photo_files"] == [str(missing_path)]
+    assert "Some stored local photo paths no longer exist on disk." in body["warnings"]

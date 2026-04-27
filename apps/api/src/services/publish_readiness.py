@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 from packages.core.src.config import get_settings
 from packages.core.src.constants import ItemStatus
 from packages.domain.src.entities.item import Item
+from packages.ebay.src.photo_uploader import PhotoUploader
 from packages.testing.src.e2e_guard import is_e2e_sku_allowed, is_route_guard_enabled
 
 
@@ -39,15 +41,25 @@ def evaluate_publish_readiness(item: Item) -> PublishReadinessResult:
     checks: list[dict] = []
     settings = get_settings()
 
-    def add_check(name: str, ok: bool, *, detail: str, blocking: bool = False, action: str | None = None, warning: str | None = None) -> None:
-        checks.append(
-            {
-                "name": name,
-                "ok": ok,
-                "blocking": blocking,
-                "detail": detail,
-            }
-        )
+    def add_check(
+        name: str,
+        ok: bool,
+        *,
+        detail: str,
+        blocking: bool = False,
+        action: str | None = None,
+        warning: str | None = None,
+        context: dict | None = None,
+    ) -> None:
+        payload = {
+            "name": name,
+            "ok": ok,
+            "blocking": blocking,
+            "detail": detail,
+        }
+        if context is not None:
+            payload["context"] = context
+        checks.append(payload)
         if blocking and not ok:
             blockers.append(detail)
         if warning and not ok:
@@ -123,30 +135,67 @@ def evaluate_publish_readiness(item: Item) -> PublishReadinessResult:
         )
 
     image_paths = [str(path).strip() for path in (item.image_paths or []) if str(path).strip()]
-    has_photos = bool(image_paths)
     hosted_photo_urls = [path for path in image_paths if path.startswith("http://") or path.startswith("https://")]
+    local_photo_candidates = [path for path in image_paths if path not in hosted_photo_urls]
+    local_photo_files = [path for path in local_photo_candidates if Path(path).is_file()]
+    missing_photo_files = [path for path in local_photo_candidates if not Path(path).is_file()]
+    has_photos = bool(hosted_photo_urls or local_photo_files)
     add_check(
         "photos_present",
         has_photos,
         detail=(
-            f"{len(image_paths)} photo path(s) available."
+            f"{len(hosted_photo_urls) + len(local_photo_files)} usable photo source(s) available."
             if has_photos
             else "No photos are attached to this item."
         ),
         blocking=True,
         action="Attach local photos or hosted photo URLs before publishing.",
     )
+
+    cloudinary_config_present = PhotoUploader().is_configured()
+    needs_hosting = bool(local_photo_files) and not hosted_photo_urls
+    photo_hosting_ok = bool(hosted_photo_urls) or bool(local_photo_files)
+    photo_warning = None
+    if needs_hosting and not cloudinary_config_present:
+        photo_warning = "Local photos exist, but Cloudinary is not configured for hosting yet."
+    elif needs_hosting:
+        photo_warning = "Local photos exist, but hosted photo URLs still need to be prepared."
+    elif missing_photo_files:
+        photo_warning = "Some stored local photo paths no longer exist on disk."
+
     add_check(
-        "hosted_photos_ready",
-        bool(hosted_photo_urls),
+        "photo_hosting_readiness",
+        photo_hosting_ok,
         detail=(
             f"{len(hosted_photo_urls)} hosted photo URL(s) already present."
             if hosted_photo_urls
-            else "Hosted photo URLs are not present yet."
+            else (
+                f"{len(local_photo_files)} local photo file(s) are available and still need hosting."
+                if local_photo_files
+                else "No hosted photo URLs or local photo files are currently available."
+            )
         ),
-        warning="Hosted photo URLs still need to be prepared before publish.",
-        action="Host item photos before sandbox or live publish if local-only paths remain.",
+        blocking=not photo_hosting_ok,
+        warning=photo_warning,
+        action=(
+            "Host local photos before sandbox or live publish."
+            if needs_hosting
+            else "Restore or attach valid photo files before publishing."
+        ),
+        context={
+            "has_local_photos": bool(local_photo_files),
+            "has_hosted_photo_urls": bool(hosted_photo_urls),
+            "needs_hosting": needs_hosting,
+            "missing_photo_files": missing_photo_files,
+            "cloudinary_config_present": cloudinary_config_present,
+        },
     )
+    if needs_hosting:
+        action = "Host local photos before sandbox or live publish."
+        if action not in required_actions:
+            required_actions.append(action)
+    if photo_warning and photo_warning not in warnings and needs_hosting:
+        warnings.append(photo_warning)
 
     policy_ids = {
         "fulfillment": str(settings.ebay_fulfillment_policy_id or "").strip(),
