@@ -24,6 +24,7 @@ from packages.ebay.src.auth import EbayAuth
 from packages.ebay.src import http_client as ebay_http
 from packages.testing.src.e2e_guard import (
     E2ESafetyError,
+    is_live_e2e_enabled,
     assert_route_sku_allowed,
     assert_route_skus_allowed,
     is_route_guard_enabled,
@@ -118,6 +119,67 @@ def get_publish_readiness(sku: str, session: Session = Depends(get_session)):
     if not item:
         raise HTTPException(status_code=404, detail=not_found_publish_readiness(sku).as_dict())
     return evaluate_publish_readiness(item).as_dict()
+
+
+@router.get("/{sku}/publish-preview")
+def get_publish_preview(sku: str, session: Session = Depends(get_session)):
+    from packages.ebay.src.inventory_client import EbayInventoryClient
+
+    try:
+        assert_route_sku_allowed(sku, "listings.publish_preview")
+    except E2ESafetyError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+
+    item = ItemRepository(session).get_by_sku(sku)
+    if not item:
+        raise HTTPException(status_code=404, detail=not_found_publish_readiness(sku).as_dict())
+
+    readiness = evaluate_publish_readiness(item).as_dict()
+    client = EbayInventoryClient()
+    hosted_photo_urls = _hosted_photo_urls(item.image_paths)
+    inventory_payload = client._build_inventory_payload(item, hosted_photo_urls)
+
+    seller_policy_check = next(
+        (check for check in readiness["checks"] if check["name"] == "seller_policy_readiness"),
+        None,
+    )
+    offer_payload = client._build_offer_payload(
+        item,
+        _preview_policy_ids(seller_policy_check),
+        merchant_location_key="preview-location",
+    )
+
+    revision_payload = None
+    if item.offer_id or item.status == "listed":
+        revision_payload = {
+            "offer_id": item.offer_id or "",
+            "inventory_item": inventory_payload,
+            "offer": offer_payload,
+        }
+
+    mutation_allowed = False
+    mutation_reasons = ["Publish preview is read-only in this phase; no sandbox or live mutation is performed."]
+    if not is_live_e2e_enabled():
+        mutation_reasons.append("ALLOW_LIVE_E2E is false, so live mutation remains blocked.")
+
+    return {
+        "sku": (item.sku or "").upper(),
+        "readiness": readiness,
+        "would_publish": readiness["ready"],
+        "mutation_allowed": mutation_allowed,
+        "mutation_blockers": mutation_reasons,
+        "inventory_item_payload_preview": inventory_payload,
+        "offer_payload_preview": offer_payload,
+        "revision_payload_preview": revision_payload,
+        "photo_input_summary": {
+            "hosted_photo_urls": hosted_photo_urls,
+            "total_image_paths": len(item.image_paths or []),
+        },
+        "environment": {
+            "ebay_environment": get_settings().ebay_environment,
+            "allow_live_e2e": is_live_e2e_enabled(),
+        },
+    }
 
 
 @router.get("/sync")
@@ -580,6 +642,21 @@ def _parse_ebay_error(resp) -> str:
         return f"HTTP {resp.status_code}: {resp.text[:300]}"
     except Exception:
         return f"HTTP {resp.status_code}: {resp.text[:200]}"
+
+
+def _hosted_photo_urls(value) -> list[str]:
+    return [url for url in _image_paths_to_urls(value) if url.startswith("http://") or url.startswith("https://")]
+
+
+def _preview_policy_ids(seller_policy_check: dict | None) -> dict[str, str]:
+    context = seller_policy_check.get("context", {}) if isinstance(seller_policy_check, dict) else {}
+    configured = context.get("configured_policy_ids", {}) if isinstance(context, dict) else {}
+    discovered = context.get("discovered_policy_ids", {}) if isinstance(context, dict) else {}
+    return {
+        "fulfillment_id": str(configured.get("fulfillment") or discovered.get("fulfillment") or ""),
+        "payment_id": str(configured.get("payment") or discovered.get("payment") or ""),
+        "return_id": str(configured.get("return") or discovered.get("return") or ""),
+    }
 
 
 def _image_paths_to_urls(value) -> list[str]:
