@@ -284,9 +284,13 @@ def sync_listings(
     repo = ItemRepository(session)
     synced = 0
     updated = 0
+    updated_offer_ids = 0
+    updated_listing_ids = 0
+    already_current = 0
     not_found = []
     now = datetime.utcnow().isoformat()
     cfg = get_settings()
+    listing_id_available_from_sync = True
 
     allowed = set(selected)
     for ebay_item in all_ebay_items:
@@ -319,6 +323,31 @@ def sync_listings(
                     if offer_id and offer_id != local.offer_id:
                         local.offer_id = offer_id
                         changed = True
+                        updated_offer_ids += 1
+                    listing_id = str(
+                        offer.get("listingId")
+                        or ((offer.get("listing") or {}).get("listingId") if isinstance(offer.get("listing"), dict) else "")
+                        or ""
+                    ).strip()
+                    listing_url = str(
+                        offer.get("listingUrl")
+                        or ((offer.get("listing") or {}).get("listingUrl") if isinstance(offer.get("listing"), dict) else "")
+                        or ""
+                    ).strip()
+                    if listing_id:
+                        if listing_id != (local.listing_id or ""):
+                            local.listing_id = listing_id
+                            changed = True
+                            updated_listing_ids += 1
+                        if listing_url and listing_url != (local.listing_url or ""):
+                            local.listing_url = listing_url
+                            changed = True
+                        elif not listing_url and not (local.listing_url or ""):
+                            env_domain = "sandbox.ebay.com" if auth.settings.ebay_environment == "sandbox" else "ebay.com"
+                            local.listing_url = f"https://www.{env_domain}/itm/{listing_id}"
+                            changed = True
+                    else:
+                        listing_id_available_from_sync = False
                     ebay_price_str = (offer.get("pricingSummary") or {}).get("price") or {}
                     ebay_price = float(ebay_price_str.get("value", 0) or 0)
                     if ebay_price and ebay_price != local.list_price:
@@ -335,10 +364,18 @@ def sync_listings(
         if changed:
             repo.upsert(local)
             updated += 1
+        else:
+            already_current += 1
 
         _touch_synced_at(cfg.db_path, sku, now)
 
     result: dict = {"synced": synced, "updated": updated, "not_found": not_found}
+    result["updated_offer_ids"] = updated_offer_ids
+    result["updated_listing_ids"] = updated_listing_ids
+    result["already_current"] = already_current
+    result["listing_id_available_from_sync"] = listing_id_available_from_sync
+    if not listing_id_available_from_sync:
+        result["next_action"] = "Publish the existing offer or use a listing lookup flow to recover listing identifiers."
     if selected:
         result["constrained"] = True
         result["requested_skus"] = selected

@@ -83,7 +83,7 @@ def test_sync_constrained_approved_skus_avoids_full_pagination(monkeypatch, tmp_
         if "/sell/inventory/v1/inventory_item/BK-000005" in url:
             return _Resp(200, {"sku": "BK-000005"})
         if url.endswith("/sell/inventory/v1/offer"):
-            return _Resp(200, {"offers": []})
+            return _Resp(200, {"offers": [{"offerId": "OFFER-1"}]})
         if url.endswith("/sell/inventory/v1/inventory_item"):
             return _Resp(500, {}, "paginated path should not be used")
         return _Resp(404, {}, "not found")
@@ -98,6 +98,10 @@ def test_sync_constrained_approved_skus_avoids_full_pagination(monkeypatch, tmp_
     assert body["constrained"] is True
     assert body["requested_skus"] == ["BK-000005"]
     assert body["synced"] == 1
+    assert body["updated_offer_ids"] == 1
+    assert body["updated_listing_ids"] == 0
+    assert body["listing_id_available_from_sync"] is False
+    assert "Publish the existing offer" in body["next_action"]
     assert not any(url.endswith("/sell/inventory/v1/inventory_item") for url in calls)
 
 
@@ -166,3 +170,43 @@ def test_sync_unconstrained_uses_paginated_behavior(monkeypatch, tmp_path):
     assert "pages_fetched" in body
     assert paginated_calls["count"] >= 1
 
+
+def test_sync_constrained_stores_listing_id_when_offer_includes_it(monkeypatch, tmp_path):
+    _configure_runtime(monkeypatch, tmp_path, guard_enabled=True)
+    _seed_item("BK-000008", offer_id="OLD-OFFER")
+
+    def fake_get(url: str, **kwargs):
+        if "/sell/inventory/v1/inventory_item/BK-000008" in url:
+            return _Resp(200, {"sku": "BK-000008"})
+        if url.endswith("/sell/inventory/v1/offer"):
+            return _Resp(
+                200,
+                {
+                    "offers": [
+                        {
+                            "offerId": "NEW-OFFER",
+                            "listingId": "123456789012",
+                            "listingUrl": "https://www.sandbox.ebay.com/itm/123456789012",
+                            "pricingSummary": {"price": {"value": "22.00"}},
+                        }
+                    ]
+                },
+            )
+        return _Resp(404, {}, "not found")
+
+    monkeypatch.setattr("apps.api.src.routes.listings.ebay_http.get", fake_get)
+
+    with _client() as client:
+        resp = client.get("/api/listings/sync", params={"skus": "BK-000008", "e2e_only": "true"})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["updated_offer_ids"] == 1
+    assert body["updated_listing_ids"] == 1
+    assert body["listing_id_available_from_sync"] is True
+
+    with Session(sqlite_db.engine) as session:
+        item = ItemRepository(session).get_by_sku("BK-000008")
+        assert item.offer_id == "NEW-OFFER"
+        assert item.listing_id == "123456789012"
+        assert item.listing_url == "https://www.sandbox.ebay.com/itm/123456789012"
