@@ -15,6 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
+from apps.api.src.services.publish_readiness import evaluate_publish_readiness, not_found_publish_readiness
 from packages.core.src.config import get_settings
 from packages.data.src.db.sqlite import get_session
 from packages.data.src.models.item_record import ItemRecord
@@ -105,6 +106,19 @@ def get_listings(
 
 
 # ── GET /api/listings/sync ─────────────────────────────────────────────────────
+
+@router.get("/{sku}/publish-readiness")
+def get_publish_readiness(sku: str, session: Session = Depends(get_session)):
+    try:
+        assert_route_sku_allowed(sku, "listings.publish_readiness")
+    except E2ESafetyError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+
+    item = ItemRepository(session).get_by_sku(sku)
+    if not item:
+        raise HTTPException(status_code=404, detail=not_found_publish_readiness(sku).as_dict())
+    return evaluate_publish_readiness(item).as_dict()
+
 
 @router.get("/sync")
 def sync_listings(
