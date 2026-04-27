@@ -16,6 +16,24 @@ _watcher = None
 _watcher_running = False
 
 
+@router.get("/intake-readiness")
+def intake_readiness():
+    return {
+        "hardware_intake_enabled": False,
+        "current_mode": "manual_folder_intake",
+        "supported_future_inputs": [
+            "camera",
+            "barcode_scanner",
+            "scale",
+            "lightbox",
+            "workstation_folder",
+        ],
+        "blockers": [
+            "Hardware intake integration is not configured.",
+        ],
+    }
+
+
 @router.get("/status")
 def capture_status():
     camera = CameraController()
