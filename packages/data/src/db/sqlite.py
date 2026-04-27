@@ -33,6 +33,9 @@ def init_db() -> None:
     import packages.data.src.models.review_record  # noqa: F401
     import packages.data.src.models.sale_record  # noqa: F401
     import packages.data.src.models.sourcing_batch  # noqa: F401
+    import packages.data.src.models.publish_attempt_record  # noqa: F401
+    import packages.data.src.models.publish_repair_plan_record  # noqa: F401
+    import packages.data.src.models.publish_repair_decision_record  # noqa: F401
     SQLModel.metadata.create_all(engine)
 
 

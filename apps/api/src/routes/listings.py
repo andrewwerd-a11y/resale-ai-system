@@ -16,6 +16,7 @@ from pydantic import BaseModel
 from sqlmodel import Session, select
 
 from apps.api.src.services.ebay_auth_diagnostics import get_ebay_auth_readiness
+from apps.api.src.services.publish_repair import summarize_repair_status
 from apps.api.src.services.publish_readiness import evaluate_publish_readiness, not_found_publish_readiness
 from packages.core.src.config import get_settings
 from packages.data.src.db.sqlite import get_session
@@ -169,6 +170,7 @@ def get_publish_preview(sku: str, session: Session = Depends(get_session)):
     return {
         "sku": (item.sku or "").upper(),
         "readiness": readiness,
+        "repair_status": summarize_repair_status(session, sku),
         "would_publish": readiness["ready"],
         "existing_offer_id_detected": existing_offer_id_detected,
         "planned_action": planned_action,

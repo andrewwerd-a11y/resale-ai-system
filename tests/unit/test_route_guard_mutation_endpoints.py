@@ -79,6 +79,13 @@ def test_single_sku_guarded_mutation_routes_allow_approved_and_block_non_approve
         ("POST", "/api/items/{sku}/photos/host", {}),
         ("DELETE", "/api/items/{sku}/photos", {"json": {"url": "https://example.test/p.jpg"}}),
         ("POST", "/api/items/{sku}/photos/set-cover", {"json": {"url": "https://example.test/p.jpg"}}),
+        ("POST", "/api/ebay/repair-queue/{sku}/recheck-readiness", {}),
+        ("POST", "/api/ebay/repair-queue/{sku}/draft-fix", {}),
+        (
+            "POST",
+            "/api/ebay/repair-queue/{sku}/apply-draft-fix",
+            {"json": {"sku": "{sku}", "repair_plan_id": "plan-1", "approved": False}},
+        ),
         (
             "POST",
             "/api/ebay/mark-sold/{sku}",
@@ -92,11 +99,25 @@ def test_single_sku_guarded_mutation_routes_allow_approved_and_block_non_approve
 
     with _client() as client:
         for method, route, payload in routes:
-            blocked = _request(client, method, route.format(sku="BK-999999"), **payload)
+            resolved_payload = dict(payload)
+            if "json" in resolved_payload and isinstance(resolved_payload["json"], dict):
+                resolved_payload["json"] = {
+                    key: (value.format(sku="BK-999999") if isinstance(value, str) and "{sku}" in value else value)
+                    for key, value in resolved_payload["json"].items()
+                }
+            blocked = _request(client, method, route.format(sku="BK-999999"), **resolved_payload)
             assert blocked.status_code == 403
             assert "Only approved E2E SKUs are allowed" in blocked.json().get("detail", "")
 
-            allowed = _request(client, method, route.format(sku="BK-000005"), **payload)
+            if "json" in resolved_payload and isinstance(resolved_payload["json"], dict):
+                resolved_allowed = dict(resolved_payload)
+                resolved_allowed["json"] = {
+                    key: (value.format(sku="BK-000005") if isinstance(value, str) and "{sku}" in value else value)
+                    for key, value in resolved_payload["json"].items()
+                }
+            else:
+                resolved_allowed = resolved_payload
+            allowed = _request(client, method, route.format(sku="BK-000005"), **resolved_allowed)
             assert allowed.status_code != 403
 
 
@@ -134,6 +155,8 @@ def test_global_guarded_mutation_routes_block_non_approved_and_allow_approved(mo
         ("POST", "/api/export/master-sheet", {"params": {"skus": "BK-999999", "e2e_only": "true"}}, {"params": {"skus": "BK-000005", "e2e_only": "true"}}),
         ("POST", "/api/ebay/publish/batch", {"params": {"skus": "BK-999999", "e2e_only": "true"}}, {"params": {"skus": "BK-000005", "e2e_only": "true"}}),
         ("POST", "/api/ebay/sync-sold", {"params": {"skus": "BK-999999", "e2e_only": "true"}}, {"params": {"skus": "BK-000005", "e2e_only": "true"}}),
+        ("POST", "/api/ebay/repair-queue/bulk-draft-fixes", {"json": {"skus": ["BK-999999"]}}, {"json": {"skus": ["BK-000005"]}}),
+        ("POST", "/api/ebay/repair-queue/bulk-apply-approved-fixes", {"json": {"approvals": [{"sku": "BK-999999", "repair_plan_id": "plan-1", "approved": False}]}}, {"json": {"approvals": [{"sku": "BK-000005", "repair_plan_id": "plan-1", "approved": False}]}}),
         ("GET", "/api/listings/sync", {"params": {"skus": "BK-999999", "e2e_only": "true"}}, {"params": {"skus": "BK-000005", "e2e_only": "true"}}),
         ("POST", "/api/items/apply-stale-drops", {"params": {"skus": "BK-999999", "e2e_only": "true"}}, {"params": {"skus": "BK-000005", "e2e_only": "true"}}),
         ("POST", "/api/items/process", {"params": {"skus": "BK-999999", "e2e_only": "true"}}, {"params": {"skus": "BK-000005", "e2e_only": "true"}}),

@@ -169,6 +169,7 @@ class EbayInventoryClient:
                 f"eBay API error {exc.status_code}: {exc.message}",
                 error_code="API_ERROR",
                 body=exc.body,
+                stage=str(exc.context.get("stage") or exc.step or ""),
                 offer_id=str((exc.context or {}).get("offer_id") or ""),
                 recovered_existing_offer=bool((exc.context or {}).get("recovered_existing_offer")),
                 used_existing_offer=bool((exc.context or {}).get("used_existing_offer")),
@@ -569,14 +570,14 @@ class EbayInventoryClient:
         resp = ebay_http.put(url, headers=headers, json=payload, timeout=30)
         if resp.status_code not in (200, 204):
             logger.error("eBay %s error %s for %s: %s", step, resp.status_code, sku, resp.text)
-            raise _EbayApiError(resp.status_code, f"{step} failed", resp.text)
+            raise _EbayApiError(resp.status_code, f"{step} failed", resp.text, context={"stage": step}, step=step)
         return resp.json() if resp.content else {}
 
     def _post(self, url: str, headers: dict, payload: dict, sku: str = "", step: str = "") -> dict:
         resp = ebay_http.post(url, headers=headers, json=payload, timeout=30)
         if resp.status_code not in (200, 201):
             logger.error("eBay %s error %s for %s: %s", step, resp.status_code, sku, resp.text)
-            raise _EbayApiError(resp.status_code, f"{step} failed", resp.text)
+            raise _EbayApiError(resp.status_code, f"{step} failed", resp.text, context={"stage": step}, step=step)
         return resp.json() if resp.content else {}
 
     @staticmethod
@@ -623,9 +624,10 @@ class EbayInventoryClient:
 
 
 class _EbayApiError(Exception):
-    def __init__(self, status_code: int, message: str, body: str = "", context: dict | None = None):
+    def __init__(self, status_code: int, message: str, body: str = "", context: dict | None = None, step: str = ""):
         super().__init__(message)
         self.status_code = status_code
         self.message = message
         self.body = body
         self.context = context or {}
+        self.step = step

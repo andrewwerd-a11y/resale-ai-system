@@ -60,7 +60,7 @@ def _seed_item(sku: str, status: str, *, image_paths=None) -> None:
                 category_key="books",
                 ebay_category_id="29223",
                 condition_id="5000",
-                image_paths=image_paths or [],
+                image_paths=image_paths or [f"https://res.cloudinary.com/demo/image/upload/v1/{sku}-01.jpg"],
             )
         )
 
@@ -109,7 +109,9 @@ def test_publish_partial_failure_inventory_ok_offer_fails(monkeypatch, tmp_path)
         resp = client.post("/api/ebay/publish/BK-000005")
 
     assert resp.status_code == 500
-    assert "create_offer failed" in resp.json().get("detail", "")
+    detail = resp.json()["detail"]
+    assert detail["code"] == "ebay_publish_failed"
+    assert "invalid category/condition" in " ".join(detail["raw_ebay_errors"])
     assert calls["put"] == 1
     assert calls["post"] == 1
     item = _get_item("BK-000005")
@@ -155,7 +157,9 @@ def test_publish_partial_failure_offer_ok_publish_fails(monkeypatch, tmp_path):
         resp = client.post("/api/ebay/publish/BK-000008")
 
     assert resp.status_code == 500
-    assert "publish_offer failed" in resp.json().get("detail", "")
+    detail = resp.json()["detail"]
+    assert detail["code"] == "ebay_publish_failed"
+    assert "publish blocked" in " ".join(detail["raw_ebay_errors"])
     assert call_count["post"] == 2
     item = _get_item("BK-000008")
     assert item is not None
@@ -201,7 +205,7 @@ def test_publish_existing_offer_recovery_persists_offer_id_when_publish_still_fa
         resp = client.post("/api/ebay/publish/BK-000008")
 
     assert resp.status_code == 500
-    assert "recovered offer_id: 156719395011" in resp.json().get("detail", "")
+    assert resp.json()["detail"]["recovered_offer_id"] == "156719395011"
     item = _get_item("BK-000008")
     assert item is not None
     assert item.offer_id == "156719395011"
@@ -328,9 +332,9 @@ def test_publish_existing_offer_already_published_returns_recoverable_next_actio
         resp = client.post("/api/ebay/publish/BK-000008")
 
     assert resp.status_code == 500
-    detail = resp.json().get("detail", "")
-    assert "Offer is already published" in detail
-    assert "next_action: Run constrained listings sync for this SKU to recover listing identifiers from eBay." in detail
+    detail = resp.json()["detail"]
+    assert "Offer is already published" in " ".join(detail["raw_ebay_errors"])
+    assert detail["next_action"] == "Run constrained listings sync for this SKU to recover listing identifiers from eBay."
 
 
 def test_publish_returns_invalid_category_condition_error_detail(monkeypatch, tmp_path):
@@ -357,8 +361,8 @@ def test_publish_returns_invalid_category_condition_error_detail(monkeypatch, tm
         resp = client.post("/api/ebay/publish/BK-000005")
 
     assert resp.status_code == 500
-    detail = resp.json().get("detail", "")
-    assert "Invalid categoryId or condition" in detail
+    detail = resp.json()["detail"]
+    assert detail["classified_error"]["code"] == "invalid_category_condition"
     item = _get_item("BK-000005")
     assert item is not None
     assert item.status == ItemStatus.APPROVED
@@ -389,7 +393,7 @@ def test_publish_returns_invalid_photo_url_error_detail(monkeypatch, tmp_path):
         resp = client.post("/api/ebay/publish/BK-000005")
 
     assert resp.status_code == 500
-    assert "Invalid picture URL" in resp.json().get("detail", "")
+    assert "Invalid picture URL" in " ".join(resp.json()["detail"]["raw_ebay_errors"])
     item = _get_item("BK-000005")
     assert item is not None
     assert item.status == ItemStatus.APPROVED

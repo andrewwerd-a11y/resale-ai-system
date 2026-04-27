@@ -59,7 +59,7 @@ def _seed_item(sku: str, status: str) -> None:
                 category_key="books",
                 ebay_category_id="29223",
                 condition_id="5000",
-                image_paths=[],
+                image_paths=[f"https://res.cloudinary.com/demo/image/upload/v1/{sku}-01.jpg"],
             )
         )
 

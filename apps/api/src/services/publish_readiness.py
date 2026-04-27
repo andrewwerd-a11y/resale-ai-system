@@ -16,6 +16,7 @@ from packages.ebay.src.inventory_client import EbayInventoryClient
 from packages.ebay.src.photo_uploader import PhotoUploader
 from packages.ebay.src.public_image_urls import extract_public_image_urls
 from packages.testing.src.e2e_guard import is_e2e_sku_allowed, is_route_guard_enabled
+from apps.api.src.services.publish_compatibility import evaluate_publish_compatibility
 
 
 @dataclass
@@ -282,6 +283,55 @@ def evaluate_publish_readiness(
         add_warning(policy_state["warning"])
     if policy_state["action"] and policy_state["ok"] and policy_state["context"].get("needs_discovery"):
         add_required_action(policy_state["action"])
+
+    compatibility = evaluate_publish_compatibility(item, strict_condition_policy=False)
+    compatibility_blockers = list(compatibility["blockers"])
+    compatibility_warnings = list(compatibility["warnings"])
+    compatibility_required_actions = list(compatibility["required_actions"])
+    compatibility_check_ok = compatibility["ready"]
+
+    public_image_check = next(
+        (check for check in compatibility["checks"] if check.get("name") == "public_image_urls"),
+        None,
+    )
+    if public_image_check and needs_hosting and not hosted_photo_urls:
+        public_image_blocker = str(public_image_check.get("detail") or "").strip()
+        compatibility_check_ok = all(
+            check.get("ok") or check.get("name") == "public_image_urls"
+            for check in compatibility["checks"]
+        )
+        compatibility_blockers = [
+            blocker for blocker in compatibility_blockers if blocker != public_image_blocker
+        ]
+        if public_image_check.get("warning"):
+            add_warning(str(public_image_check["warning"]))
+        if public_image_check.get("action"):
+            add_required_action(str(public_image_check["action"]))
+
+    add_check(
+        "category_publish_compatibility",
+        compatibility_check_ok,
+        detail=(
+            "Local publish compatibility checks passed."
+            if compatibility_check_ok
+            else "Local publish compatibility checks found remaining blockers."
+        ),
+        blocking=not compatibility_check_ok,
+        warning=(compatibility_warnings[0] if compatibility_warnings else None),
+        action=(
+            compatibility_required_actions[0]
+            if compatibility_required_actions
+            else "Resolve the remaining publish compatibility blockers before publishing."
+        ),
+        context={"checks": compatibility["checks"], "strict_condition_policy": False},
+    )
+    for warning in compatibility_warnings:
+        add_warning(warning)
+    for action in compatibility_required_actions:
+        add_required_action(action)
+    for blocker in compatibility_blockers:
+        if blocker not in blockers:
+            blockers.append(blocker)
 
     ready = len(blockers) == 0
     return PublishReadinessResult(

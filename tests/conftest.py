@@ -28,6 +28,9 @@ def test_engine():
     import packages.data.src.models.sku_record  # noqa: F401
     import packages.data.src.models.sale_record  # noqa: F401
     import packages.data.src.models.sourcing_batch  # noqa: F401
+    import packages.data.src.models.publish_attempt_record  # noqa: F401
+    import packages.data.src.models.publish_repair_plan_record  # noqa: F401
+    import packages.data.src.models.publish_repair_decision_record  # noqa: F401
 
     engine = create_engine(
         "sqlite:///:memory:",

@@ -5,12 +5,25 @@ from __future__ import annotations
 import logging
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
+from pydantic import BaseModel
 from sqlmodel import Session
 from packages.core.src.config import get_settings
 from packages.core.src.constants import ItemStatus
 from packages.data.src.db.sqlite import get_session
 from packages.data.src.repositories.item_repo import ItemRepository
 from apps.api.src.services.ebay_auth_diagnostics import classify_ebay_auth_failure, get_ebay_auth_readiness
+from apps.api.src.services.publish_compatibility import evaluate_publish_compatibility
+from apps.api.src.services.publish_readiness import evaluate_publish_readiness
+from apps.api.src.services.publish_repair import (
+    bulk_apply_approved_fixes,
+    bulk_draft_fixes,
+    draft_fix_for_sku,
+    get_repair_queue,
+    get_repair_queue_detail,
+    record_publish_blocked,
+    record_publish_failure,
+    recheck_repair_readiness,
+)
 from packages.ebay.src.auth import EbayAuth
 from packages.ebay.src import http_client as ebay_http
 from packages.ebay.src.photo_uploader import PhotoUploader
@@ -24,6 +37,26 @@ from packages.testing.src.e2e_guard import (
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+class BulkDraftFixBody(BaseModel):
+    skus: list[str]
+    mode: str = "draft_only"
+    allow_low_risk_auto_apply: bool = False
+    allow_medium_risk_drafts: bool = True
+    allow_high_risk_drafts: bool = True
+
+
+class ApprovedRepairEntry(BaseModel):
+    sku: str
+    repair_plan_id: str
+    approved: bool
+    edited_value: dict | list | str | int | float | bool | None = None
+    operator_label: str | None = None
+
+
+class BulkApplyApprovedFixesBody(BaseModel):
+    approvals: list[ApprovedRepairEntry]
 
 
 def _try_update_category_stats(item, sold: bool = False, sold_price: float | None = None) -> None:
@@ -137,6 +170,115 @@ def ebay_status():
 def ebay_auth_readiness():
     return get_ebay_auth_readiness()
 
+
+@router.get("/repair-queue")
+def repair_queue(
+    status: str = "",
+    risk_level: str = "",
+    repair_layer: str = "",
+    sku: str = "",
+    requires_review: str = "",
+    session: Session = Depends(get_session),
+):
+    return {
+        "entries": get_repair_queue(
+            session,
+            status=status,
+            risk_level=risk_level,
+            repair_layer=repair_layer,
+            sku=sku,
+            requires_review=requires_review,
+        )
+    }
+
+
+@router.get("/repair-queue/{sku}")
+def repair_queue_detail(sku: str, session: Session = Depends(get_session)):
+    try:
+        assert_route_sku_allowed(sku, "ebay.repair_queue_detail")
+    except E2ESafetyError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    return get_repair_queue_detail(session, sku)
+
+
+@router.post("/repair-queue/{sku}/recheck-readiness")
+def repair_queue_recheck_readiness(sku: str, session: Session = Depends(get_session)):
+    try:
+        assert_route_sku_allowed(sku, "ebay.repair_queue_recheck")
+    except E2ESafetyError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    return recheck_repair_readiness(session, sku)
+
+
+@router.post("/repair-queue/{sku}/draft-fix")
+def repair_queue_draft_fix(sku: str, session: Session = Depends(get_session)):
+    try:
+        assert_route_sku_allowed(sku, "ebay.repair_queue_draft_fix")
+    except E2ESafetyError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    return draft_fix_for_sku(session, sku)
+
+
+@router.post("/repair-queue/{sku}/apply-draft-fix")
+def repair_queue_apply_draft_fix(
+    sku: str,
+    body: ApprovedRepairEntry,
+    session: Session = Depends(get_session),
+):
+    try:
+        assert_route_sku_allowed(sku, "ebay.repair_queue_apply_draft_fix")
+    except E2ESafetyError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    result = bulk_apply_approved_fixes(
+        session,
+        [
+            {
+                "sku": sku,
+                "repair_plan_id": body.repair_plan_id,
+                "approved": body.approved,
+                "edited_value": body.edited_value,
+                "operator_label": body.operator_label,
+            }
+        ],
+    )
+    if result["rejected"]:
+        raise HTTPException(status_code=400, detail=result["rejected"][0]["detail"])
+    return result["applied"][0]
+
+
+@router.post("/repair-queue/bulk-draft-fixes")
+def repair_queue_bulk_draft_fixes(
+    body: BulkDraftFixBody,
+    session: Session = Depends(get_session),
+):
+    selected = parse_sku_list(",".join(body.skus))
+    if is_route_guard_enabled():
+        try:
+            assert_route_skus_allowed(selected, "ebay.repair_queue_bulk_draft_fixes", require_non_empty=True)
+        except E2ESafetyError as exc:
+            raise HTTPException(status_code=403, detail=str(exc))
+    return bulk_draft_fixes(
+        session,
+        skus=body.skus,
+        allow_low_risk_auto_apply=body.allow_low_risk_auto_apply,
+        allow_medium_risk_drafts=body.allow_medium_risk_drafts,
+        allow_high_risk_drafts=body.allow_high_risk_drafts,
+    )
+
+
+@router.post("/repair-queue/bulk-apply-approved-fixes")
+def repair_queue_bulk_apply_approved_fixes(
+    body: BulkApplyApprovedFixesBody,
+    session: Session = Depends(get_session),
+):
+    selected = parse_sku_list(",".join([entry.sku for entry in body.approvals]))
+    if is_route_guard_enabled():
+        try:
+            assert_route_skus_allowed(selected, "ebay.repair_queue_bulk_apply_approved_fixes", require_non_empty=True)
+        except E2ESafetyError as exc:
+            raise HTTPException(status_code=403, detail=str(exc))
+    return bulk_apply_approved_fixes(session, [entry.model_dump() for entry in body.approvals])
+
 @router.post("/publish/batch")
 def publish_batch(
     skus: str = "",
@@ -203,9 +345,38 @@ def publish_item(sku: str, session: Session = Depends(get_session)):
         raise HTTPException(status_code=404, detail=f"Item {sku} not found")
     if item.status not in (ItemStatus.APPROVED, ItemStatus.EXPORT_READY):
         raise HTTPException(status_code=400, detail=f"Item must be approved. Current status: {item.status}")
+
+    readiness = evaluate_publish_readiness(item).as_dict()
+    compatibility = evaluate_publish_compatibility(item, strict_condition_policy=True)
+    preflight_blockers = list(dict.fromkeys(readiness["blockers"] + compatibility["blockers"]))
+    if preflight_blockers:
+        repair_record = record_publish_blocked(
+            session,
+            item,
+            blockers=preflight_blockers,
+            readiness=readiness,
+            compatibility=compatibility,
+        )
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "publish_readiness_blocked",
+                "sku": sku,
+                "blockers": preflight_blockers,
+                "repair_queue_entry_created": True,
+                "repair_plan": repair_record["repair_plan"],
+            },
+        )
+
     client = EbayInventoryClient()
     result = client.publish_item(item)
     if not result.ok:
+        repair_record = record_publish_failure(
+            session,
+            item,
+            result=result,
+            request_summary={"sku": sku, "mode": "single_publish"},
+        )
         recovered_offer_saved = _persist_partial_publish_state(item, result, repo)
         auth_issue = result.details.get("auth_issue_code")
         body = str(result.details.get("body") or "")
@@ -227,15 +398,35 @@ def publish_item(sku: str, session: Session = Depends(get_session)):
                 auth_readiness=get_ebay_auth_readiness(),
                 token_issue_code=str(auth_issue or ""),
             )
-            raise HTTPException(status_code=503 if result.error_code == "AUTH_NOT_READY" else 502, detail=detail)
-        detail = result.error or "unknown error"
-        if body:
-            detail += f" | eBay response: {body}"
+            raise HTTPException(
+                status_code=503 if result.error_code == "AUTH_NOT_READY" else 502,
+                detail={
+                    "code": "ebay_publish_failed",
+                    "sku": sku,
+                    "stage": str(result.details.get("stage") or ""),
+                    "raw_ebay_errors": [body] if body else [str(result.error or "")],
+                    "classified_error": detail,
+                    "repair_plan": repair_record["repair_plan"],
+                    "retry_allowed": False,
+                    "requires_review": True,
+                },
+            )
+        raw_errors = [body] if body else [str(result.error or "unknown error")]
+        error_detail = {
+            "code": "ebay_publish_failed",
+            "sku": sku,
+            "stage": str(result.details.get("stage") or ""),
+            "raw_ebay_errors": raw_errors,
+            "classified_error": repair_record["classified_error"],
+            "repair_plan": repair_record["repair_plan"],
+            "retry_allowed": False,
+            "requires_review": bool(repair_record["classified_error"]["requires_review"]),
+        }
         if recovered_offer_saved:
-            detail += f" | recovered offer_id: {item.offer_id}"
+            error_detail["recovered_offer_id"] = item.offer_id
         if result.details.get("next_action"):
-            detail += f" | next_action: {result.details['next_action']}"
-        raise HTTPException(status_code=500, detail=detail)
+            error_detail["next_action"] = result.details["next_action"]
+        raise HTTPException(status_code=500, detail=error_detail)
     data = result.value
     item.listing_id = data["listing_id"]
     item.listing_url = data["listing_url"]
