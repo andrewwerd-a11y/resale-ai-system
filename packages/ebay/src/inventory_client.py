@@ -359,7 +359,12 @@ class EbayInventoryClient:
                 aspects[k] = [str(v)]
         return aspects
 
-    def _build_offer_payload(self, item: Item, policies: dict) -> dict:
+    def _build_offer_payload(
+        self,
+        item: Item,
+        policies: dict,
+        merchant_location_key: str | None = None,
+    ) -> dict:
         price = round(float(item.list_price or item.estimated_price or 9.99), 2)
         category_id = str(
             item.ebay_category_id
@@ -369,6 +374,7 @@ class EbayInventoryClient:
         # Derive country code from marketplace ID (e.g. "EBAY_US" → "US")
         marketplace_id = self.auth.marketplace_id
         country_code = marketplace_id.split("_", 1)[-1] if "_" in marketplace_id else "US"
+        location_key = merchant_location_key or self.get_merchant_location_key()
         return {
             "sku": item.sku,
             "marketplaceId": marketplace_id,
@@ -376,7 +382,7 @@ class EbayInventoryClient:
             "availableQuantity": 1,
             "categoryId": category_id,
             "listingDescription": item.description_final or item.title_final or "",
-            "merchantLocationKey": self.get_merchant_location_key(),
+            "merchantLocationKey": location_key,
             "listingPolicies": {
                 "fulfillmentPolicyId": policies.get("fulfillment_id", ""),
                 "paymentPolicyId":     policies.get("payment_id", ""),

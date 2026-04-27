@@ -820,11 +820,11 @@ class E2ERunner:
                     if not item:
                         return {"status": "SKIP", "notes": "BK-000005 missing for dry payload check."}
                     client = EbayInventoryClient()
-                    client.get_merchant_location_key = lambda: "default"
                     inventory_payload = client._build_inventory_payload(item, [])
                     offer_payload = client._build_offer_payload(
                         item,
                         {"fulfillment_id": "", "payment_id": "", "return_id": ""},
+                        merchant_location_key="default",
                     )
                     return {
                         "notes": f"eBay mutation skipped: {reason}",
