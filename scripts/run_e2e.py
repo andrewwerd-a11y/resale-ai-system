@@ -321,12 +321,25 @@ class E2ERunner:
             ("settings_current", "GET /api/settings/current", "/api/settings/current"),
             ("ebay_status", "GET /api/ebay/status", "/api/ebay/status"),
             ("ebay_oauth_status", "GET /api/ebay/oauth/status", "/api/ebay/oauth/status"),
-            (
-                "listings_connectivity",
-                "GET /api/listings/ebay-connectivity",
-                "/api/listings/ebay-connectivity",
-            ),
         ]
+        if self.args.mode != "mock":
+            checks.append(
+                (
+                    "listings_connectivity",
+                    "GET /api/listings/ebay-connectivity",
+                    "/api/listings/ebay-connectivity",
+                )
+            )
+        else:
+            self._step(
+                name="listings_connectivity_skip",
+                workflow="Health and startup",
+                endpoint_or_function="GET /api/listings/ebay-connectivity",
+                fn=lambda: {
+                    "status": "SKIP",
+                    "notes": "Mock mode skips live eBay connectivity probe.",
+                },
+            )
         for name, endpoint_name, path in checks:
             self._step(
                 name=name,
@@ -706,22 +719,42 @@ class E2ERunner:
             return
 
         self._step("ebay_status", "eBay publish/revision", "GET /api/ebay/status", fn=lambda: self._api("GET", "/api/ebay/status"))
-        self._step(
-            "listings_sync",
-            "eBay publish/revision",
-            "GET /api/listings/sync",
-            fn=lambda: self._api(
-                "GET",
-                "/api/listings/sync",
-                params={"skus": ",".join(self.selected_skus), "e2e_only": "true"},
-            ),
-        )
-        self._step(
-            "ebay_connectivity",
-            "eBay publish/revision",
-            "GET /api/listings/ebay-connectivity",
-            fn=lambda: self._api("GET", "/api/listings/ebay-connectivity"),
-        )
+        if self.args.mode == "mock":
+            self._step(
+                "listings_sync_skip",
+                "eBay publish/revision",
+                "GET /api/listings/sync",
+                fn=lambda: {
+                    "status": "SKIP",
+                    "notes": "Mock mode skips external listing sync call.",
+                },
+            )
+            self._step(
+                "ebay_connectivity_skip",
+                "eBay publish/revision",
+                "GET /api/listings/ebay-connectivity",
+                fn=lambda: {
+                    "status": "SKIP",
+                    "notes": "Mock mode skips eBay connectivity probe.",
+                },
+            )
+        else:
+            self._step(
+                "listings_sync",
+                "eBay publish/revision",
+                "GET /api/listings/sync",
+                fn=lambda: self._api(
+                    "GET",
+                    "/api/listings/sync",
+                    params={"skus": ",".join(self.selected_skus), "e2e_only": "true"},
+                ),
+            )
+            self._step(
+                "ebay_connectivity",
+                "eBay publish/revision",
+                "GET /api/listings/ebay-connectivity",
+                fn=lambda: self._api("GET", "/api/listings/ebay-connectivity"),
+            )
 
         can_mutate, reason = self._safe_mode_for_ebay_mutation()
         if not can_mutate:
@@ -732,6 +765,7 @@ class E2ERunner:
                     if not item:
                         return {"status": "SKIP", "notes": "BK-000005 missing for dry payload check."}
                     client = EbayInventoryClient()
+                    client.get_merchant_location_key = lambda: "default"
                     inventory_payload = client._build_inventory_payload(item, [])
                     offer_payload = client._build_offer_payload(
                         item,

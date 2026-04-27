@@ -46,6 +46,10 @@ class EbayAuth:
         Return a valid Bearer token. Reads OAuth tokens from file first,
         refreshes automatically if expired, falls back to .env token.
         """
+        # In dry-run mode we never attempt network token refresh; always use env token.
+        if self.settings.dry_run:
+            return self.settings.ebay_user_token
+
         tokens = _load_tokens()
         if tokens:
             expires_at = tokens.get("expires_at")
