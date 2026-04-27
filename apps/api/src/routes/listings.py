@@ -15,6 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
+from apps.api.src.services.ebay_auth_diagnostics import get_ebay_auth_readiness
 from apps.api.src.services.publish_readiness import evaluate_publish_readiness, not_found_publish_readiness
 from packages.core.src.config import get_settings
 from packages.data.src.db.sqlite import get_session
@@ -178,6 +179,68 @@ def get_publish_preview(sku: str, session: Session = Depends(get_session)):
         "environment": {
             "ebay_environment": get_settings().ebay_environment,
             "allow_live_e2e": is_live_e2e_enabled(),
+        },
+    }
+
+
+@router.get("/{sku}/revise-readiness")
+def get_revise_readiness(sku: str, session: Session = Depends(get_session)):
+    try:
+        assert_route_sku_allowed(sku, "listings.revise_readiness")
+    except E2ESafetyError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+
+    item = ItemRepository(session).get_by_sku(sku)
+    if not item:
+        raise HTTPException(status_code=404, detail=not_found_publish_readiness(sku).as_dict())
+    return _build_revise_readiness(item)
+
+
+@router.get("/{sku}/revise-preview")
+def get_revise_preview(sku: str, session: Session = Depends(get_session)):
+    from packages.ebay.src.inventory_client import EbayInventoryClient
+
+    try:
+        assert_route_sku_allowed(sku, "listings.revise_preview")
+    except E2ESafetyError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+
+    item = ItemRepository(session).get_by_sku(sku)
+    if not item:
+        raise HTTPException(status_code=404, detail=not_found_publish_readiness(sku).as_dict())
+
+    readiness = _build_revise_readiness(item)
+    client = EbayInventoryClient()
+    hosted_photo_urls = _hosted_photo_urls(item.image_paths)
+    inventory_payload = client._build_inventory_payload(item, hosted_photo_urls)
+
+    seller_policy_check = next(
+        (check for check in readiness["publish_readiness"]["checks"] if check["name"] == "seller_policy_readiness"),
+        None,
+    )
+    offer_payload = client._build_offer_payload(
+        item,
+        _preview_policy_ids(seller_policy_check),
+        merchant_location_key="preview-location",
+    )
+
+    return {
+        "sku": (item.sku or "").upper(),
+        "revise_readiness": readiness,
+        "inventory_item_payload_preview": inventory_payload,
+        "offer_payload_preview": offer_payload,
+        "listing_identifiers": {
+            "listing_id": item.listing_id or "",
+            "offer_id": item.offer_id or "",
+            "listing_url": item.listing_url or "",
+        },
+        "mutation_allowed": False,
+        "would_revise": readiness["ready"],
+        "mutation_blockers": readiness["blockers"] + ["Revise preview is read-only in this phase; no eBay mutation is performed."],
+        "warnings": readiness["warnings"],
+        "photo_input_summary": {
+            "hosted_photo_urls": hosted_photo_urls,
+            "total_image_paths": len(item.image_paths or []),
         },
     }
 
@@ -642,6 +705,97 @@ def _parse_ebay_error(resp) -> str:
         return f"HTTP {resp.status_code}: {resp.text[:300]}"
     except Exception:
         return f"HTTP {resp.status_code}: {resp.text[:200]}"
+
+
+def _build_revise_readiness(item) -> dict:
+    publish_readiness = evaluate_publish_readiness(item).as_dict()
+    auth_readiness = get_ebay_auth_readiness()
+    publish_checks = list(publish_readiness.get("checks") or [])
+    revise_ignored_check_names = {"publishable_status"}
+    revise_ignored_actions = {
+        "Move the item to approved or export_ready status before publishing.",
+    }
+    retained_publish_checks = [
+        check for check in publish_checks if check.get("name") not in revise_ignored_check_names
+    ]
+    blockers = [
+        check.get("detail", "")
+        for check in retained_publish_checks
+        if check.get("blocking") and not check.get("ok") and check.get("detail")
+    ]
+    warnings = list(dict.fromkeys(publish_readiness["warnings"]))
+    required_actions = [
+        action
+        for action in publish_readiness["required_actions"]
+        if action not in revise_ignored_actions
+    ]
+    checks = []
+
+    def add_check(name: str, ok: bool, detail: str, *, blocking: bool = False, action: str | None = None, warning: str | None = None, context: dict | None = None) -> None:
+        payload = {"name": name, "ok": ok, "blocking": blocking, "detail": detail}
+        if context is not None:
+            payload["context"] = context
+        checks.append(payload)
+        if blocking and not ok and detail not in blockers:
+            blockers.append(detail)
+        if warning and warning not in warnings:
+            warnings.append(warning)
+        if action and action not in required_actions:
+            required_actions.append(action)
+
+    listed_status_ok = (item.status or "") == "listed"
+    add_check(
+        "listed_status",
+        listed_status_ok,
+        "Item is in listed status." if listed_status_ok else f"Item status '{item.status}' is not listed.",
+        blocking=True,
+        action="Publish the item first so it has an active listing before revising.",
+    )
+    add_check(
+        "listing_id_present",
+        bool(str(item.listing_id or "").strip()),
+        "Listing ID is present." if str(item.listing_id or "").strip() else "Listing ID is missing.",
+        blocking=True,
+        action="Sync or republish the item so a listing ID is stored locally.",
+    )
+    add_check(
+        "offer_id_present",
+        bool(str(item.offer_id or "").strip()),
+        "Offer ID is present." if str(item.offer_id or "").strip() else "Offer ID is missing.",
+        blocking=True,
+        action="Sync the listing or republish the item so an offer ID is stored locally.",
+    )
+    auth_ok = bool(auth_readiness.get("checks", {}).get("access_token_present")) and not auth_readiness.get("blockers")
+    add_check(
+        "auth_readiness",
+        auth_ok,
+        auth_readiness.get("message", "eBay auth readiness evaluated."),
+        blocking=not auth_ok,
+        action=auth_readiness.get("next_action"),
+        warning=(auth_readiness.get("warnings") or [None])[0],
+        context={
+            "code": auth_readiness.get("code"),
+            "environment": auth_readiness.get("checks", {}).get("environment"),
+            "token_source": auth_readiness.get("checks", {}).get("token_source"),
+            "mutation_allowed": auth_readiness.get("checks", {}).get("mutation_allowed"),
+        },
+    )
+    if auth_readiness.get("next_actions"):
+        for action in auth_readiness["next_actions"]:
+            if action not in required_actions:
+                required_actions.append(action)
+
+    return {
+        "sku": (item.sku or "").upper(),
+        "ready": len(blockers) == 0,
+        "checks": checks,
+        "blockers": blockers,
+        "warnings": warnings,
+        "required_actions": required_actions,
+        "publish_readiness": publish_readiness,
+        "auth_readiness": auth_readiness,
+        "mutation_allowed": False,
+    }
 
 
 def _hosted_photo_urls(value) -> list[str]:
