@@ -101,11 +101,13 @@ class EbayInventoryClient:
         try:
             publish_result = self._publish_via_api(item, photo_urls)
             recovered_existing_offer = False
+            used_existing_offer = False
             if isinstance(publish_result, dict):
                 listing_id = str(publish_result.get("listing_id") or "")
                 listing_url = str(publish_result.get("listing_url") or "")
                 offer_id = str(publish_result.get("offer_id") or "")
                 recovered_existing_offer = bool(publish_result.get("recovered_existing_offer"))
+                used_existing_offer = bool(publish_result.get("used_existing_offer"))
             elif isinstance(publish_result, tuple) and len(publish_result) == 3:
                 listing_id, listing_url, offer_id = publish_result
             elif isinstance(publish_result, tuple) and len(publish_result) == 2:
@@ -131,6 +133,7 @@ class EbayInventoryClient:
                 "photo_urls": photo_urls,
                 "offer_id": offer_id,
                 "recovered_existing_offer": recovered_existing_offer,
+                "used_existing_offer": used_existing_offer,
             })
         except _EbayApiError as exc:
             logger.error("eBay API %s for %s: %s", exc.status_code, item.sku, exc.body)
@@ -140,6 +143,8 @@ class EbayInventoryClient:
                 body=exc.body,
                 offer_id=str((exc.context or {}).get("offer_id") or ""),
                 recovered_existing_offer=bool((exc.context or {}).get("recovered_existing_offer")),
+                used_existing_offer=bool((exc.context or {}).get("used_existing_offer")),
+                already_published=bool((exc.context or {}).get("already_published")),
                 next_action=(exc.context or {}).get("next_action"),
             )
         except Exception as exc:
@@ -244,6 +249,7 @@ class EbayInventoryClient:
         headers = self._headers()
         sku = item.sku
         recovered_existing_offer = False
+        used_existing_offer = False
 
         # Step 1: Create/replace inventory item
         inventory_payload = self._build_inventory_payload(item, photo_urls)
@@ -256,34 +262,38 @@ class EbayInventoryClient:
             step="create_inventory_item",
         )
 
-        # Step 2: Create offer
-        policies = self.get_seller_policies()
-        offer_payload = self._build_offer_payload(item, policies)
-        logger.info("POST offer for %s payload: %s", sku, json.dumps(offer_payload))
         offer_id = ""
-        try:
-            offer_resp = self._post(
-                f"{base}/sell/inventory/v1/offer",
-                headers,
-                offer_payload,
-                sku=sku,
-                step="create_offer",
-            )
-            offer_id = offer_resp.get("offerId", "")
-            if not offer_id:
-                raise _EbayApiError(0, "No offerId in response", str(offer_resp))
-        except _EbayApiError as exc:
-            if self._is_existing_offer_error(exc.body):
-                offer_id = self._extract_offer_id(exc.body)
+        if self._should_publish_existing_offer(item):
+            offer_id = str(item.offer_id or "").strip()
+            used_existing_offer = True
+        else:
+            # Step 2: Create offer
+            policies = self.get_seller_policies()
+            offer_payload = self._build_offer_payload(item, policies)
+            logger.info("POST offer for %s payload: %s", sku, json.dumps(offer_payload))
+            try:
+                offer_resp = self._post(
+                    f"{base}/sell/inventory/v1/offer",
+                    headers,
+                    offer_payload,
+                    sku=sku,
+                    step="create_offer",
+                )
+                offer_id = offer_resp.get("offerId", "")
                 if not offer_id:
-                    raise _EbayApiError(
-                        exc.status_code,
-                        "create_offer failed: existing offer reported but no offerId was returned",
-                        exc.body,
-                    )
-                recovered_existing_offer = True
-            else:
-                raise
+                    raise _EbayApiError(0, "No offerId in response", str(offer_resp))
+            except _EbayApiError as exc:
+                if self._is_existing_offer_error(exc.body):
+                    offer_id = self._extract_offer_id(exc.body)
+                    if not offer_id:
+                        raise _EbayApiError(
+                            exc.status_code,
+                            "create_offer failed: existing offer reported but no offerId was returned",
+                            exc.body,
+                        )
+                    recovered_existing_offer = True
+                else:
+                    raise
 
         # Step 3: Publish offer
         logger.info("POST offer/%s/publish for %s", offer_id, sku)
@@ -298,6 +308,13 @@ class EbayInventoryClient:
         except _EbayApiError as exc:
             exc.context.setdefault("offer_id", offer_id)
             exc.context.setdefault("recovered_existing_offer", recovered_existing_offer)
+            exc.context.setdefault("used_existing_offer", used_existing_offer)
+            if self._is_already_published_error(exc.body):
+                exc.context.setdefault("already_published", True)
+                exc.context.setdefault(
+                    "next_action",
+                    "Run constrained listings sync for this SKU to recover listing identifiers from eBay.",
+                )
             raise
 
         listing_id = publish_resp.get("listingId", offer_id)
@@ -307,6 +324,7 @@ class EbayInventoryClient:
             "listing_url": f"https://www.{env_domain}/itm/{listing_id}",
             "offer_id": offer_id,
             "recovered_existing_offer": recovered_existing_offer,
+            "used_existing_offer": used_existing_offer,
         }
 
     # ── Payload builders ──────────────────────────────────────────────────────
@@ -528,6 +546,17 @@ class EbayInventoryClient:
     @staticmethod
     def _is_existing_offer_error(body: str) -> bool:
         return "offer entity already exists" in str(body or "").lower()
+
+    @staticmethod
+    def _is_already_published_error(body: str) -> bool:
+        return "already published" in str(body or "").lower()
+
+    @staticmethod
+    def _should_publish_existing_offer(item: Item) -> bool:
+        offer_id = str(item.offer_id or "").strip()
+        listing_id = str(item.listing_id or "").strip()
+        status = str(item.status or "").strip().lower()
+        return bool(offer_id) and not listing_id and status != "listed"
 
     @staticmethod
     def _extract_offer_id(body: str) -> str:

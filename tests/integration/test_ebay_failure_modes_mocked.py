@@ -257,6 +257,82 @@ def test_publish_existing_offer_recovery_success_stores_listing_and_offer(monkey
     assert item.status == ItemStatus.LISTED
 
 
+def test_publish_with_existing_offer_id_skips_create_offer_and_publishes_directly(monkeypatch, tmp_path):
+    monkeypatch.setenv("E2E_ROUTE_GUARD_ENABLED", "true")
+    monkeypatch.setenv("APPROVED_E2E_SKUS", "BK-000005,BK-000008,BK-000009")
+    _configure_temp_db(monkeypatch, tmp_path)
+    _seed_item("BK-000008", ItemStatus.EXPORT_READY)
+
+    with Session(sqlite_db.engine) as session:
+        repo = ItemRepository(session)
+        item = repo.get_by_sku("BK-000008")
+        item.offer_id = "156719395011"
+        repo.upsert(item)
+
+    monkeypatch.setattr(
+        "packages.ebay.src.inventory_client.EbayInventoryClient._put",
+        lambda _self, *_args, **_kwargs: {},
+    )
+
+    calls = {"create_offer": 0, "publish_offer": 0}
+
+    def fake_post(_self, url, *_args, **kwargs):
+        step = kwargs.get("step", "")
+        if step == "create_offer":
+            calls["create_offer"] += 1
+            raise AssertionError("create_offer should be skipped when an existing offer_id is present")
+        if step == "publish_offer":
+            calls["publish_offer"] += 1
+            assert url.endswith("/offer/156719395011/publish")
+            return {"listingId": "456789123456"}
+        return {}
+
+    monkeypatch.setattr("packages.ebay.src.inventory_client.EbayInventoryClient._post", fake_post)
+
+    with _client() as client:
+        resp = client.post("/api/ebay/publish/BK-000008")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["used_existing_offer"] is True
+    assert body["offer_id"] == "156719395011"
+    assert body["listing_id"] == "456789123456"
+    assert calls["create_offer"] == 0
+    assert calls["publish_offer"] == 1
+
+
+def test_publish_existing_offer_already_published_returns_recoverable_next_action(monkeypatch, tmp_path):
+    monkeypatch.setenv("E2E_ROUTE_GUARD_ENABLED", "true")
+    monkeypatch.setenv("APPROVED_E2E_SKUS", "BK-000005,BK-000008,BK-000009")
+    _configure_temp_db(monkeypatch, tmp_path)
+    _seed_item("BK-000008", ItemStatus.EXPORT_READY)
+
+    with Session(sqlite_db.engine) as session:
+        repo = ItemRepository(session)
+        item = repo.get_by_sku("BK-000008")
+        item.offer_id = "156719395011"
+        repo.upsert(item)
+
+    monkeypatch.setattr(
+        "packages.ebay.src.inventory_client.EbayInventoryClient._put",
+        lambda _self, *_args, **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        "packages.ebay.src.inventory_client.EbayInventoryClient._post",
+        lambda _self, _url, *_args, **kwargs: (_ for _ in ()).throw(
+            _EbayApiError(409, "publish_offer failed", "Offer is already published")
+        ) if kwargs.get("step") == "publish_offer" else {},
+    )
+
+    with _client() as client:
+        resp = client.post("/api/ebay/publish/BK-000008")
+
+    assert resp.status_code == 500
+    detail = resp.json().get("detail", "")
+    assert "Offer is already published" in detail
+    assert "next_action: Run constrained listings sync for this SKU to recover listing identifiers from eBay." in detail
+
+
 def test_publish_returns_invalid_category_condition_error_detail(monkeypatch, tmp_path):
     monkeypatch.setenv("E2E_ROUTE_GUARD_ENABLED", "true")
     monkeypatch.setenv("APPROVED_E2E_SKUS", "BK-000005,BK-000008,BK-000009")

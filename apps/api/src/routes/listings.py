@@ -158,6 +158,9 @@ def get_publish_preview(sku: str, session: Session = Depends(get_session)):
             "offer": offer_payload,
         }
 
+    existing_offer_id_detected = bool(str(item.offer_id or "").strip()) and not bool(str(item.listing_id or "").strip()) and (item.status or "") != "listed"
+    planned_action = "publish_existing_offer" if existing_offer_id_detected else "create_offer_then_publish"
+
     mutation_allowed = False
     mutation_reasons = ["Publish preview is read-only in this phase; no sandbox or live mutation is performed."]
     if not is_live_e2e_enabled():
@@ -167,6 +170,9 @@ def get_publish_preview(sku: str, session: Session = Depends(get_session)):
         "sku": (item.sku or "").upper(),
         "readiness": readiness,
         "would_publish": readiness["ready"],
+        "existing_offer_id_detected": existing_offer_id_detected,
+        "planned_action": planned_action,
+        "listing_id_missing": not bool(str(item.listing_id or "").strip()),
         "mutation_allowed": mutation_allowed,
         "mutation_blockers": mutation_reasons,
         "inventory_item_payload_preview": inventory_payload,

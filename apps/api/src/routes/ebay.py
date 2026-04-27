@@ -222,6 +222,8 @@ def publish_item(sku: str, session: Session = Depends(get_session)):
             detail += f" | eBay response: {body}"
         if recovered_offer_saved:
             detail += f" | recovered offer_id: {item.offer_id}"
+        if result.details.get("next_action"):
+            detail += f" | next_action: {result.details['next_action']}"
         raise HTTPException(status_code=500, detail=detail)
     data = result.value
     item.listing_id = data["listing_id"]
@@ -240,6 +242,7 @@ def publish_item(sku: str, session: Session = Depends(get_session)):
         "listing_url": data["listing_url"],
         "offer_id": data.get("offer_id"),
         "recovered_existing_offer": bool(data.get("recovered_existing_offer")),
+        "used_existing_offer": bool(data.get("used_existing_offer")),
         "status": "listed",
         "photos_uploaded": len(data["photo_urls"]),
     }

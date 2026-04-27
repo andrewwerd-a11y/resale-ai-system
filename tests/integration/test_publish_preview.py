@@ -156,3 +156,27 @@ def test_publish_preview_normalizes_overlong_color_before_any_ebay_call(monkeypa
     body = resp.json()
     assert body["would_publish"] is True
     assert body["inventory_item_payload_preview"]["product"]["aspects"]["Color"] == ["Blue/White"]
+
+
+def test_publish_preview_shows_publish_existing_offer_plan(monkeypatch, tmp_path):
+    monkeypatch.delenv("E2E_ROUTE_GUARD_ENABLED", raising=False)
+    monkeypatch.delenv("APPROVED_E2E_SKUS", raising=False)
+    monkeypatch.setenv("EBAY_FULFILLMENT_POLICY_ID", "fulfillment-1")
+    monkeypatch.setenv("EBAY_PAYMENT_POLICY_ID", "payment-1")
+    monkeypatch.setenv("EBAY_RETURN_POLICY_ID", "return-1")
+    _configure_temp_db(monkeypatch, tmp_path)
+    _block_mutations(monkeypatch)
+    _seed_item(
+        status=ItemStatus.EXPORT_READY,
+        offer_id="156719395011",
+        listing_id="",
+    )
+
+    with _client() as client:
+        resp = client.get("/api/listings/BK-000005/publish-preview")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["existing_offer_id_detected"] is True
+    assert body["planned_action"] == "publish_existing_offer"
+    assert body["listing_id_missing"] is True
