@@ -12,6 +12,8 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from apps.api.src.services.claude_diagnostics import get_claude_readiness
+
 router = APIRouter()
 
 _ROOT = Path(__file__).resolve().parents[4]
@@ -110,3 +112,9 @@ def get_current_settings():
         "smtp_host": getattr(settings, "smtp_host", ""),
         "smtp_port": getattr(settings, "smtp_port", 587),
     }
+
+
+@router.get("/claude-readiness")
+def get_claude_provider_readiness():
+    """Return non-sensitive Claude configuration readiness."""
+    return get_claude_readiness()

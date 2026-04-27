@@ -3127,7 +3127,12 @@ async function claudeSuggest(type) {{
       method:'POST', headers:{{'Content-Type':'application/json'}},
       body: JSON.stringify({{type}})
     }});
-    if (!r.ok) {{ const e = await r.json(); throw new Error(e.detail || 'API error'); }}
+    if (!r.ok) {{
+      const e = await r.json();
+      const detail = e.detail;
+      const message = typeof detail === 'string' ? detail : (detail && detail.message) || 'API error';
+      throw new Error(message);
+    }}
     const d = await r.json();
     textEl.textContent = d.suggestion;
     panel.dataset.suggestion = d.suggestion;

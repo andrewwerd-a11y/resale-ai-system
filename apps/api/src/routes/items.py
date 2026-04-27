@@ -9,6 +9,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 from sqlmodel import Session
 
+from apps.api.src.services.claude_diagnostics import classify_claude_error, get_claude_readiness
 from packages.data.src.db.sqlite import get_session
 from packages.data.src.repositories.item_repo import ItemRepository
 from packages.testing.src.e2e_guard import (
@@ -37,6 +38,40 @@ def _category_intel_error_response(result) -> tuple[int, dict]:
     elif code == "MALFORMED_RESPONSE":
         status = 502
     return status, {"code": code, "message": message}
+
+
+def _claude_status_code_for_detail(detail: dict) -> int:
+    code = str(detail.get("code") or "")
+    if code in {"missing_api_key", "package_not_installed", "model_unavailable"}:
+        return 503
+    if code == "timeout":
+        return 504
+    if code == "rate_limited":
+        return 429
+    return 502
+
+
+def _claude_error_detail_from_message(message: str, *, model: str = "") -> dict:
+    lowered = (message or "").lower()
+    if "anthropic_api_key" in lowered:
+        return get_claude_readiness()
+    if "rate limit" in lowered or "too many requests" in lowered:
+        return classify_claude_error(RuntimeError(message), model=model)
+    if "auth" in lowered or "unauthorized" in lowered or "forbidden" in lowered:
+        return classify_claude_error(RuntimeError(message), model=model)
+    if "timeout" in lowered:
+        return classify_claude_error(RuntimeError(message), model=model)
+    if "connection" in lowered:
+        return classify_claude_error(RuntimeError(message), model=model)
+    if "model" in lowered and ("not found" in lowered or "unavailable" in lowered):
+        return classify_claude_error(RuntimeError(message), model=model)
+    return {
+        "code": "unknown_claude_error",
+        "category": "claude",
+        "message": "Claude enrichment failed.",
+        "next_action": "Check Claude configuration and retry when ready.",
+        "model": model,
+    }
 
 
 @router.get("/stats")
@@ -338,13 +373,14 @@ def enrich_item(sku: str, session: Session = Depends(get_session)):
         raise HTTPException(status_code=404, detail=f"Item {sku} not found")
     enricher = ItemEnricher()
     if not enricher.is_available():
-        raise HTTPException(
-            status_code=503,
-            detail="Enrichment not available — check ANTHROPIC_API_KEY and ENRICHMENT_ENABLED",
-        )
+        raise HTTPException(status_code=503, detail=get_claude_readiness())
     result = enricher.enrich(item)
     if not result.ok:
-        raise HTTPException(status_code=500, detail=result.error)
+        detail = _claude_error_detail_from_message(
+            result.error,
+            model=getattr(enricher.settings, "enrichment_model", ""),
+        )
+        raise HTTPException(status_code=_claude_status_code_for_detail(detail), detail=detail)
     enricher.apply_to_item(item, result.value)
     repo.upsert(item)
     return {
@@ -724,12 +760,12 @@ def claude_suggest(sku: str, body: ClaudeSuggestBody, session: Session = Depends
     from packages.core.src.config import get_settings
     cfg = get_settings()
     if not cfg.anthropic_api_key:
-        raise HTTPException(status_code=503, detail="ANTHROPIC_API_KEY not configured")
+        raise HTTPException(status_code=503, detail=get_claude_readiness())
 
     try:
         import anthropic
     except ImportError:
-        raise HTTPException(status_code=503, detail="anthropic package not installed")
+        raise HTTPException(status_code=503, detail=get_claude_readiness())
 
     client = anthropic.Anthropic(api_key=cfg.anthropic_api_key)
     model = cfg.enrichment_model or "claude-sonnet-4-20250514"
@@ -804,7 +840,8 @@ Return ONLY the description text, nothing else."""
 
         return {"suggestion": suggestion, "type": body.type}
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Claude API error: {exc}")
+        detail = classify_claude_error(exc, model=model)
+        raise HTTPException(status_code=_claude_status_code_for_detail(detail), detail=detail)
 
 
 # ── Phase 5B — Price Suggest ───────────────────────────────────────────────────
