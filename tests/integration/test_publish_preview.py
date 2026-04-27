@@ -135,3 +135,24 @@ def test_publish_preview_works_while_allow_live_e2e_is_false(monkeypatch, tmp_pa
     assert body["mutation_allowed"] is False
     assert any("ALLOW_LIVE_E2E is false" in reason for reason in body["mutation_blockers"])
     assert body["revision_payload_preview"]["offer_id"] == "offer-1"
+
+
+def test_publish_preview_normalizes_overlong_color_before_any_ebay_call(monkeypatch, tmp_path):
+    monkeypatch.delenv("E2E_ROUTE_GUARD_ENABLED", raising=False)
+    monkeypatch.delenv("APPROVED_E2E_SKUS", raising=False)
+    monkeypatch.setenv("EBAY_FULFILLMENT_POLICY_ID", "fulfillment-1")
+    monkeypatch.setenv("EBAY_PAYMENT_POLICY_ID", "payment-1")
+    monkeypatch.setenv("EBAY_RETURN_POLICY_ID", "return-1")
+    _configure_temp_db(monkeypatch, tmp_path)
+    _block_mutations(monkeypatch)
+    _seed_item(
+        color="blue and white dress on a woman, various colors in the illustration background",
+    )
+
+    with _client() as client:
+        resp = client.get("/api/listings/BK-000005/publish-preview")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["would_publish"] is True
+    assert body["inventory_item_payload_preview"]["product"]["aspects"]["Color"] == ["Blue/White"]

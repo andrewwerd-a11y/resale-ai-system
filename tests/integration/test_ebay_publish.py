@@ -210,3 +210,30 @@ def test_batch_publish_partial_failure_counts_correctly(test_session):
 
     assert sum(1 for r in results if r.ok) == 1
     assert sum(1 for r in results if not r.ok) == 1
+
+
+def test_publish_item_blocks_invalid_overlong_aspect_before_upload():
+    client = EbayInventoryClient.__new__(EbayInventoryClient)
+
+    mock_auth = MagicMock()
+    mock_auth.is_configured.return_value = True
+    mock_auth.resolve_user_token.return_value = {"token": "fake-token", "issue_code": None}
+    mock_auth.settings = MagicMock()
+    mock_auth.settings.ebay_app_id = "app-id"
+    mock_auth.settings.ebay_cert_id = "cert-id"
+    mock_auth.settings.ebay_environment = "sandbox"
+    client.auth = mock_auth
+
+    client.uploader = MagicMock()
+    client.uploader.upload_all.side_effect = AssertionError("upload should not run when aspect validation fails")
+    client._publish_via_api = MagicMock(side_effect=AssertionError("publish API should not run when aspect validation fails"))
+
+    item = make_clothing_item(
+        sku="CL-009999",
+        item_specifics={"Theme": "x" * 70},
+    )
+    result = client.publish_item(item)
+
+    assert not result.ok
+    assert result.error_code == "ASPECT_VALIDATION"
+    assert any("Aspect 'Theme' value exceeds eBay's 65-character limit" in blocker for blocker in result.details["blockers"])

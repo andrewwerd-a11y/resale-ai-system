@@ -36,6 +36,7 @@ CONDITION_MAP = {
 
 from packages.core.src.result import Result
 from packages.domain.src.entities.item import Item
+from packages.ebay.src.aspect_validation import validate_aspects
 from packages.ebay.src.auth import EbayAuth
 from packages.ebay.src import http_client as ebay_http
 from packages.ebay.src.photo_uploader import PhotoUploader
@@ -70,6 +71,15 @@ class EbayInventoryClient:
                 "eBay credentials are not ready for authenticated requests.",
                 error_code="AUTH_NOT_READY",
                 auth_issue_code=token_state["issue_code"] or "missing_token",
+            )
+
+        aspect_validation = validate_aspects(self._build_item_specifics(item))
+        if not aspect_validation["ok"]:
+            return Result.failure(
+                "eBay aspect validation failed before publish.",
+                error_code="ASPECT_VALIDATION",
+                blockers=aspect_validation["blockers"],
+                issues=aspect_validation["issues"],
             )
 
         image_paths = [Path(p) for p in (item.image_paths or [])]
@@ -300,9 +310,9 @@ class EbayInventoryClient:
             payload["conditionDescription"] = item.condition_notes[:1000]
         return payload
 
-    def _build_item_specifics(self, item: Item, template=None) -> dict[str, list[str]]:
+    def _collect_item_specifics(self, item: Item, template=None) -> dict[str, list[str]]:
         """
-        Build item specifics dict for the inventory item payload.
+        Collect raw item specifics before eBay-specific normalization/validation.
         Priority: manually set values > AI extracted values > template defaults.
         All values must be lists of strings as eBay requires.
         """
@@ -350,6 +360,11 @@ class EbayInventoryClient:
                         specifics[field_name] = [defaults[0]]
 
         return specifics
+
+    def _build_item_specifics(self, item: Item, template=None) -> dict[str, list[str]]:
+        specifics = self._collect_item_specifics(item, template)
+        aspect_validation = validate_aspects(specifics)
+        return aspect_validation["normalized_aspects"]
 
     def _build_aspects(self, item: Item) -> dict[str, list[str]]:
         aspects: dict[str, list[str]] = {}

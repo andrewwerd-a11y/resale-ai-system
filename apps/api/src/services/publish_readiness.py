@@ -10,7 +10,9 @@ from packages.core.src.result import Result
 from packages.domain.src.entities.item import Item
 from packages.ebay.src.category_intelligence import CategoryIntelligence, CategoryTemplate
 from packages.ebay.src.category_spreadsheet import CategorySpreadsheet
+from packages.ebay.src.aspect_validation import validate_aspects
 from packages.ebay.src.inventory_client import CONDITION_MAP as EBAY_CONDITION_MAP
+from packages.ebay.src.inventory_client import EbayInventoryClient
 from packages.ebay.src.photo_uploader import PhotoUploader
 from packages.testing.src.e2e_guard import is_e2e_sku_allowed, is_route_guard_enabled
 
@@ -227,6 +229,31 @@ def evaluate_publish_readiness(
         blocking=True,
         action="Choose a supported eBay condition ID before publishing.",
     )
+
+    aspect_validation = validate_aspects(EbayInventoryClient()._collect_item_specifics(item))
+    add_check(
+        "aspect_value_lengths",
+        aspect_validation["ok"],
+        detail=(
+            "All eBay aspect values are within length limits."
+            if aspect_validation["ok"]
+            else "One or more eBay aspect values exceed eBay length limits."
+        ),
+        blocking=not aspect_validation["ok"],
+        warning=(aspect_validation["warnings"][0] if aspect_validation["warnings"] else None),
+        action="Shorten or manually correct the flagged aspect values before publishing.",
+        context={
+            "normalized_aspects": aspect_validation["normalized_aspects"],
+            "issues": aspect_validation["issues"],
+            "warnings": aspect_validation["warnings"],
+            "max_length": 65,
+        },
+    )
+    for warning in aspect_validation["warnings"]:
+        add_warning(warning)
+    for issue in aspect_validation["issues"]:
+        if issue["detail"] not in blockers:
+            blockers.append(issue["detail"])
 
     _add_category_specific_readiness_checks(
         item,

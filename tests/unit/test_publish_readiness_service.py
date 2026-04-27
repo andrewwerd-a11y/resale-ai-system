@@ -139,3 +139,52 @@ def test_taxonomy_upstream_failure_is_classified_without_crashing(monkeypatch, t
     assert any("UPSTREAM_TIMEOUT" in warning for warning in result.warnings)
     check = next(check for check in result.checks if check["name"] == "category_template_validation")
     assert check["ok"] is True
+
+
+def test_overlong_color_is_normalized_under_limit(monkeypatch, tmp_path):
+    _block_network(monkeypatch)
+    monkeypatch.setenv("EBAY_FULFILLMENT_POLICY_ID", "fulfillment-1")
+    monkeypatch.setenv("EBAY_PAYMENT_POLICY_ID", "payment-1")
+    monkeypatch.setenv("EBAY_RETURN_POLICY_ID", "return-1")
+    core_config.get_settings.cache_clear()
+
+    photo = tmp_path / "ready.jpg"
+    photo.write_bytes(b"ready")
+    result = evaluate_publish_readiness(
+        _make_item(
+            str(photo),
+            color="blue and white dress on a woman, various colors in the illustration background",
+        ),
+        category_template_provider=lambda _item: Result.success(_template()),
+    )
+
+    aspect_check = next(check for check in result.checks if check["name"] == "aspect_value_lengths")
+    assert result.ready is True
+    assert aspect_check["ok"] is True
+    assert aspect_check["context"]["normalized_aspects"]["Color"] == ["Blue/White"]
+    assert any("Normalized Color" in warning for warning in result.warnings)
+
+
+def test_overlong_non_normalizable_aspect_blocks_readiness(monkeypatch, tmp_path):
+    _block_network(monkeypatch)
+    monkeypatch.setenv("EBAY_FULFILLMENT_POLICY_ID", "fulfillment-1")
+    monkeypatch.setenv("EBAY_PAYMENT_POLICY_ID", "payment-1")
+    monkeypatch.setenv("EBAY_RETURN_POLICY_ID", "return-1")
+    core_config.get_settings.cache_clear()
+
+    photo = tmp_path / "ready.jpg"
+    photo.write_bytes(b"ready")
+    result = evaluate_publish_readiness(
+        _make_item(
+            str(photo),
+            item_specifics={
+                "Theme": "x" * 70,
+            },
+        ),
+        category_template_provider=lambda _item: Result.success(_template()),
+    )
+
+    aspect_check = next(check for check in result.checks if check["name"] == "aspect_value_lengths")
+    assert result.ready is False
+    assert aspect_check["ok"] is False
+    assert any("Aspect 'Theme' value exceeds eBay's 65-character limit" in blocker for blocker in result.blockers)
