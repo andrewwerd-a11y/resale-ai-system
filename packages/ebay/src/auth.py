@@ -33,6 +33,8 @@ SCOPES = " ".join([
 class EbayAuth:
     def __init__(self):
         self.settings = get_settings()
+        self._last_token_issue_code: str | None = None
+        self._last_token_issue_message: str | None = None
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
@@ -46,9 +48,27 @@ class EbayAuth:
         Return a valid Bearer token. Reads OAuth tokens from file first,
         refreshes automatically if expired, falls back to .env token.
         """
+        return self.resolve_user_token()["token"]
+
+    def resolve_user_token(self, *, allow_refresh: bool = True) -> dict[str, str | None]:
+        """
+        Resolve the preferred bearer token along with safe diagnostics.
+        Returns {"token", "source", "issue_code", "issue_message"}.
+        """
+        self._last_token_issue_code = None
+        self._last_token_issue_message = None
+
         # In dry-run mode we never attempt network token refresh; always use env token.
         if self.settings.dry_run:
-            return self.settings.ebay_user_token
+            env_token = self.settings.ebay_user_token
+            if env_token:
+                return {
+                    "token": env_token,
+                    "source": "env",
+                    "issue_code": None,
+                    "issue_message": None,
+                }
+            return self._resolution("", "none", "missing_token", "No eBay user token is configured for dry-run mode.")
 
         tokens = _load_tokens()
         if tokens:
@@ -56,15 +76,66 @@ class EbayAuth:
             if expires_at:
                 exp = _parse_dt(expires_at)
                 if datetime.now(timezone.utc) < exp - timedelta(minutes=5):
-                    return tokens["access_token"]
+                    return {
+                        "token": tokens["access_token"],
+                        "source": "oauth",
+                        "issue_code": None,
+                        "issue_message": None,
+                    }
                 # Attempt silent refresh
-                refreshed = self._refresh_access_token(tokens.get("refresh_token", ""))
-                if refreshed:
-                    return refreshed
+                refresh_token = tokens.get("refresh_token", "")
+                if allow_refresh and refresh_token:
+                    refreshed = self._refresh_access_token(refresh_token)
+                    if refreshed:
+                        return {
+                            "token": refreshed,
+                            "source": "oauth_refresh",
+                            "issue_code": None,
+                            "issue_message": None,
+                        }
+                    if self.settings.ebay_user_token:
+                        return self._resolution(
+                            self.settings.ebay_user_token,
+                            "env_fallback",
+                            self._last_token_issue_code or "refresh_failed",
+                            self._last_token_issue_message or "OAuth token refresh failed; using configured environment token instead.",
+                        )
+                    return self._resolution(
+                        "",
+                        "none",
+                        self._last_token_issue_code or "refresh_failed",
+                        self._last_token_issue_message or "OAuth token refresh failed and no fallback environment token is configured.",
+                    )
+                if self.settings.ebay_user_token:
+                    return self._resolution(
+                        self.settings.ebay_user_token,
+                        "env_fallback",
+                        "expired_or_invalid_access_token",
+                        "OAuth access token is expired and no refresh token is available; using configured environment token instead.",
+                    )
+                return self._resolution(
+                    "",
+                    "none",
+                    "expired_or_invalid_access_token",
+                    "OAuth access token is expired and no refresh token is available.",
+                )
             elif tokens.get("access_token"):
-                return tokens["access_token"]
+                return {
+                    "token": tokens["access_token"],
+                    "source": "oauth",
+                    "issue_code": None,
+                    "issue_message": None,
+                }
         # Fall back to IAF token from .env
-        return self.settings.ebay_user_token
+        env_token = self.settings.ebay_user_token
+        if env_token:
+            return {
+                "token": env_token,
+                "source": "env",
+                "issue_code": None,
+                "issue_message": None,
+            }
+        return self._resolution("", "none", "missing_token", "No eBay user token is configured.")
 
     def get_auth_url(self) -> str:
         """Build the eBay OAuth consent URL to redirect the user to."""
@@ -182,8 +253,12 @@ class EbayAuth:
                 logger.info("eBay access token refreshed successfully")
                 return data["access_token"]
             logger.warning("eBay token refresh failed: %s", resp.status_code)
+            self._last_token_issue_code = "refresh_failed"
+            self._last_token_issue_message = f"OAuth refresh request failed with HTTP {resp.status_code}."
         except Exception as exc:
             logger.error("eBay token refresh error: %s", exc)
+            self._last_token_issue_code = "refresh_failed"
+            self._last_token_issue_message = f"OAuth refresh request failed: {type(exc).__name__}."
         return None
 
     # ── Legacy property shims ────────────────────────────────────────────────
@@ -211,6 +286,16 @@ class EbayAuth:
     @property
     def marketplace_id(self) -> str:
         return self.settings.ebay_marketplace_id
+
+    def _resolution(self, token: str, source: str, issue_code: str | None, issue_message: str | None) -> dict[str, str | None]:
+        self._last_token_issue_code = issue_code
+        self._last_token_issue_message = issue_message
+        return {
+            "token": token,
+            "source": source,
+            "issue_code": issue_code,
+            "issue_message": issue_message,
+        }
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

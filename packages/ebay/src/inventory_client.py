@@ -57,10 +57,19 @@ class EbayInventoryClient:
         Upload photos, create/replace inventory item, create offer, publish.
         Returns Result with {"listing_id", "listing_url", "photo_urls", "offer_id"}.
         """
-        if not self.auth.is_configured():
+        if hasattr(self.auth, "is_configured") and not self.auth.is_configured():
             return Result.failure(
                 "eBay credentials not configured.",
                 error_code="NOT_CONFIGURED",
+            )
+
+        token_state = self.auth.resolve_user_token()
+        settings = self.auth.settings
+        if not (settings.ebay_app_id and settings.ebay_cert_id and token_state["token"]):
+            return Result.failure(
+                "eBay credentials are not ready for authenticated requests.",
+                error_code="AUTH_NOT_READY",
+                auth_issue_code=token_state["issue_code"] or "missing_token",
             )
 
         image_paths = [Path(p) for p in (item.image_paths or [])]

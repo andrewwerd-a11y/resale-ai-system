@@ -10,6 +10,7 @@ from packages.core.src.config import get_settings
 from packages.core.src.constants import ItemStatus
 from packages.data.src.db.sqlite import get_session
 from packages.data.src.repositories.item_repo import ItemRepository
+from apps.api.src.services.ebay_auth_diagnostics import classify_ebay_auth_failure, get_ebay_auth_readiness
 from packages.ebay.src.auth import EbayAuth
 from packages.ebay.src import http_client as ebay_http
 from packages.ebay.src.photo_uploader import PhotoUploader
@@ -90,6 +91,23 @@ a{{color:#7f77dd;text-decoration:none;font-size:13px}}</style></head>
 
 # ── Status ─────────────────────────────────────────────────────────────────────
 
+def _looks_like_auth_failure(text: str) -> bool:
+    lower = (text or "").lower()
+    return any(
+        marker in lower
+        for marker in (
+            "invalid access token",
+            "error 1001",
+            "authorization http request header",
+            "insufficient scope",
+            "insufficient permissions",
+            "refresh failed",
+            "auth not ready",
+            "missing token",
+        )
+    )
+
+
 @router.get("/status")
 def ebay_status():
     auth = EbayAuth()
@@ -102,6 +120,11 @@ def ebay_status():
         "photo_hosting": uploader.is_configured(),
         "photo_host": "cloudinary" if uploader.is_configured() else "local_paths_only",
     }
+
+
+@router.get("/auth-readiness")
+def ebay_auth_readiness():
+    return get_ebay_auth_readiness()
 
 @router.post("/publish/batch")
 def publish_batch(
@@ -169,9 +192,19 @@ def publish_item(sku: str, session: Session = Depends(get_session)):
     client = EbayInventoryClient()
     result = client.publish_item(item)
     if not result.ok:
+        auth_issue = result.details.get("auth_issue_code")
+        body = str(result.details.get("body") or "")
+        if result.error_code == "AUTH_NOT_READY" or _looks_like_auth_failure(body) or _looks_like_auth_failure(str(result.error or "")):
+            detail = classify_ebay_auth_failure(
+                status_code=401,
+                text=body or str(result.error or ""),
+                auth_readiness=get_ebay_auth_readiness(),
+                token_issue_code=str(auth_issue or ""),
+            )
+            raise HTTPException(status_code=503 if result.error_code == "AUTH_NOT_READY" else 502, detail=detail)
         detail = result.error or "unknown error"
-        if result.details.get("body"):
-            detail += f" | eBay response: {result.details['body']}"
+        if body:
+            detail += f" | eBay response: {body}"
         raise HTTPException(status_code=500, detail=detail)
     data = result.value
     item.listing_id = data["listing_id"]
@@ -274,13 +307,19 @@ def update_listing(sku: str, updates: dict, session: Session = Depends(get_sessi
             setattr(item, k, v)
 
     client = EbayInventoryClient()
-    if not client.auth.is_configured():
-        raise HTTPException(status_code=503, detail="eBay credentials not configured")
+    token_state = client.auth.resolve_user_token()
+    if not (client.auth.settings.ebay_app_id and client.auth.settings.ebay_cert_id and token_state["token"]):
+        readiness = get_ebay_auth_readiness()
+        if token_state["issue_code"] == "refresh_failed":
+            readiness["code"] = "refresh_failed"
+            readiness["message"] = token_state["issue_message"] or readiness["message"]
+            readiness["next_action"] = "Reconnect eBay OAuth or replace the expired token, then retry."
+        raise HTTPException(status_code=503, detail=readiness)
 
     auth = client.auth
     base = auth.api_base
     headers = {
-        "Authorization": f"Bearer {auth.user_token}",
+        "Authorization": f"Bearer {token_state['token']}",
         "Content-Type": "application/json",
         "Accept": "application/json",
         "Content-Language": "en-US",
@@ -323,7 +362,19 @@ def update_listing(sku: str, updates: dict, session: Session = Depends(get_sessi
         timeout=30,
     )
     if resp.status_code not in (200, 204):
-        detail = f"eBay API {resp.status_code}: {resp.text[:300]}"
+        detail = classify_ebay_auth_failure(
+            status_code=resp.status_code,
+            text=resp.text[:500],
+            auth_readiness=get_ebay_auth_readiness(),
+            token_issue_code=str(token_state["issue_code"] or ""),
+        )
+        if detail["code"] == "unknown_auth_error" and resp.status_code not in (401, 403):
+            detail = {
+                "code": "revise_failed",
+                "category": "ebay",
+                "message": f"eBay API {resp.status_code}: {resp.text[:300]}",
+                "next_action": "Review the eBay response and retry after fixing the listing data or auth state.",
+            }
         raise HTTPException(status_code=502, detail=detail)
 
     # Persist updated fields

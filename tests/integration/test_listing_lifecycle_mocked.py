@@ -174,6 +174,32 @@ def test_revise_failure_does_not_persist_local_update_or_sync(monkeypatch, tmp_p
     assert item.status == ItemStatus.LISTED
 
 
+def test_revise_invalid_token_returns_structured_auth_error(monkeypatch, tmp_path):
+    monkeypatch.setenv("E2E_ROUTE_GUARD_ENABLED", "true")
+    monkeypatch.setenv("APPROVED_E2E_SKUS", "BK-000005,BK-000008,BK-000009")
+    monkeypatch.setenv("EBAY_ENVIRONMENT", "sandbox")
+    monkeypatch.setenv("EBAY_SANDBOX_APP_ID", "app-id")
+    monkeypatch.setenv("EBAY_SANDBOX_CERT_ID", "cert-id")
+    monkeypatch.setenv("EBAY_SANDBOX_USER_TOKEN", "user-token")
+    _configure_temp_db(monkeypatch, tmp_path)
+    _seed_item("BK-000005", ItemStatus.LISTED)
+
+    class _Resp:
+        status_code = 401
+        text = "Error 1001: Invalid access token. Check the value of the Authorization HTTP request header."
+
+    monkeypatch.setattr("apps.api.src.routes.ebay.ebay_http.put", lambda *a, **k: _Resp())
+
+    with _client() as client:
+        resp = client.patch("/api/ebay/listing/BK-000005", json={"list_price": 99.99})
+
+    assert resp.status_code == 502
+    detail = resp.json().get("detail", {})
+    assert detail.get("code") == "expired_or_invalid_access_token"
+    assert detail.get("category") == "auth"
+    assert "token" in detail.get("message", "").lower()
+
+
 def test_mark_sold_creates_sale_record_updates_profit_and_reports(monkeypatch, tmp_path):
     monkeypatch.setenv("E2E_ROUTE_GUARD_ENABLED", "true")
     monkeypatch.setenv("APPROVED_E2E_SKUS", "BK-000005,BK-000008,BK-000009")
