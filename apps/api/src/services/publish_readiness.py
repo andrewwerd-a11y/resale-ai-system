@@ -2,10 +2,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 from packages.core.src.config import get_settings
 from packages.core.src.constants import ItemStatus
+from packages.core.src.result import Result
 from packages.domain.src.entities.item import Item
+from packages.ebay.src.category_intelligence import CategoryIntelligence, CategoryTemplate
+from packages.ebay.src.category_spreadsheet import CategorySpreadsheet
+from packages.ebay.src.inventory_client import CONDITION_MAP as EBAY_CONDITION_MAP
 from packages.ebay.src.photo_uploader import PhotoUploader
 from packages.testing.src.e2e_guard import is_e2e_sku_allowed, is_route_guard_enabled
 
@@ -31,9 +36,16 @@ class PublishReadinessResult:
 
 
 PUBLISHABLE_STATUSES = {ItemStatus.APPROVED, ItemStatus.EXPORT_READY}
+CategoryTemplateProvider = Callable[[Item], Result[CategoryTemplate]]
+SellerPolicyProvider = Callable[[], dict]
 
 
-def evaluate_publish_readiness(item: Item) -> PublishReadinessResult:
+def evaluate_publish_readiness(
+    item: Item,
+    *,
+    category_template_provider: CategoryTemplateProvider | None = None,
+    seller_policy_provider: SellerPolicyProvider | None = None,
+) -> PublishReadinessResult:
     sku = (item.sku or "").strip().upper()
     blockers: list[str] = []
     warnings: list[str] = []
@@ -66,6 +78,14 @@ def evaluate_publish_readiness(item: Item) -> PublishReadinessResult:
             warnings.append(warning)
         if action and not ok and action not in required_actions:
             required_actions.append(action)
+
+    def add_warning(message: str) -> None:
+        if message not in warnings:
+            warnings.append(message)
+
+    def add_required_action(message: str) -> None:
+        if message not in required_actions:
+            required_actions.append(message)
 
     guard_enabled = is_route_guard_enabled()
     sku_allowed = is_e2e_sku_allowed(sku) if sku else False
@@ -191,29 +211,49 @@ def evaluate_publish_readiness(item: Item) -> PublishReadinessResult:
         },
     )
     if needs_hosting:
-        action = "Host local photos before sandbox or live publish."
-        if action not in required_actions:
-            required_actions.append(action)
-    if photo_warning and photo_warning not in warnings and needs_hosting:
-        warnings.append(photo_warning)
+        add_required_action("Host local photos before sandbox or live publish.")
+    if photo_warning and needs_hosting:
+        add_warning(photo_warning)
 
-    policy_ids = {
-        "fulfillment": str(settings.ebay_fulfillment_policy_id or "").strip(),
-        "payment": str(settings.ebay_payment_policy_id or "").strip(),
-        "return": str(settings.ebay_return_policy_id or "").strip(),
-    }
-    policies_configured = all(policy_ids.values())
+    condition_key = _normalize_condition_key(item.condition_id)
     add_check(
-        "seller_policies_configured",
-        policies_configured,
+        "condition_id_supported",
+        bool(condition_key),
         detail=(
-            "Seller policy IDs are configured in settings."
-            if policies_configured
-            else "One or more seller policy IDs are not configured locally."
+            f"Condition ID '{item.condition_id}' maps to a supported eBay condition."
+            if condition_key
+            else f"Condition ID '{item.condition_id}' is not recognized by the eBay payload builder."
         ),
-        warning="Seller policy discovery may still be needed before publish.",
-        action="Configure seller policy IDs or verify discovery fallback before publishing.",
+        blocking=True,
+        action="Choose a supported eBay condition ID before publishing.",
     )
+
+    _add_category_specific_readiness_checks(
+        item,
+        add_check=add_check,
+        add_warning=add_warning,
+        add_required_action=add_required_action,
+        category_template_provider=category_template_provider,
+    )
+
+    policy_state = _resolve_seller_policy_state(settings, seller_policy_provider=seller_policy_provider)
+    add_check(
+        "seller_policy_readiness",
+        policy_state["ok"],
+        detail=(
+            "Seller policy IDs are configured or otherwise discoverable."
+            if policy_state["ok"]
+            else policy_state["detail"]
+        ),
+        blocking=policy_state["blocking"],
+        warning=policy_state["warning"],
+        action=policy_state["action"],
+        context=policy_state["context"],
+    )
+    if policy_state["warning"] and policy_state["ok"]:
+        add_warning(policy_state["warning"])
+    if policy_state["action"] and policy_state["ok"] and policy_state["context"].get("needs_discovery"):
+        add_required_action(policy_state["action"])
 
     ready = len(blockers) == 0
     return PublishReadinessResult(
@@ -244,6 +284,199 @@ def not_found_publish_readiness(sku: str) -> PublishReadinessResult:
         warnings=[],
         required_actions=["Create or import the item record before publishing."],
     )
+
+
+def _add_category_specific_readiness_checks(
+    item: Item,
+    *,
+    add_check: Callable[..., None],
+    add_warning: Callable[[str], None],
+    add_required_action: Callable[[str], None],
+    category_template_provider: CategoryTemplateProvider | None,
+) -> None:
+    if not _has_value(item.ebay_category_id):
+        return
+
+    if category_template_provider is not None:
+        template_result = category_template_provider(item)
+        if template_result.ok:
+            _add_template_validation_check(item, template_result.value, add_check=add_check)
+            return
+
+        warning = _category_template_warning(template_result)
+        add_check(
+            "category_template_validation",
+            True,
+            detail="Category template validation skipped because the taxonomy provider was unavailable.",
+            context={
+                "category_id": item.ebay_category_id,
+                "error_code": str(template_result.error_code or ""),
+                "message": str(template_result.error or ""),
+            },
+        )
+        add_warning(warning)
+        add_required_action("Retry category intelligence when taxonomy access is available.")
+        return
+
+    template = CategorySpreadsheet().load_template(str(item.ebay_category_id))
+    if template is not None:
+        _add_template_validation_check(item, template, add_check=add_check)
+        return
+
+    if item.category_template_fetched:
+        missing_required = list(item.missing_required_fields or [])
+        add_check(
+            "category_template_validation",
+            len(missing_required) == 0,
+            detail=(
+                "Stored category intelligence indicates required specifics are complete."
+                if not missing_required
+                else f"Stored category intelligence is missing required specifics: {', '.join(missing_required)}."
+            ),
+            blocking=bool(missing_required),
+            action="Fill the missing required category specifics before publishing.",
+            context={
+                "category_id": item.ebay_category_id,
+                "source": "stored_item",
+                "missing_required": missing_required,
+                "missing_recommended": list(item.missing_recommended_fields or []),
+            },
+        )
+        return
+
+    add_check(
+        "category_template_validation",
+        True,
+        detail="No cached category template is available to validate category-specific specifics yet.",
+        context={
+            "category_id": item.ebay_category_id,
+            "source": "none",
+        },
+    )
+    add_warning("Category-specific validation has not been run locally for this item yet.")
+    add_required_action("Run category intelligence or refresh the cached category template before publishing.")
+
+
+def _add_template_validation_check(item: Item, template: CategoryTemplate, *, add_check: Callable[..., None]) -> None:
+    validation = CategoryIntelligence().validate_item_specifics(item, template)
+    detail = "Cached category template validation passed."
+    if validation.missing_required:
+        detail = f"Missing required category specifics: {', '.join(validation.missing_required)}."
+    elif validation.invalid_fields:
+        detail = f"Category specifics include unsupported values for: {', '.join(validation.invalid_fields)}."
+
+    add_check(
+        "category_template_validation",
+        validation.is_publish_ready and not validation.invalid_fields,
+        detail=detail,
+        blocking=bool(validation.missing_required or validation.invalid_fields),
+        action="Fill the missing or invalid category-specific item specifics before publishing.",
+        context={
+            "category_id": template.category_id,
+            "category_name": template.category_name,
+            "source": "cached_template",
+            "missing_required": validation.missing_required,
+            "missing_recommended": validation.missing_recommended,
+            "invalid_fields": validation.invalid_fields,
+        },
+    )
+
+
+def _resolve_seller_policy_state(
+    settings,
+    *,
+    seller_policy_provider: SellerPolicyProvider | None,
+) -> dict:
+    policy_ids = {
+        "fulfillment": str(settings.ebay_fulfillment_policy_id or "").strip(),
+        "payment": str(settings.ebay_payment_policy_id or "").strip(),
+        "return": str(settings.ebay_return_policy_id or "").strip(),
+    }
+    missing_keys = [key for key, value in policy_ids.items() if not value]
+    discovery_result: dict[str, str] = {}
+    discovery_error = ""
+
+    if missing_keys and seller_policy_provider is not None:
+        try:
+            resolved = seller_policy_provider() or {}
+            discovery_result = {
+                "fulfillment": str(resolved.get("fulfillment_id") or "").strip(),
+                "payment": str(resolved.get("payment_id") or "").strip(),
+                "return": str(resolved.get("return_id") or "").strip(),
+            }
+        except Exception as exc:
+            discovery_error = str(exc)
+
+    merged_ids = {
+        "fulfillment": policy_ids["fulfillment"] or discovery_result.get("fulfillment", ""),
+        "payment": policy_ids["payment"] or discovery_result.get("payment", ""),
+        "return": policy_ids["return"] or discovery_result.get("return", ""),
+    }
+    remaining_missing = [key for key, value in merged_ids.items() if not value]
+    discovery_available = _has_local_policy_discovery_prereqs(settings) or seller_policy_provider is not None
+    ok = len(remaining_missing) == 0 or discovery_available
+    blocking = bool(remaining_missing) and not discovery_available
+
+    detail = "Seller policy IDs are configured or otherwise discoverable."
+    warning = None
+    action = None
+    if remaining_missing and discovery_available:
+        detail = (
+            "Seller policy IDs are not fully configured locally, but existing discovery fallback can still resolve them."
+        )
+        warning = f"Seller policy IDs still need discovery for: {', '.join(remaining_missing)}."
+        action = "Verify seller policy discovery fallback before publishing."
+    elif remaining_missing:
+        detail = f"Seller policy IDs are missing for: {', '.join(remaining_missing)}."
+        action = "Configure eBay seller policy IDs before publishing."
+
+    if discovery_error:
+        ok = False
+        blocking = False
+        detail = f"Seller policy discovery check failed: {discovery_error}"
+        warning = detail
+        action = "Retry seller policy discovery or configure the policy IDs directly."
+
+    return {
+        "ok": ok,
+        "blocking": blocking,
+        "detail": detail,
+        "warning": warning,
+        "action": action,
+        "context": {
+            "configured_policy_ids": policy_ids,
+            "discovered_policy_ids": discovery_result,
+            "missing_policy_keys": remaining_missing,
+            "discovery_available": discovery_available,
+            "needs_discovery": bool(remaining_missing) and discovery_available,
+        },
+    }
+
+
+def _category_template_warning(result: Result[CategoryTemplate]) -> str:
+    code = str(result.error_code or "CATEGORY_INTELLIGENCE_ERROR")
+    message = str(result.error or "Category intelligence failed")
+    return f"Category template validation skipped: {code} - {message}"
+
+
+def _has_local_policy_discovery_prereqs(settings) -> bool:
+    return bool(
+        str(settings.ebay_app_id or "").strip()
+        and str(settings.ebay_cert_id or "").strip()
+        and str(settings.ebay_user_token or "").strip()
+    )
+
+
+def _normalize_condition_key(value: object) -> str:
+    if value is None:
+        return ""
+    digits = "".join(ch for ch in str(value) if ch.isdigit())[:4]
+    if digits and digits in EBAY_CONDITION_MAP:
+        return digits
+    text = str(value).strip().upper()
+    if text in EBAY_CONDITION_MAP:
+        return text
+    return ""
 
 
 def _has_value(value: object) -> bool:
