@@ -100,7 +100,13 @@ class EbayInventoryClient:
 
         try:
             publish_result = self._publish_via_api(item, photo_urls)
-            if isinstance(publish_result, tuple) and len(publish_result) == 3:
+            recovered_existing_offer = False
+            if isinstance(publish_result, dict):
+                listing_id = str(publish_result.get("listing_id") or "")
+                listing_url = str(publish_result.get("listing_url") or "")
+                offer_id = str(publish_result.get("offer_id") or "")
+                recovered_existing_offer = bool(publish_result.get("recovered_existing_offer"))
+            elif isinstance(publish_result, tuple) and len(publish_result) == 3:
                 listing_id, listing_url, offer_id = publish_result
             elif isinstance(publish_result, tuple) and len(publish_result) == 2:
                 listing_id, listing_url = publish_result
@@ -124,6 +130,7 @@ class EbayInventoryClient:
                 "listing_url": listing_url,
                 "photo_urls": photo_urls,
                 "offer_id": offer_id,
+                "recovered_existing_offer": recovered_existing_offer,
             })
         except _EbayApiError as exc:
             logger.error("eBay API %s for %s: %s", exc.status_code, item.sku, exc.body)
@@ -131,6 +138,9 @@ class EbayInventoryClient:
                 f"eBay API error {exc.status_code}: {exc.message}",
                 error_code="API_ERROR",
                 body=exc.body,
+                offer_id=str((exc.context or {}).get("offer_id") or ""),
+                recovered_existing_offer=bool((exc.context or {}).get("recovered_existing_offer")),
+                next_action=(exc.context or {}).get("next_action"),
             )
         except Exception as exc:
             logger.exception("Unexpected error publishing %s", item.sku)
@@ -229,10 +239,11 @@ class EbayInventoryClient:
 
     # ── Internal flow ─────────────────────────────────────────────────────────
 
-    def _publish_via_api(self, item: Item, photo_urls: list[str]) -> tuple[str, str]:
+    def _publish_via_api(self, item: Item, photo_urls: list[str]) -> dict:
         base = self.auth.api_base
         headers = self._headers()
         sku = item.sku
+        recovered_existing_offer = False
 
         # Step 1: Create/replace inventory item
         inventory_payload = self._build_inventory_payload(item, photo_urls)
@@ -249,30 +260,54 @@ class EbayInventoryClient:
         policies = self.get_seller_policies()
         offer_payload = self._build_offer_payload(item, policies)
         logger.info("POST offer for %s payload: %s", sku, json.dumps(offer_payload))
-        offer_resp = self._post(
-            f"{base}/sell/inventory/v1/offer",
-            headers,
-            offer_payload,
-            sku=sku,
-            step="create_offer",
-        )
-        offer_id = offer_resp.get("offerId", "")
-        if not offer_id:
-            raise _EbayApiError(0, "No offerId in response", str(offer_resp))
+        offer_id = ""
+        try:
+            offer_resp = self._post(
+                f"{base}/sell/inventory/v1/offer",
+                headers,
+                offer_payload,
+                sku=sku,
+                step="create_offer",
+            )
+            offer_id = offer_resp.get("offerId", "")
+            if not offer_id:
+                raise _EbayApiError(0, "No offerId in response", str(offer_resp))
+        except _EbayApiError as exc:
+            if self._is_existing_offer_error(exc.body):
+                offer_id = self._extract_offer_id(exc.body)
+                if not offer_id:
+                    raise _EbayApiError(
+                        exc.status_code,
+                        "create_offer failed: existing offer reported but no offerId was returned",
+                        exc.body,
+                    )
+                recovered_existing_offer = True
+            else:
+                raise
 
         # Step 3: Publish offer
         logger.info("POST offer/%s/publish for %s", offer_id, sku)
-        publish_resp = self._post(
-            f"{base}/sell/inventory/v1/offer/{offer_id}/publish",
-            headers,
-            {},
-            sku=sku,
-            step="publish_offer",
-        )
+        try:
+            publish_resp = self._post(
+                f"{base}/sell/inventory/v1/offer/{offer_id}/publish",
+                headers,
+                {},
+                sku=sku,
+                step="publish_offer",
+            )
+        except _EbayApiError as exc:
+            exc.context.setdefault("offer_id", offer_id)
+            exc.context.setdefault("recovered_existing_offer", recovered_existing_offer)
+            raise
 
         listing_id = publish_resp.get("listingId", offer_id)
         env_domain = "sandbox.ebay.com" if self.auth.settings.ebay_environment == "sandbox" else "ebay.com"
-        return listing_id, f"https://www.{env_domain}/itm/{listing_id}", offer_id
+        return {
+            "listing_id": listing_id,
+            "listing_url": f"https://www.{env_domain}/itm/{listing_id}",
+            "offer_id": offer_id,
+            "recovered_existing_offer": recovered_existing_offer,
+        }
 
     # ── Payload builders ──────────────────────────────────────────────────────
 
@@ -490,10 +525,42 @@ class EbayInventoryClient:
             raise _EbayApiError(resp.status_code, f"{step} failed", resp.text)
         return resp.json() if resp.content else {}
 
+    @staticmethod
+    def _is_existing_offer_error(body: str) -> bool:
+        return "offer entity already exists" in str(body or "").lower()
+
+    @staticmethod
+    def _extract_offer_id(body: str) -> str:
+        text = str(body or "")
+        try:
+            payload = json.loads(text)
+        except Exception:
+            payload = None
+
+        if isinstance(payload, dict):
+            direct = str(payload.get("offerId") or "").strip()
+            if direct:
+                return direct
+            for error in payload.get("errors", []) or []:
+                for parameter in error.get("parameters", []) or []:
+                    name = str(parameter.get("name") or "").strip().lower()
+                    value = str(parameter.get("value") or "").strip()
+                    if name == "offerid" and value:
+                        return value
+
+        match = re.search(r'"offerId"\s*:\s*"?(?P<offer_id>\d+)"?', text)
+        if match:
+            return str(match.group("offer_id") or "")
+        match = re.search(r"offerid[^0-9]*(?P<offer_id>\d{6,})", text, flags=re.IGNORECASE)
+        if match:
+            return str(match.group("offer_id") or "")
+        return ""
+
 
 class _EbayApiError(Exception):
-    def __init__(self, status_code: int, message: str, body: str = ""):
+    def __init__(self, status_code: int, message: str, body: str = "", context: dict | None = None):
         super().__init__(message)
         self.status_code = status_code
         self.message = message
         self.body = body
+        self.context = context or {}

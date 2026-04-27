@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import pytest
 from unittest.mock import patch, MagicMock
-from packages.ebay.src.inventory_client import EbayInventoryClient
+from packages.ebay.src.inventory_client import EbayInventoryClient, _EbayApiError
 from packages.core.src.result import Result
 from packages.data.src.repositories.item_repo import ItemRepository
 from packages.core.src.constants import ItemStatus
@@ -237,3 +237,73 @@ def test_publish_item_blocks_invalid_overlong_aspect_before_upload():
     assert not result.ok
     assert result.error_code == "ASPECT_VALIDATION"
     assert any("Aspect 'Theme' value exceeds eBay's 65-character limit" in blocker for blocker in result.details["blockers"])
+
+
+def test_publish_item_recovers_existing_offer_and_continues(monkeypatch):
+    client = EbayInventoryClient()
+    client.auth.settings.ebay_sandbox_app_id = "app-id"
+    client.auth.settings.ebay_sandbox_cert_id = "cert-id"
+    client.auth.settings.ebay_sandbox_user_token = "fake-token"
+    monkeypatch.setattr(
+        client.auth,
+        "resolve_user_token",
+        lambda: {"token": "fake-token", "issue_code": None},
+    )
+    client.auth.settings.ebay_environment = "sandbox"
+    monkeypatch.setattr(client.uploader, "upload_all", lambda _paths: [])
+    monkeypatch.setattr(client, "get_seller_policies", lambda: {"fulfillment_id": "f", "payment_id": "p", "return_id": "r"})
+    monkeypatch.setattr(client, "get_merchant_location_key", lambda: "default")
+    monkeypatch.setattr(client, "_put", lambda *_args, **_kwargs: {})
+
+    calls = {"publish_offer": 0}
+
+    def fake_post(_url, _headers, _payload, **kwargs):
+        step = kwargs.get("step", "")
+        if step == "create_offer":
+            raise _EbayApiError(
+                409,
+                "create_offer failed",
+                '{"errors":[{"message":"Offer entity already exists","parameters":[{"name":"offerId","value":"156719395011"}]}]}',
+            )
+        if step == "publish_offer":
+            calls["publish_offer"] += 1
+            return {"listingId": "123456789012"}
+        return {}
+
+    monkeypatch.setattr(client, "_post", fake_post)
+
+    result = client.publish_item(make_clothing_item(sku="CL-010001"))
+
+    assert result.ok
+    assert result.value["offer_id"] == "156719395011"
+    assert result.value["recovered_existing_offer"] is True
+    assert result.value["listing_id"] == "123456789012"
+    assert calls["publish_offer"] == 1
+
+
+def test_publish_item_existing_offer_without_offer_id_stays_failure(monkeypatch):
+    client = EbayInventoryClient()
+    client.auth.settings.ebay_sandbox_app_id = "app-id"
+    client.auth.settings.ebay_sandbox_cert_id = "cert-id"
+    client.auth.settings.ebay_sandbox_user_token = "fake-token"
+    monkeypatch.setattr(
+        client.auth,
+        "resolve_user_token",
+        lambda: {"token": "fake-token", "issue_code": None},
+    )
+    monkeypatch.setattr(client.uploader, "upload_all", lambda _paths: [])
+    monkeypatch.setattr(client, "get_seller_policies", lambda: {"fulfillment_id": "f", "payment_id": "p", "return_id": "r"})
+    monkeypatch.setattr(client, "get_merchant_location_key", lambda: "default")
+    monkeypatch.setattr(client, "_put", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(
+        client,
+        "_post",
+        lambda _url, _headers, _payload, **kwargs: (_ for _ in ()).throw(
+            _EbayApiError(409, "create_offer failed", '{"errors":[{"message":"Offer entity already exists"}]}')
+        ) if kwargs.get("step") == "create_offer" else {},
+    )
+
+    result = client.publish_item(make_clothing_item(sku="CL-010002"))
+
+    assert not result.ok
+    assert "no offerId was returned" in result.error

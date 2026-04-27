@@ -108,6 +108,17 @@ def _looks_like_auth_failure(text: str) -> bool:
     )
 
 
+def _persist_partial_publish_state(item, result, repo) -> bool:
+    recovered_offer_id = str(result.details.get("offer_id") or "").strip()
+    if not recovered_offer_id:
+        return False
+    if item.offer_id == recovered_offer_id:
+        return False
+    item.offer_id = recovered_offer_id
+    repo.upsert(item)
+    return True
+
+
 @router.get("/status")
 def ebay_status():
     auth = EbayAuth()
@@ -169,9 +180,12 @@ def publish_batch(
             results["published"] += 1
         else:
             results["failed"] += 1
+            recovered_offer_saved = _persist_partial_publish_state(item, result, repo)
             error_detail = result.error or "unknown error"
             if result.details.get("body"):
                 error_detail += f" | eBay: {result.details['body']}"
+            if recovered_offer_saved:
+                error_detail += f" | recovered offer_id: {item.offer_id}"
             results["errors"].append(f"{item.sku}: {error_detail}")
     return results
 
@@ -192,6 +206,7 @@ def publish_item(sku: str, session: Session = Depends(get_session)):
     client = EbayInventoryClient()
     result = client.publish_item(item)
     if not result.ok:
+        recovered_offer_saved = _persist_partial_publish_state(item, result, repo)
         auth_issue = result.details.get("auth_issue_code")
         body = str(result.details.get("body") or "")
         if result.error_code == "AUTH_NOT_READY" or _looks_like_auth_failure(body) or _looks_like_auth_failure(str(result.error or "")):
@@ -205,6 +220,8 @@ def publish_item(sku: str, session: Session = Depends(get_session)):
         detail = result.error or "unknown error"
         if body:
             detail += f" | eBay response: {body}"
+        if recovered_offer_saved:
+            detail += f" | recovered offer_id: {item.offer_id}"
         raise HTTPException(status_code=500, detail=detail)
     data = result.value
     item.listing_id = data["listing_id"]
@@ -222,6 +239,7 @@ def publish_item(sku: str, session: Session = Depends(get_session)):
         "listing_id": data["listing_id"],
         "listing_url": data["listing_url"],
         "offer_id": data.get("offer_id"),
+        "recovered_existing_offer": bool(data.get("recovered_existing_offer")),
         "status": "listed",
         "photos_uploaded": len(data["photo_urls"]),
     }

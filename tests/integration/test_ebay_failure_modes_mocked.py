@@ -164,6 +164,99 @@ def test_publish_partial_failure_offer_ok_publish_fails(monkeypatch, tmp_path):
     assert item.listing_url is None
 
 
+def test_publish_existing_offer_recovery_persists_offer_id_when_publish_still_fails(monkeypatch, tmp_path):
+    monkeypatch.setenv("E2E_ROUTE_GUARD_ENABLED", "true")
+    monkeypatch.setenv("APPROVED_E2E_SKUS", "BK-000005,BK-000008,BK-000009")
+    _configure_temp_db(monkeypatch, tmp_path)
+    _seed_item("BK-000008", ItemStatus.APPROVED)
+
+    monkeypatch.setattr(
+        "packages.ebay.src.inventory_client.EbayInventoryClient.get_seller_policies",
+        lambda _self: {"fulfillment_id": "f", "payment_id": "p", "return_id": "r"},
+    )
+    monkeypatch.setattr(
+        "packages.ebay.src.inventory_client.EbayInventoryClient.get_merchant_location_key",
+        lambda _self: "default",
+    )
+    monkeypatch.setattr(
+        "packages.ebay.src.inventory_client.EbayInventoryClient._put",
+        lambda _self, *_args, **_kwargs: {},
+    )
+
+    def fake_post(_self, *_args, **kwargs):
+        step = kwargs.get("step", "")
+        if step == "create_offer":
+            raise _EbayApiError(
+                409,
+                "create_offer failed",
+                '{"errors":[{"message":"Offer entity already exists","parameters":[{"name":"offerId","value":"156719395011"}]}]}',
+            )
+        if step == "publish_offer":
+            raise _EbayApiError(500, "publish_offer failed", "publish blocked")
+        return {}
+
+    monkeypatch.setattr("packages.ebay.src.inventory_client.EbayInventoryClient._post", fake_post)
+
+    with _client() as client:
+        resp = client.post("/api/ebay/publish/BK-000008")
+
+    assert resp.status_code == 500
+    assert "recovered offer_id: 156719395011" in resp.json().get("detail", "")
+    item = _get_item("BK-000008")
+    assert item is not None
+    assert item.offer_id == "156719395011"
+    assert item.status == ItemStatus.APPROVED
+    assert item.listing_id is None
+
+
+def test_publish_existing_offer_recovery_success_stores_listing_and_offer(monkeypatch, tmp_path):
+    monkeypatch.setenv("E2E_ROUTE_GUARD_ENABLED", "true")
+    monkeypatch.setenv("APPROVED_E2E_SKUS", "BK-000005,BK-000008,BK-000009")
+    _configure_temp_db(monkeypatch, tmp_path)
+    _seed_item("BK-000008", ItemStatus.APPROVED)
+
+    monkeypatch.setattr(
+        "packages.ebay.src.inventory_client.EbayInventoryClient.get_seller_policies",
+        lambda _self: {"fulfillment_id": "f", "payment_id": "p", "return_id": "r"},
+    )
+    monkeypatch.setattr(
+        "packages.ebay.src.inventory_client.EbayInventoryClient.get_merchant_location_key",
+        lambda _self: "default",
+    )
+    monkeypatch.setattr(
+        "packages.ebay.src.inventory_client.EbayInventoryClient._put",
+        lambda _self, *_args, **_kwargs: {},
+    )
+
+    def fake_post(_self, *_args, **kwargs):
+        step = kwargs.get("step", "")
+        if step == "create_offer":
+            raise _EbayApiError(
+                409,
+                "create_offer failed",
+                '{"errors":[{"message":"Offer entity already exists","parameters":[{"name":"offerId","value":"156719395011"}]}]}',
+            )
+        if step == "publish_offer":
+            return {"listingId": "987654321012"}
+        return {}
+
+    monkeypatch.setattr("packages.ebay.src.inventory_client.EbayInventoryClient._post", fake_post)
+
+    with _client() as client:
+        resp = client.post("/api/ebay/publish/BK-000008")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["offer_id"] == "156719395011"
+    assert body["recovered_existing_offer"] is True
+    assert body["listing_id"] == "987654321012"
+    item = _get_item("BK-000008")
+    assert item is not None
+    assert item.offer_id == "156719395011"
+    assert item.listing_id == "987654321012"
+    assert item.status == ItemStatus.LISTED
+
+
 def test_publish_returns_invalid_category_condition_error_detail(monkeypatch, tmp_path):
     monkeypatch.setenv("E2E_ROUTE_GUARD_ENABLED", "true")
     monkeypatch.setenv("APPROVED_E2E_SKUS", "BK-000005,BK-000008,BK-000009")
