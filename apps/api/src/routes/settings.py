@@ -13,6 +13,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from apps.api.src.services.claude_diagnostics import get_claude_readiness
+from apps.api.src.services.vision_provider_options import get_vision_provider_options
 
 router = APIRouter()
 
@@ -105,6 +106,7 @@ def get_current_settings():
         "vision_model_default": settings.vision_model_default,
         "vision_model_fallback": settings.vision_model_fallback,
         "vision_model_premium": settings.vision_model_premium,
+        "vision_provider_default": "ollama",
         "confidence_review_threshold": settings.confidence_review_threshold,
         "high_value_review_threshold": settings.high_value_review_threshold,
         "notifications_enabled": getattr(settings, "notifications_enabled", False),
@@ -118,3 +120,9 @@ def get_current_settings():
 def get_claude_provider_readiness():
     """Return non-sensitive Claude configuration readiness."""
     return get_claude_readiness()
+
+
+@router.get("/vision-providers")
+def get_vision_providers():
+    """Return safe intake vision provider options and readiness metadata."""
+    return get_vision_provider_options()

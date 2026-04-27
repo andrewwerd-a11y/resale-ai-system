@@ -2249,6 +2249,7 @@ input[type=range] {{ accent-color:#7f77dd;cursor:pointer; }}
       <span style="font-size:11px;color:#888780">Fixed — do not change</span>
     </div>
   </div>
+  <div id="vision-provider-options" style="margin-top:14px"></div>
 </div>
 
 <div class="settings-section">
@@ -2384,14 +2385,16 @@ async function loadDbSettings() {{
 
 async function loadSettings() {{
   try {{
-    const [rCurrent, rRules, rPlatforms] = await Promise.all([
+    const [rCurrent, rRules, rPlatforms, rVisionProviders] = await Promise.all([
       fetch('/api/settings/current'),
       fetch('/api/settings/rules'),
       fetch('/api/settings/platforms'),
+      fetch('/api/settings/vision-providers'),
     ]);
     const current = await rCurrent.json();
     const rules = await rRules.json();
     const platforms = await rPlatforms.json();
+    const visionProviders = await rVisionProviders.json();
 
     document.getElementById('vision-model').value = current.vision_model_default || 'minicpm-v';
     document.getElementById('enrichment-enabled').checked = !!current.enrichment_enabled;
@@ -2423,6 +2426,17 @@ async function loadSettings() {{
           <span style="font-size:13px;color:#d4d2c8">${{cfg.label}}</span>
         </label>
         <span style="font-size:11px;color:#888780">${{cfg.note || (cfg.end_listing_supported ? 'API supported' : 'Manual takedown')}}</span>
+      </div>`).join('');
+
+    const vpDiv = document.getElementById('vision-provider-options');
+    vpDiv.innerHTML = (visionProviders.providers || []).map((provider) => `
+      <div style="padding:10px 12px;border:1px solid #2a2a27;border-radius:10px;background:#151513;margin-bottom:8px">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:12px">
+          <div style="font-size:13px;color:#f3efe6">${{provider.label}}${{provider.default ? ' · Default' : ''}}</div>
+          <div style="font-size:11px;color:#888780;text-transform:uppercase">${{provider.tier}} · ${{provider.status}}</div>
+        </div>
+        <div style="font-size:12px;color:#b8b4aa;margin-top:6px">${{provider.note || ''}}</div>
+        <div style="font-size:11px;color:#888780;margin-top:6px">${{provider.selectable ? 'Selectable for intake.' : (provider.selection_block_reason || 'Not selectable yet.')}}</div>
       </div>`).join('');
   }} catch(e) {{ console.error(e); }}
 }}

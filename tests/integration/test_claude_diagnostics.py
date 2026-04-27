@@ -161,3 +161,60 @@ def test_claude_suggest_mocked_success_still_returns_suggestion(monkeypatch, tmp
     body = resp.json()
     assert body["type"] == "description"
     assert body["suggestion"].startswith("Improved description.")
+
+
+def test_vision_providers_include_ollama_as_default(monkeypatch, tmp_path):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+    core_config.get_settings.cache_clear()
+    _configure_temp_db(monkeypatch, tmp_path)
+
+    with _client() as client:
+        resp = client.get("/api/settings/vision-providers")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["default_provider_id"] == "ollama"
+    ollama = next(provider for provider in body["providers"] if provider["id"] == "ollama")
+    assert ollama["default"] is True
+    assert ollama["active"] is True
+    assert ollama["status"] == "available"
+
+
+def test_vision_providers_include_claude_as_premium_not_selectable(monkeypatch, tmp_path):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "configured")
+    core_config.get_settings.cache_clear()
+    _configure_temp_db(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "apps.api.src.services.claude_diagnostics.is_anthropic_package_installed",
+        lambda: True,
+    )
+
+    with _client() as client:
+        resp = client.get("/api/settings/vision-providers")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    claude = next(provider for provider in body["providers"] if provider["id"] == "claude")
+    assert claude["tier"] == "premium"
+    assert claude["status"] == "planned"
+    assert claude["selectable"] is False
+    assert claude["implemented"] is False
+
+
+def test_claude_cannot_become_active_default_provider(monkeypatch, tmp_path):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "configured")
+    core_config.get_settings.cache_clear()
+    _configure_temp_db(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "apps.api.src.services.claude_diagnostics.is_anthropic_package_installed",
+        lambda: True,
+    )
+
+    with _client() as client:
+        current = client.get("/api/settings/current")
+        providers = client.get("/api/settings/vision-providers")
+
+    assert current.status_code == 200
+    assert providers.status_code == 200
+    assert current.json()["vision_provider_default"] == "ollama"
+    assert providers.json()["active_provider_id"] == "ollama"
