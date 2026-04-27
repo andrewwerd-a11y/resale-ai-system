@@ -689,6 +689,154 @@ def _image_paths_to_list(value) -> list[str]:
     return []
 
 
+def _hosted_photo_urls(value) -> list[str]:
+    return [p for p in _image_paths_to_list(value) if p.startswith("http://") or p.startswith("https://")]
+
+
+def _local_photo_paths(value) -> list[str]:
+    return [p for p in _image_paths_to_list(value) if not (p.startswith("http://") or p.startswith("https://"))]
+
+
+def _dedupe_preserve_order(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for value in values:
+        if value not in seen:
+            seen.add(value)
+            ordered.append(value)
+    return ordered
+
+
+@router.post("/{sku}/photos/host")
+def host_existing_photos(
+    sku: str,
+    dry_run: bool = False,
+    session: Session = Depends(get_session),
+):
+    """Upload one item's existing local photos to Cloudinary and persist hosted URLs."""
+    try:
+        assert_route_sku_allowed(sku, "items.host_existing_photos")
+        repo = ItemRepository(session)
+        item = repo.get_by_sku(sku)
+        if not item:
+            raise HTTPException(status_code=404, detail=f"Item {sku} not found")
+
+        paths = _image_paths_to_list(item.image_paths)
+        hosted_urls = _hosted_photo_urls(paths)
+        local_photo_paths = _local_photo_paths(paths)
+
+        if not local_photo_paths:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "sku": sku,
+                    "uploaded": 0,
+                    "already_hosted": len(hosted_urls),
+                    "hosted_photo_urls": hosted_urls,
+                    "needs_hosting": False,
+                    "dry_run": dry_run,
+                    "detail": "No local photo paths are available to host.",
+                },
+            )
+
+        from packages.ebay.src.photo_uploader import PhotoUploader
+
+        uploader = PhotoUploader()
+        if not uploader.is_configured():
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "sku": sku,
+                    "uploaded": 0,
+                    "already_hosted": len(hosted_urls),
+                    "hosted_photo_urls": hosted_urls,
+                    "needs_hosting": True,
+                    "dry_run": dry_run,
+                    "detail": "Cloudinary is not configured.",
+                },
+            )
+
+        local_files = [Path(p) for p in local_photo_paths]
+        missing_files = [str(path) for path in local_files if not path.exists()]
+        if missing_files:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "sku": sku,
+                    "uploaded": 0,
+                    "already_hosted": len(hosted_urls),
+                    "hosted_photo_urls": hosted_urls,
+                    "needs_hosting": True,
+                    "dry_run": dry_run,
+                    "detail": "Some local photo files do not exist.",
+                    "missing_photo_files": missing_files,
+                },
+            )
+
+        if dry_run:
+            return {
+                "sku": sku,
+                "uploaded": 0,
+                "already_hosted": len(hosted_urls),
+                "hosted_photo_urls": hosted_urls,
+                "needs_hosting": len(hosted_urls) == 0,
+                "dry_run": True,
+                "would_upload": [str(path) for path in local_files] if not hosted_urls else [],
+            }
+
+        if hosted_urls:
+            deduped_urls = _dedupe_preserve_order(hosted_urls)
+            if deduped_urls != hosted_urls:
+                item.image_paths = local_photo_paths + deduped_urls
+                repo.upsert(item)
+            return {
+                "sku": sku,
+                "uploaded": 0,
+                "already_hosted": len(deduped_urls),
+                "hosted_photo_urls": deduped_urls,
+                "needs_hosting": False,
+                "dry_run": False,
+            }
+
+        uploaded_urls: list[str] = []
+        for photo_path in local_files:
+            result = uploader.upload(photo_path)
+            if not result.ok or not result.value:
+                raise HTTPException(
+                    status_code=502,
+                    detail={
+                        "sku": sku,
+                        "uploaded": len(uploaded_urls),
+                        "already_hosted": 0,
+                        "hosted_photo_urls": uploaded_urls,
+                        "needs_hosting": True,
+                        "dry_run": False,
+                        "detail": result.error or "Photo hosting failed.",
+                        "code": result.error_code or "PHOTO_HOSTING_FAILED",
+                    },
+                )
+            uploaded_urls.append(str(result.value))
+
+        merged_paths = _dedupe_preserve_order(local_photo_paths + uploaded_urls)
+        item.image_paths = merged_paths
+        repo.upsert(item)
+
+        return {
+            "sku": sku,
+            "uploaded": len(uploaded_urls),
+            "already_hosted": 0,
+            "hosted_photo_urls": _hosted_photo_urls(merged_paths),
+            "needs_hosting": False,
+            "dry_run": False,
+        }
+    except E2ESafetyError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+    except HTTPException:
+        raise
+    except Exception as exc:
+        return JSONResponse(status_code=500, content={"detail": str(exc)})
+
+
 @router.delete("/{sku}/photos")
 def delete_photo(sku: str, body: PhotoUrlBody, session: Session = Depends(get_session)):
     """Remove a photo URL from image_paths (does not delete from Cloudinary)."""

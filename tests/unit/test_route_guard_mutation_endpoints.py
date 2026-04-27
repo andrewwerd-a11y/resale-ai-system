@@ -76,6 +76,7 @@ def test_single_sku_guarded_mutation_routes_allow_approved_and_block_non_approve
             "/api/items/{sku}/photos",
             {"files": [("files", ("p.jpg", b"fake", "image/jpeg"))]},
         ),
+        ("POST", "/api/items/{sku}/photos/host", {}),
         ("DELETE", "/api/items/{sku}/photos", {"json": {"url": "https://example.test/p.jpg"}}),
         ("POST", "/api/items/{sku}/photos/set-cover", {"json": {"url": "https://example.test/p.jpg"}}),
         (
@@ -152,4 +153,3 @@ def test_global_guarded_mutation_routes_block_non_approved_and_allow_approved(mo
 
             allowed = _request(client, method, path, **allowed_payload)
             assert allowed.status_code != 403
-
