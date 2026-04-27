@@ -209,6 +209,17 @@ def publish_item(sku: str, session: Session = Depends(get_session)):
         recovered_offer_saved = _persist_partial_publish_state(item, result, repo)
         auth_issue = result.details.get("auth_issue_code")
         body = str(result.details.get("body") or "")
+        if result.error_code == "INVALID_IMAGE_URL":
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "invalid_image_url",
+                    "message": result.error or "Invalid public image URL detected before eBay publish.",
+                    "invalid_image_urls": result.details.get("invalid_image_urls") or [],
+                    "blockers": result.details.get("blockers") or [],
+                    "next_action": "Host photos again or correct the stored hosted photo URLs before retrying publish.",
+                },
+            )
         if result.error_code == "AUTH_NOT_READY" or _looks_like_auth_failure(body) or _looks_like_auth_failure(str(result.error or "")):
             detail = classify_ebay_auth_failure(
                 status_code=401,

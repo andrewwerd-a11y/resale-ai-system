@@ -690,7 +690,9 @@ def _image_paths_to_list(value) -> list[str]:
 
 
 def _hosted_photo_urls(value) -> list[str]:
-    return [p for p in _image_paths_to_list(value) if p.startswith("http://") or p.startswith("https://")]
+    from packages.ebay.src.public_image_urls import extract_public_image_urls
+
+    return extract_public_image_urls(_image_paths_to_list(value))
 
 
 def _local_photo_paths(value) -> list[str]:

@@ -140,6 +140,32 @@ def test_publish_failure_does_not_write_listing_or_listed_status(monkeypatch, tm
     assert stats_calls == []
 
 
+def test_publish_invalid_image_url_returns_structured_error(monkeypatch, tmp_path):
+    monkeypatch.setenv("E2E_ROUTE_GUARD_ENABLED", "true")
+    monkeypatch.setenv("APPROVED_E2E_SKUS", "BK-000005,BK-000008,BK-000009")
+    _configure_temp_db(monkeypatch, tmp_path)
+    _seed_item("BK-000008", ItemStatus.APPROVED)
+
+    def fake_publish_fail(_self, _item):
+        return Result.failure(
+            "eBay image URL validation failed before publish.",
+            error_code="INVALID_IMAGE_URL",
+            blockers=["Invalid public image URL(s) detected before eBay publish."],
+            invalid_image_urls=["C:\\Users\\Andrew\\Desktop\\photo.jpg"],
+        )
+
+    monkeypatch.setattr("packages.ebay.src.inventory_client.EbayInventoryClient.publish_item", fake_publish_fail)
+
+    with _client() as client:
+        resp = client.post("/api/ebay/publish/BK-000008")
+
+    assert resp.status_code == 400
+    detail = resp.json().get("detail", {})
+    assert detail.get("code") == "invalid_image_url"
+    assert detail.get("invalid_image_urls") == ["C:\\Users\\Andrew\\Desktop\\photo.jpg"]
+    assert detail.get("message") == "eBay image URL validation failed before publish."
+
+
 def test_revise_failure_does_not_persist_local_update_or_sync(monkeypatch, tmp_path):
     monkeypatch.setenv("E2E_ROUTE_GUARD_ENABLED", "true")
     monkeypatch.setenv("APPROVED_E2E_SKUS", "BK-000005,BK-000008,BK-000009")

@@ -491,7 +491,7 @@ def push_to_ebay(sku: str, payload: PushPayload, session: Session = Depends(get_
         "condition": condition,
         "availability": {"shipToLocationAvailability": {"quantity": 1}},
     }
-    image_urls = _image_paths_to_urls(item.image_paths)
+    image_urls = _hosted_photo_urls(item.image_paths)
     if image_urls:
         inv_payload["product"]["imageUrls"] = image_urls[:12]
     if item.condition_notes:
@@ -842,7 +842,9 @@ def _build_revise_readiness(item) -> dict:
 
 
 def _hosted_photo_urls(value) -> list[str]:
-    return [url for url in _image_paths_to_urls(value) if url.startswith("http://") or url.startswith("https://")]
+    from packages.ebay.src.public_image_urls import extract_public_image_urls
+
+    return extract_public_image_urls(_image_paths_to_urls(value))
 
 
 def _preview_policy_ids(seller_policy_check: dict | None) -> dict[str, str]:

@@ -40,6 +40,11 @@ from packages.ebay.src.aspect_validation import validate_aspects
 from packages.ebay.src.auth import EbayAuth
 from packages.ebay.src import http_client as ebay_http
 from packages.ebay.src.photo_uploader import PhotoUploader
+from packages.ebay.src.public_image_urls import (
+    extract_public_image_urls,
+    looks_like_public_image_url_candidate,
+    normalize_public_image_urls,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +87,19 @@ class EbayInventoryClient:
                 issues=aspect_validation["issues"],
             )
 
-        image_paths = [Path(p) for p in (item.image_paths or [])]
+        raw_image_values = [str(path).strip() for path in (item.image_paths or []) if str(path).strip()]
+        hosted_photo_urls, invalid_hosted_urls = normalize_public_image_urls(
+            [value for value in raw_image_values if looks_like_public_image_url_candidate(value)]
+        )
+        if invalid_hosted_urls:
+            return Result.failure(
+                "eBay image URL validation failed before publish.",
+                error_code="INVALID_IMAGE_URL",
+                blockers=["Invalid public image URL(s) detected before eBay publish."],
+                invalid_image_urls=invalid_hosted_urls,
+            )
+
+        image_paths = [Path(p) for p in raw_image_values if not looks_like_public_image_url_candidate(p)]
 
         # Sort photos by quality before upload if photo_sort == "auto"
         if image_paths:
@@ -96,7 +113,18 @@ class EbayInventoryClient:
             except Exception as _exc:
                 logger.warning("Photo ranking skipped for %s: %s", item.sku, _exc)
 
-        photo_urls = self.uploader.upload_all(image_paths) if image_paths else []
+        if hosted_photo_urls:
+            photo_urls = hosted_photo_urls
+        else:
+            uploaded_photo_urls = self.uploader.upload_all(image_paths) if image_paths else []
+            photo_urls, invalid_uploaded_urls = normalize_public_image_urls([str(url) for url in uploaded_photo_urls])
+            if invalid_uploaded_urls:
+                return Result.failure(
+                    "eBay image URL validation failed before publish.",
+                    error_code="INVALID_IMAGE_URL",
+                    blockers=["Invalid public image URL(s) detected before eBay publish."],
+                    invalid_image_urls=invalid_uploaded_urls,
+                )
 
         try:
             publish_result = self._publish_via_api(item, photo_urls)
@@ -349,8 +377,13 @@ class EbayInventoryClient:
             "description": item.description_final or item.title_final or "",
             "aspects": self._build_item_specifics(item, template),
         }
-        if photo_urls:
-            product["imageUrls"] = photo_urls[:12]
+        normalized_photo_urls, invalid_photo_urls = normalize_public_image_urls([str(url) for url in photo_urls])
+        if invalid_photo_urls:
+            raise ValueError(
+                f"Invalid public image URL(s): {', '.join(str(url) for url in invalid_photo_urls)}"
+            )
+        if normalized_photo_urls:
+            product["imageUrls"] = normalized_photo_urls[:12]
 
         payload: dict = {
             "product": product,
@@ -435,6 +468,9 @@ class EbayInventoryClient:
             if v:
                 aspects[k] = [str(v)]
         return aspects
+
+    def extract_hosted_photo_urls(self, values: list[str]) -> list[str]:
+        return extract_public_image_urls([str(value) for value in values])
 
     def _build_offer_payload(
         self,

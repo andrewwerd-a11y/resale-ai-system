@@ -14,6 +14,7 @@ from packages.ebay.src.aspect_validation import validate_aspects
 from packages.ebay.src.inventory_client import CONDITION_MAP as EBAY_CONDITION_MAP
 from packages.ebay.src.inventory_client import EbayInventoryClient
 from packages.ebay.src.photo_uploader import PhotoUploader
+from packages.ebay.src.public_image_urls import extract_public_image_urls
 from packages.testing.src.e2e_guard import is_e2e_sku_allowed, is_route_guard_enabled
 
 
@@ -157,7 +158,7 @@ def evaluate_publish_readiness(
         )
 
     image_paths = [str(path).strip() for path in (item.image_paths or []) if str(path).strip()]
-    hosted_photo_urls = [path for path in image_paths if path.startswith("http://") or path.startswith("https://")]
+    hosted_photo_urls = extract_public_image_urls(image_paths)
     local_photo_candidates = [path for path in image_paths if path not in hosted_photo_urls]
     local_photo_files = [path for path in local_photo_candidates if Path(path).is_file()]
     missing_photo_files = [path for path in local_photo_candidates if not Path(path).is_file()]

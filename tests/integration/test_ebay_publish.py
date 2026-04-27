@@ -77,6 +77,21 @@ def test_publish_item_returns_photo_urls(test_session):
     assert result.value["photo_urls"] == expected_photos
 
 
+def test_build_inventory_payload_normalizes_escaped_cloudinary_url():
+    client = EbayInventoryClient()
+    escaped_url = "https:\\\\res.cloudinary.com\\dhi6ll8la\\image\\upload\\v1\\BK-000008-01.jpg"
+    item = make_clothing_item(
+        sku="CL-000099",
+        image_paths=[escaped_url],
+    )
+
+    payload = client._build_inventory_payload(item, [escaped_url])
+
+    assert payload["product"]["imageUrls"] == [
+        "https://res.cloudinary.com/dhi6ll8la/image/upload/v1/BK-000008-01.jpg"
+    ]
+
+
 def test_unconfigured_client_returns_failure():
     client = EbayInventoryClient.__new__(EbayInventoryClient)
     mock_auth = MagicMock()
@@ -237,6 +252,79 @@ def test_publish_item_blocks_invalid_overlong_aspect_before_upload():
     assert not result.ok
     assert result.error_code == "ASPECT_VALIDATION"
     assert any("Aspect 'Theme' value exceeds eBay's 65-character limit" in blocker for blocker in result.details["blockers"])
+
+
+def test_publish_item_uses_existing_hosted_urls_without_windows_path_conversion(monkeypatch):
+    client = EbayInventoryClient()
+    client.auth.settings.ebay_sandbox_app_id = "app-id"
+    client.auth.settings.ebay_sandbox_cert_id = "cert-id"
+    client.auth.settings.ebay_sandbox_user_token = "fake-token"
+    monkeypatch.setattr(
+        client.auth,
+        "resolve_user_token",
+        lambda: {"token": "fake-token", "issue_code": None},
+    )
+    client.auth.settings.ebay_environment = "sandbox"
+
+    def _fail_upload(_paths):
+        raise AssertionError("hosted photo URLs should bypass Cloudinary upload during publish")
+
+    monkeypatch.setattr(client.uploader, "upload_all", _fail_upload)
+
+    captured: dict[str, list[str]] = {}
+
+    def fake_publish(item, photo_urls):
+        captured["photo_urls"] = list(photo_urls)
+        return {
+            "listing_id": "LISTING-1",
+            "listing_url": "https://www.sandbox.ebay.com/itm/LISTING-1",
+            "offer_id": "OFFER-1",
+        }
+
+    monkeypatch.setattr(client, "_publish_via_api", fake_publish)
+
+    hosted_url = "https://res.cloudinary.com/dhi6ll8la/image/upload/v1/BK-000008-01.jpg"
+    item = make_clothing_item(
+        sku="BK-000008",
+        image_paths=[
+            r"C:\Users\Andrew\Desktop\resale-ai-system\photos\BK-000008-01.jpg",
+            hosted_url,
+        ],
+    )
+    result = client.publish_item(item)
+
+    assert result.ok
+    assert captured["photo_urls"] == [hosted_url]
+    assert result.value["photo_urls"] == [hosted_url]
+
+
+def test_publish_item_rejects_non_public_image_url_before_mutation(monkeypatch):
+    client = EbayInventoryClient()
+    client.auth.settings.ebay_sandbox_app_id = "app-id"
+    client.auth.settings.ebay_sandbox_cert_id = "cert-id"
+    client.auth.settings.ebay_sandbox_user_token = "fake-token"
+    monkeypatch.setattr(
+        client.auth,
+        "resolve_user_token",
+        lambda: {"token": "fake-token", "issue_code": None},
+    )
+    client.auth.settings.ebay_environment = "sandbox"
+    monkeypatch.setattr(client.uploader, "upload_all", lambda _paths: [r"C:\Users\Andrew\Desktop\photo.jpg"])
+    monkeypatch.setattr(
+        client,
+        "_publish_via_api",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("publish API should not run for invalid image URLs")),
+    )
+
+    item = make_clothing_item(
+        sku="CL-009998",
+        image_paths=[r"C:\Users\Andrew\Desktop\photo.jpg"],
+    )
+    result = client.publish_item(item)
+
+    assert not result.ok
+    assert result.error_code == "INVALID_IMAGE_URL"
+    assert result.details["invalid_image_urls"] == [r"C:\Users\Andrew\Desktop\photo.jpg"]
 
 
 def test_publish_item_recovers_existing_offer_and_continues(monkeypatch):

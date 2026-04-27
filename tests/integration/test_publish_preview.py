@@ -180,3 +180,28 @@ def test_publish_preview_shows_publish_existing_offer_plan(monkeypatch, tmp_path
     assert body["existing_offer_id_detected"] is True
     assert body["planned_action"] == "publish_existing_offer"
     assert body["listing_id_missing"] is True
+
+
+def test_publish_preview_normalizes_escaped_hosted_cloudinary_urls(monkeypatch, tmp_path):
+    monkeypatch.delenv("E2E_ROUTE_GUARD_ENABLED", raising=False)
+    monkeypatch.delenv("APPROVED_E2E_SKUS", raising=False)
+    monkeypatch.setenv("EBAY_FULFILLMENT_POLICY_ID", "fulfillment-1")
+    monkeypatch.setenv("EBAY_PAYMENT_POLICY_ID", "payment-1")
+    monkeypatch.setenv("EBAY_RETURN_POLICY_ID", "return-1")
+    _configure_temp_db(monkeypatch, tmp_path)
+    _block_mutations(monkeypatch)
+    _seed_item(
+        image_paths=["https:\\\\res.cloudinary.com\\dhi6ll8la\\image\\upload\\v1\\BK-000008-01.jpg"],
+    )
+
+    with _client() as client:
+        resp = client.get("/api/listings/BK-000005/publish-preview")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["photo_input_summary"]["hosted_photo_urls"] == [
+        "https://res.cloudinary.com/dhi6ll8la/image/upload/v1/BK-000008-01.jpg"
+    ]
+    assert body["inventory_item_payload_preview"]["product"]["imageUrls"] == [
+        "https://res.cloudinary.com/dhi6ll8la/image/upload/v1/BK-000008-01.jpg"
+    ]
