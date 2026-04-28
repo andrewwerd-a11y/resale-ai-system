@@ -19,6 +19,7 @@ from packages.data.src.models.publish_repair_decision_record import PublishRepai
 from packages.data.src.models.publish_repair_plan_record import PublishRepairPlanRecord
 from packages.data.src.repositories.item_repo import ItemRepository
 from packages.domain.src.entities.item import Item
+from packages.ebay.src.inventory_client import CATEGORY_MAP, CONDITION_MAP as EBAY_CONDITION_MAP
 from packages.ebay.src.public_image_urls import (
     extract_public_image_urls,
     looks_like_public_image_url_candidate,
@@ -33,6 +34,29 @@ ACTIVE_REPAIR_STATUSES = {
     "needs_manual_review",
     "fixed_pending_recheck",
     "ready_to_retry",
+}
+
+CONDITION_ID_LABELS = {
+    "1000": "New",
+    "1500": "New other",
+    "2000": "New with defects",
+    "2500": "New other",
+    "3000": "Used",
+    "4000": "Very Good",
+    "5000": "Used Good",
+    "6000": "Acceptable",
+    "7000": "For parts or not working",
+}
+
+CONDITION_LABEL_FALLBACKS = {
+    "NEW": ["1000", "1500"],
+    "NEW_OTHER": ["1500", "1000"],
+    "NEW_WITH_DEFECTS": ["2000", "1500"],
+    "LIKE_NEW": ["3000", "4000"],
+    "VERY_GOOD": ["4000", "3000"],
+    "USED_GOOD": ["3000", "4000"],
+    "USED_ACCEPTABLE": ["6000", "5000", "3000"],
+    "FOR_PARTS_OR_NOT_WORKING": ["7000"],
 }
 
 
@@ -102,13 +126,15 @@ class DeterministicRepairSuggestionProvider(RepairSuggestionProvider):
 
         if classified_error_code == "invalid_category_condition":
             allowed_condition_ids = expected_value.get("allowed_condition_ids") or []
+            suggested_value = _condition_suggestion_payload(item, allowed_condition_ids)
             return {
                 "affected_field": "condition_id",
-                "suggested_value": allowed_condition_ids[0] if allowed_condition_ids else None,
-                "suggested_actions": [
-                    "Choose an allowed condition ID for the exact eBay category.",
-                    "If no listed condition matches the item, review the category assignment manually.",
-                ],
+                "suggested_value": suggested_value,
+                "suggested_actions": _condition_suggested_actions(
+                    item,
+                    expected_value,
+                    suggested_value,
+                ),
                 "confidence": "medium" if allowed_condition_ids else "low",
                 "safe_to_auto_apply": False,
                 "risk_level": "high",
@@ -646,33 +672,59 @@ def draft_fix_for_sku(session: Session, sku: str) -> dict:
     if not item:
         return {"sku": normalized, "drafts": [], "status": "missing_item"}
 
-    provider = DeterministicRepairSuggestionProvider()
-    plans = session.exec(
-        select(PublishRepairPlanRecord)
-        .where(PublishRepairPlanRecord.sku == normalized)
-        .order_by(PublishRepairPlanRecord.updated_at.desc())
-    ).all()
+    readiness = evaluate_publish_readiness(item).as_dict()
+    compatibility = evaluate_publish_compatibility(item, strict_condition_policy=True)
+    current_blockers = list(dict.fromkeys(readiness["blockers"] + compatibility["blockers"]))
+    generated_plans = _upsert_current_blocker_plans(
+        session,
+        item,
+        readiness=readiness,
+        compatibility=compatibility,
+    )
 
     drafted = []
-    for plan in plans:
-        suggestion = provider.draft(item, plan)
-        if suggestion is None:
-            continue
-        plan.suggested_value_json = _dumps(suggestion.get("suggested_value"))
-        plan.suggested_actions_json = _dumps(suggestion.get("suggested_actions"))
-        plan.safe_to_auto_apply = bool(suggestion.get("safe_to_auto_apply"))
-        plan.risk_level = str(suggestion.get("risk_level") or plan.risk_level or "medium")
-        plan.source = "model_draft" if suggestion.get("source") == "model_draft" else provider.source
-        plan.status = "draft_fix_available"
-        plan.updated_at = datetime.utcnow()
-        session.add(plan)
-        drafted.append(_serialize_plan(plan) | {"confidence": suggestion.get("confidence", "medium")})
+    if generated_plans:
+        for plan in generated_plans:
+            plan.status = "draft_fix_available"
+            plan.updated_at = datetime.utcnow()
+            session.add(plan)
+            drafted.append(_serialize_plan(plan) | {"confidence": "medium"})
+    else:
+        provider = DeterministicRepairSuggestionProvider()
+        plans = session.exec(
+            select(PublishRepairPlanRecord)
+            .where(PublishRepairPlanRecord.sku == normalized)
+            .order_by(PublishRepairPlanRecord.updated_at.desc())
+        ).all()
+        for plan in plans:
+            suggestion = provider.draft(item, plan)
+            if suggestion is None:
+                continue
+            plan.suggested_value_json = _dumps(suggestion.get("suggested_value"))
+            plan.suggested_actions_json = _dumps(suggestion.get("suggested_actions"))
+            plan.safe_to_auto_apply = bool(suggestion.get("safe_to_auto_apply"))
+            plan.risk_level = str(suggestion.get("risk_level") or plan.risk_level or "medium")
+            plan.source = "model_draft" if suggestion.get("source") == "model_draft" else provider.source
+            plan.status = "draft_fix_available"
+            plan.updated_at = datetime.utcnow()
+            session.add(plan)
+            drafted.append(_serialize_plan(plan) | {"confidence": suggestion.get("confidence", "medium")})
 
     session.commit()
+    if drafted:
+        status = "draft_fix_available"
+    elif not current_blockers:
+        status = "no_blockers"
+    else:
+        status = "unresolved_blockers"
+
     return {
         "sku": normalized,
-        "status": "draft_fix_available" if drafted else "no_draft_available",
+        "status": status,
         "drafts": drafted,
+        "readiness": readiness,
+        "compatibility": compatibility,
+        "blockers": current_blockers,
     }
 
 
@@ -695,7 +747,7 @@ def apply_draft_fix(
         return {"ok": False, "status_code": 404, "detail": f"Repair plan {repair_plan_id} not found for {normalized}"}
     if not approved:
         return {"ok": False, "status_code": 400, "detail": "Repair approval is required before applying a draft fix."}
-    if str(plan.risk_level) == "high" and edited_value is None and not plan.suggested_value_json:
+    if str(plan.risk_level) == "high" and edited_value is None:
         return {"ok": False, "status_code": 400, "detail": "High-risk repair plans require an explicit approved value before apply."}
 
     before_value = _field_snapshot(item, str(plan.affected_field or ""))
@@ -760,7 +812,17 @@ def bulk_draft_fixes(
         detail = draft_fix_for_sku(session, sku)
         drafts = detail.get("drafts", [])
         if not drafts:
-            skipped.append({"sku": sku, "reason": detail.get("status", "no_draft_available")})
+            status = str(detail.get("status") or "no_draft_available")
+            if status == "unresolved_blockers":
+                unresolved_errors.append(
+                    {
+                        "sku": sku,
+                        "reason": "unresolved_blockers",
+                        "blockers": detail.get("blockers", []),
+                    }
+                )
+            else:
+                skipped.append({"sku": sku, "reason": status})
             continue
         for draft in drafts:
             entry = {
@@ -981,6 +1043,219 @@ def _plans_from_blockers(item: Item, blockers: list[str], readiness: dict, compa
     return plans
 
 
+def _plans_from_current_state(item: Item, readiness: dict, compatibility: dict) -> list[dict]:
+    plans: list[dict] = []
+    compatibility_checks = {
+        str(check.get("name") or ""): check for check in compatibility.get("checks", [])
+    }
+    readiness_checks = {
+        str(check.get("name") or ""): check for check in readiness.get("checks", [])
+    }
+
+    condition_check = compatibility_checks.get("category_condition_policy")
+    if condition_check and not condition_check.get("ok"):
+        context = dict(condition_check.get("context") or {})
+        allowed_condition_ids = [str(value) for value in context.get("allowed_condition_ids") or []]
+        suggested_value = _condition_suggestion_payload(item, allowed_condition_ids)
+        plans.append(
+            _plan_payload(
+                item,
+                affected_field="condition_id",
+                risk_level="high",
+                safe_to_auto_apply=False,
+                requires_review=True,
+                retry_allowed=False,
+                source="readiness_category_policy",
+                repair_layer="category_compatibility",
+                classified_error_code="invalid_category_condition",
+                current_value={
+                    "category_id": context.get("category_id") or item.ebay_category_id or "",
+                    "condition_id": context.get("condition_id") or item.condition_id or "",
+                },
+                expected_value={
+                    "category_id": context.get("category_id") or item.ebay_category_id or "",
+                    "allowed_condition_ids": allowed_condition_ids,
+                    "allowed_condition_options": _condition_options(allowed_condition_ids),
+                    "policy_source": str(context.get("source") or ""),
+                    "internal_condition_key": _infer_internal_condition_key(item),
+                },
+                suggested_value=suggested_value,
+                suggested_actions=_condition_suggested_actions(item, context, suggested_value),
+            )
+        )
+
+    public_image_check = compatibility_checks.get("public_image_urls")
+    if public_image_check and not public_image_check.get("ok") and public_image_check.get("blocking"):
+        context = dict(public_image_check.get("context") or {})
+        malformed_candidates = list(context.get("malformed_public_candidates") or [])
+        if malformed_candidates:
+            plans.append(
+                _plan_payload(
+                    item,
+                    affected_field="image_paths",
+                    risk_level="low",
+                    safe_to_auto_apply=True,
+                    requires_review=False,
+                    retry_allowed=False,
+                    source="readiness_image_validation",
+                    repair_layer="photo_hosting",
+                    classified_error_code="invalid_image_url",
+                    current_value={"image_paths": list(item.image_paths or [])},
+                    expected_value={"image_urls_format": "https://public-host/path.jpg"},
+                    suggested_value={
+                        "normalized_urls": [normalize_public_image_url(u) for u in extract_public_image_urls(item.image_paths or [])]
+                    },
+                    suggested_actions=[
+                        "Repair malformed hosted public image URLs.",
+                        "Keep local file paths stored locally, but exclude them from eBay imageUrls.",
+                    ],
+                )
+            )
+
+    missing_required = _missing_required_fields(readiness_checks)
+    for field_name in missing_required:
+        plan_payload = _plan_for_missing_required_field(item, field_name)
+        if plan_payload is not None:
+            plans.append(plan_payload)
+
+    category_template_check = readiness_checks.get("category_template_validation")
+    if category_template_check and not category_template_check.get("ok"):
+        context = dict(category_template_check.get("context") or {})
+        for field_name in context.get("missing_required") or []:
+            plans.append(
+                _plan_payload(
+                    item,
+                    affected_field="item_specifics",
+                    risk_level="high",
+                    safe_to_auto_apply=False,
+                    requires_review=True,
+                    retry_allowed=False,
+                    source="readiness_category_template",
+                    repair_layer="category_template",
+                    classified_error_code="missing_required_aspect",
+                    current_value={"aspect": str(field_name), "value": _current_item_specific_value(item, str(field_name))},
+                    expected_value={"aspect": str(field_name), "required": True},
+                    suggested_value={"aspect": str(field_name), "allowed_options": []},
+                    suggested_actions=[f"Choose a value for required aspect '{field_name}' before retrying publish."],
+                )
+            )
+        for field_name in context.get("invalid_fields") or []:
+            plans.append(
+                _plan_payload(
+                    item,
+                    affected_field="item_specifics",
+                    risk_level="medium",
+                    safe_to_auto_apply=False,
+                    requires_review=True,
+                    retry_allowed=False,
+                    source="readiness_category_template",
+                    repair_layer="category_template",
+                    classified_error_code="invalid_aspect_value",
+                    current_value={"aspect": str(field_name), "value": _current_item_specific_value(item, str(field_name))},
+                    expected_value={"aspect": str(field_name)},
+                    suggested_value={"aspect": str(field_name)},
+                    suggested_actions=[f"Repair invalid value for aspect '{field_name}' before retrying publish."],
+                )
+            )
+
+    aspect_check = readiness_checks.get("aspect_value_lengths")
+    if aspect_check and not aspect_check.get("ok"):
+        for issue in dict(aspect_check.get("context") or {}).get("issues") or []:
+            aspect_name = str(issue.get("aspect") or "item_specifics")
+            plans.append(
+                _plan_payload(
+                    item,
+                    affected_field="item_specifics",
+                    risk_level="high",
+                    safe_to_auto_apply=False,
+                    requires_review=True,
+                    retry_allowed=False,
+                    source="readiness_aspect_validation",
+                    repair_layer="category_template",
+                    classified_error_code="invalid_aspect_value",
+                    current_value={"aspect": aspect_name, "value": issue.get("value")},
+                    expected_value={"aspect": aspect_name, "max_length": issue.get("max_length")},
+                    suggested_value={"aspect": aspect_name},
+                    suggested_actions=[f"Shorten or repair aspect '{aspect_name}' before retrying publish."],
+                )
+            )
+
+    return _dedupe_plan_payloads(plans)
+
+
+def _upsert_current_blocker_plans(
+    session: Session,
+    item: Item,
+    *,
+    readiness: dict,
+    compatibility: dict,
+) -> list[PublishRepairPlanRecord]:
+    payloads = _plans_from_current_state(item, readiness, compatibility)
+    if not payloads:
+        return []
+
+    existing_plans = session.exec(
+        select(PublishRepairPlanRecord)
+        .where(PublishRepairPlanRecord.sku == str(item.sku or "").upper())
+        .order_by(PublishRepairPlanRecord.updated_at.desc())
+    ).all()
+    updated_plans: list[PublishRepairPlanRecord] = []
+
+    for payload in payloads:
+        current_value = payload.get("current_value")
+        matching_plan = next(
+            (
+                plan
+                for plan in existing_plans
+                if str(plan.affected_field or "") == str(payload.get("affected_field") or "")
+                and str(plan.classified_error_code or "") == str(payload.get("classified_error_code") or "")
+                and str(plan.repair_layer or "") == str(payload.get("repair_layer") or "")
+                and _loads(plan.current_value_json, {}) == current_value
+                and str(plan.status or "") in ACTIVE_REPAIR_STATUSES
+            ),
+            None,
+        )
+
+        if matching_plan is None:
+            matching_plan = PublishRepairPlanRecord(
+                sku=str(item.sku or "").upper(),
+                publish_attempt_id=None,
+                status="needs_manual_review" if payload["requires_review"] else "open",
+                affected_field=str(payload.get("affected_field") or ""),
+                current_value_json=_dumps(payload.get("current_value")),
+                expected_value_json=_dumps(payload.get("expected_value")),
+                suggested_value_json=_dumps(payload.get("suggested_value")),
+                suggested_actions_json=_dumps(payload.get("suggested_actions")),
+                risk_level=str(payload.get("risk_level") or "medium"),
+                safe_to_auto_apply=bool(payload.get("safe_to_auto_apply")),
+                requires_review=bool(payload.get("requires_review", True)),
+                retry_allowed=bool(payload.get("retry_allowed", False)),
+                source=str(payload.get("source") or "readiness_blocker"),
+                repair_layer=str(payload.get("repair_layer") or ""),
+                classified_error_code=str(payload.get("classified_error_code") or ""),
+            )
+            session.add(matching_plan)
+            existing_plans.append(matching_plan)
+        else:
+            matching_plan.status = "needs_manual_review" if payload["requires_review"] else "open"
+            matching_plan.expected_value_json = _dumps(payload.get("expected_value"))
+            matching_plan.suggested_value_json = _dumps(payload.get("suggested_value"))
+            matching_plan.suggested_actions_json = _dumps(payload.get("suggested_actions"))
+            matching_plan.risk_level = str(payload.get("risk_level") or matching_plan.risk_level or "medium")
+            matching_plan.safe_to_auto_apply = bool(payload.get("safe_to_auto_apply"))
+            matching_plan.requires_review = bool(payload.get("requires_review", True))
+            matching_plan.retry_allowed = bool(payload.get("retry_allowed", False))
+            matching_plan.source = str(payload.get("source") or matching_plan.source or "readiness_blocker")
+            matching_plan.repair_layer = str(payload.get("repair_layer") or matching_plan.repair_layer or "")
+            matching_plan.classified_error_code = str(payload.get("classified_error_code") or matching_plan.classified_error_code or "")
+
+        matching_plan.updated_at = datetime.utcnow()
+        updated_plans.append(matching_plan)
+
+    session.commit()
+    return updated_plans
+
+
 def _plan_payload(
     item: Item,
     *,
@@ -1099,8 +1374,28 @@ def _apply_plan_to_item(item: Item, plan: PublishRepairPlanRecord, new_value: An
         return {"ok": False, "status_code": 400, "detail": "High-risk repair plans require an explicit replacement value."}
 
     if field == "condition_id":
+        if isinstance(new_value, dict):
+            new_value = new_value.get("condition_id")
         item.condition_id = str(new_value if new_value is not None else "").strip()
         return {"ok": True, "after_value": {"condition_id": item.condition_id}}
+
+    if field == "title_final":
+        item.title_final = str(new_value if new_value is not None else "").strip()
+        return {"ok": True, "after_value": {"title_final": item.title_final}}
+
+    if field == "description_final":
+        item.description_final = str(new_value if new_value is not None else "").strip()
+        return {"ok": True, "after_value": {"description_final": item.description_final}}
+
+    if field == "list_price":
+        item.list_price = float(new_value) if new_value not in (None, "") else None
+        return {"ok": True, "after_value": {"list_price": item.list_price}}
+
+    if field == "ebay_category_id":
+        if isinstance(new_value, dict):
+            new_value = new_value.get("ebay_category_id")
+        item.ebay_category_id = str(new_value if new_value is not None else "").strip()
+        return {"ok": True, "after_value": {"ebay_category_id": item.ebay_category_id}}
 
     if field == "offer_id":
         item.offer_id = str(new_value if new_value is not None else "").strip()
@@ -1131,6 +1426,14 @@ def _apply_plan_to_item(item: Item, plan: PublishRepairPlanRecord, new_value: An
 def _field_snapshot(item: Item, field: str) -> dict:
     if field == "condition_id":
         return {"condition_id": item.condition_id or ""}
+    if field == "title_final":
+        return {"title_final": item.title_final or ""}
+    if field == "description_final":
+        return {"description_final": item.description_final or ""}
+    if field == "list_price":
+        return {"list_price": item.list_price}
+    if field == "ebay_category_id":
+        return {"ebay_category_id": item.ebay_category_id or ""}
     if field == "offer_id":
         return {"offer_id": item.offer_id or ""}
     if field in {"imageUrls", "image_paths"}:
@@ -1145,6 +1448,195 @@ def _current_item_specific_value(item: Item, aspect_name: str) -> Any:
     if isinstance(values, dict):
         return values.get(aspect_name)
     return None
+
+
+def _missing_required_fields(readiness_checks: dict[str, dict]) -> list[str]:
+    fields = []
+    for name, check in readiness_checks.items():
+        if name.startswith("required_") and not check.get("ok"):
+            fields.append(name.removeprefix("required_"))
+    return fields
+
+
+def _plan_for_missing_required_field(item: Item, field_name: str) -> dict | None:
+    if field_name == "title" and (item.title_raw or "").strip():
+        return _plan_payload(
+            item,
+            affected_field="title_final",
+            risk_level="high",
+            safe_to_auto_apply=False,
+            requires_review=True,
+            retry_allowed=False,
+            source="readiness_required_field",
+            repair_layer="content_completeness",
+            classified_error_code="missing_required_title",
+            current_value={"title_final": item.title_final or ""},
+            expected_value={"title_source": "title_raw"},
+            suggested_value={"title_final": str(item.title_raw or "").strip()[:80]},
+            suggested_actions=["Review the suggested title and approve it before retrying publish."],
+        )
+    if field_name == "description" and ((item.title_final or item.title_raw or "").strip()):
+        return _plan_payload(
+            item,
+            affected_field="description_final",
+            risk_level="high",
+            safe_to_auto_apply=False,
+            requires_review=True,
+            retry_allowed=False,
+            source="readiness_required_field",
+            repair_layer="content_completeness",
+            classified_error_code="missing_required_description",
+            current_value={"description_final": item.description_final or ""},
+            expected_value={"description_source": "title_fallback"},
+            suggested_value={"description_final": str(item.title_final or item.title_raw or "").strip()},
+            suggested_actions=["Review the fallback description and approve it before retrying publish."],
+        )
+    if field_name == "price" and item.estimated_price:
+        return _plan_payload(
+            item,
+            affected_field="list_price",
+            risk_level="high",
+            safe_to_auto_apply=False,
+            requires_review=True,
+            retry_allowed=False,
+            source="readiness_required_field",
+            repair_layer="offer_basics",
+            classified_error_code="missing_required_price",
+            current_value={"list_price": item.list_price},
+            expected_value={"price_source": "estimated_price"},
+            suggested_value={"list_price": round(float(item.estimated_price), 2)},
+            suggested_actions=["Review the suggested listing price and approve it before retrying publish."],
+        )
+    if field_name == "category_id":
+        suggested_category_id = str(CATEGORY_MAP.get(str(item.category_key or "").lower(), "") or "")
+        if suggested_category_id:
+            return _plan_payload(
+                item,
+                affected_field="ebay_category_id",
+                risk_level="high",
+                safe_to_auto_apply=False,
+                requires_review=True,
+                retry_allowed=False,
+                source="readiness_required_field",
+                repair_layer="category_compatibility",
+                classified_error_code="missing_required_category_id",
+                current_value={"ebay_category_id": item.ebay_category_id or "", "category_key": item.category_key or ""},
+                expected_value={"category_key": item.category_key or "", "suggested_category_id": suggested_category_id},
+                suggested_value={"ebay_category_id": suggested_category_id},
+                suggested_actions=["Review the suggested category and approve it before retrying publish."],
+            )
+    if field_name == "condition_id":
+        condition_payload = _condition_suggestion_payload(item, [])
+        if condition_payload.get("allowed_options") or condition_payload.get("recommended_value"):
+            return _plan_payload(
+                item,
+                affected_field="condition_id",
+                risk_level="high",
+                safe_to_auto_apply=False,
+                requires_review=True,
+                retry_allowed=False,
+                source="readiness_required_field",
+                repair_layer="category_compatibility",
+                classified_error_code="missing_required_condition_id",
+                current_value={"condition_id": item.condition_id or "", "condition_label": item.condition_label or ""},
+                expected_value={"condition_label": item.condition_label or "", "internal_condition_key": _infer_internal_condition_key(item)},
+                suggested_value=condition_payload,
+                suggested_actions=["Choose and approve an eBay condition ID before retrying publish."],
+            )
+    return None
+
+
+def _infer_internal_condition_key(item: Item) -> str:
+    condition_id = str(item.condition_id or "").strip()
+    if condition_id in EBAY_CONDITION_MAP:
+        return str(EBAY_CONDITION_MAP[condition_id] or "").strip().upper()
+
+    condition_label = str(item.condition_label or "").strip().lower()
+    if "very good" in condition_label:
+        return "VERY_GOOD"
+    if "like new" in condition_label or "excellent" in condition_label:
+        return "LIKE_NEW"
+    if "acceptable" in condition_label or "fair" in condition_label:
+        return "USED_ACCEPTABLE"
+    if "parts" in condition_label:
+        return "FOR_PARTS_OR_NOT_WORKING"
+    if "new" in condition_label:
+        return "NEW"
+    if "good" in condition_label or condition_label:
+        return "USED_GOOD"
+    return ""
+
+
+def _condition_options(condition_ids: list[str]) -> list[dict]:
+    seen: set[str] = set()
+    options = []
+    for condition_id in condition_ids:
+        normalized = str(condition_id or "").strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        options.append(
+            {
+                "id": normalized,
+                "name": CONDITION_ID_LABELS.get(normalized, "Unknown"),
+            }
+        )
+    return options
+
+
+def _condition_suggestion_payload(item: Item, allowed_condition_ids: list[str]) -> dict:
+    normalized_allowed_ids = [str(value or "").strip() for value in allowed_condition_ids if str(value or "").strip()]
+    internal_condition_key = _infer_internal_condition_key(item)
+    likely_ids = [
+        condition_id
+        for condition_id in CONDITION_LABEL_FALLBACKS.get(internal_condition_key, [])
+        if not normalized_allowed_ids or condition_id in normalized_allowed_ids
+    ]
+    payload = {
+        "allowed_options": _condition_options(normalized_allowed_ids),
+        "likely_options": _condition_options(likely_ids),
+        "recommended_value": None,
+        "internal_condition_key": internal_condition_key,
+    }
+    if not normalized_allowed_ids and likely_ids:
+        payload["allowed_options"] = _condition_options(likely_ids)
+    return payload
+
+
+def _condition_suggested_actions(item: Item, policy_context: dict, suggestion_payload: dict) -> list[str]:
+    actions = [
+        "Choose one allowed condition ID for the exact eBay category.",
+        "If the item does not fit any allowed condition, review whether the category is wrong.",
+    ]
+    likely_ids = [option["id"] for option in suggestion_payload.get("likely_options") or []]
+    if _infer_internal_condition_key(item) == "USED_GOOD" and "3000" in likely_ids:
+        actions.append("Use 3000 as the safer generic Used fallback when the item does not clearly qualify for a stronger condition.")
+    if _infer_internal_condition_key(item) == "USED_GOOD" and "4000" in likely_ids:
+        actions.append("Choose 4000 only if the item truly qualifies as Very Good.")
+    if not policy_context.get("source"):
+        actions.append("TODO: add a category condition metadata lookup seam if richer condition labels become available.")
+    return actions
+
+
+def _dedupe_plan_payloads(plans: list[dict]) -> list[dict]:
+    deduped: list[dict] = []
+    seen: set[tuple[str, str, str, str]] = set()
+    for plan in plans:
+        key = (
+            str(plan.get("affected_field") or ""),
+            str(plan.get("classified_error_code") or ""),
+            str(plan.get("repair_layer") or ""),
+            _dumps(plan.get("current_value")) or "",
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(plan)
+    return deduped
+
+
+def _has_draftable_current_blockers(readiness: dict, compatibility: dict) -> bool:
+    return bool(readiness.get("blockers") or compatibility.get("blockers"))
 
 
 def _extract_ebay_error_id(text: str) -> str:

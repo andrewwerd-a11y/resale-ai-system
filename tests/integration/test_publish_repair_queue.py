@@ -94,6 +94,10 @@ def _decisions_for_sku(sku: str) -> list[PublishRepairDecisionRecord]:
         ).all()
 
 
+def _fail_publish_if_called(*_args, **_kwargs):
+    raise AssertionError("publish_item should not be called by draft/apply/recheck endpoints")
+
+
 def test_failed_publish_creates_repair_queue_entry(monkeypatch, tmp_path):
     _configure_temp_db(monkeypatch, tmp_path)
     _seed_item(ebay_category_id="14056", condition_id="5000")
@@ -300,6 +304,115 @@ def test_recheck_readiness_marks_ready_to_retry_when_blockers_clear(monkeypatch,
     assert recheck.json()["ready_to_retry"] is True
 
 
+def test_draft_fix_generates_high_risk_condition_draft_without_previous_publish_attempt(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    _seed_item(ebay_category_id="14056", condition_id="5000")
+    monkeypatch.setattr("packages.ebay.src.inventory_client.EbayInventoryClient.publish_item", _fail_publish_if_called)
+
+    with _client() as client:
+        resp = client.post("/api/ebay/repair-queue/BK-000008/draft-fix")
+        detail = client.get("/api/ebay/repair-queue/BK-000008")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "draft_fix_available"
+    assert body["drafts"]
+    draft = body["drafts"][0]
+    assert draft["affected_field"] == "condition_id"
+    assert draft["repair_layer"] == "category_compatibility"
+    assert draft["risk_level"] == "high"
+    assert draft["safe_to_auto_apply"] is False
+    assert draft["requires_review"] is True
+    assert draft["retry_allowed"] is False
+    assert draft["current_value"]["category_id"] == "14056"
+    assert draft["current_value"]["condition_id"] == "5000"
+    assert draft["expected_value"]["allowed_condition_ids"] == ["1000", "1500", "3000", "4000"]
+    assert draft["expected_value"]["policy_source"]
+    assert draft["suggested_value"]["allowed_options"]
+    assert any(option["id"] == "3000" and option["name"] == "Used" for option in draft["suggested_value"]["allowed_options"])
+    assert any(option["id"] == "4000" and option["name"] == "Very Good" for option in draft["suggested_value"]["allowed_options"])
+    assert detail.status_code == 200
+    assert detail.json()["latest_publish_attempt"] is None
+    assert _attempts_for_sku("BK-000008") == []
+
+
+def test_draft_fix_warning_only_public_image_urls_do_not_generate_repair_draft(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    _seed_item(
+        ebay_category_id="29223",
+        condition_id="5000",
+        image_paths=[
+            "https://res.cloudinary.com/demo/image/upload/v1/BK-000008-01.jpg",
+            "https://res.cloudinary.com/demo/image/upload/v1/BK-000008-02.jpg",
+            r"C:\Users\Andrew\Desktop\BK-000008-01.jpg",
+        ],
+    )
+    monkeypatch.setattr("packages.ebay.src.inventory_client.EbayInventoryClient.publish_item", _fail_publish_if_called)
+
+    with _client() as client:
+        resp = client.post("/api/ebay/repair-queue/BK-000008/draft-fix")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "no_blockers"
+    assert body["drafts"] == []
+
+
+def test_repeated_draft_fix_calls_do_not_create_duplicate_open_plans(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    _seed_item(ebay_category_id="14056", condition_id="5000")
+    monkeypatch.setattr("packages.ebay.src.inventory_client.EbayInventoryClient.publish_item", _fail_publish_if_called)
+
+    with _client() as client:
+        first = client.post("/api/ebay/repair-queue/BK-000008/draft-fix")
+        second = client.post("/api/ebay/repair-queue/BK-000008/draft-fix")
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    plans = _plans_for_sku("BK-000008")
+    matching = [plan for plan in plans if plan.affected_field == "condition_id" and plan.classified_error_code == "invalid_category_condition"]
+    assert len(matching) == 1
+    assert first.json()["drafts"][0]["id"] == second.json()["drafts"][0]["id"]
+
+
+def test_bulk_draft_fixes_uses_readiness_derived_drafts_and_unresolved_blockers(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    _seed_item(sku="BK-000008", ebay_category_id="14056", condition_id="5000")
+    local_photo = tmp_path / "BK-000009-local.jpg"
+    local_photo.write_bytes(b"local")
+    _seed_item(sku="BK-000009", image_paths=[str(local_photo)])
+    monkeypatch.setattr("packages.ebay.src.inventory_client.EbayInventoryClient.publish_item", _fail_publish_if_called)
+
+    with _client() as client:
+        resp = client.post(
+            "/api/ebay/repair-queue/bulk-draft-fixes",
+            json={
+                "skus": ["BK-000008", "BK-000009"],
+                "mode": "draft_only",
+                "allow_low_risk_auto_apply": False,
+                "allow_medium_risk_drafts": True,
+                "allow_high_risk_drafts": True,
+            },
+        )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert any(entry["sku"] == "BK-000008" for entry in body["high_risk_manual_review_fixes"])
+    assert any(entry["sku"] == "BK-000009" and entry["reason"] == "unresolved_blockers" for entry in body["unresolved_errors"])
+
+
+def test_recheck_endpoint_does_not_call_publish(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    _seed_item(ebay_category_id="14056", condition_id="5000")
+    monkeypatch.setattr("packages.ebay.src.inventory_client.EbayInventoryClient.publish_item", _fail_publish_if_called)
+
+    with _client() as client:
+        resp = client.post("/api/ebay/repair-queue/BK-000008/recheck-readiness")
+
+    assert resp.status_code == 200
+    assert resp.json()["ready_to_retry"] is False
+
+
 def test_repair_queue_bk_000008_mixed_hosted_and_local_urls_only_blocks_on_condition(monkeypatch, tmp_path):
     _configure_temp_db(monkeypatch, tmp_path)
     _seed_item(
@@ -358,19 +471,11 @@ def test_repair_queue_bk_000008_mixed_hosted_and_local_urls_only_blocks_on_condi
 def test_apply_high_risk_fix_without_explicit_value_is_rejected(monkeypatch, tmp_path):
     _configure_temp_db(monkeypatch, tmp_path)
     _seed_item(ebay_category_id="14056", condition_id="5000")
-
-    def fake_publish_fail(_self, _item):
-        return Result.failure(
-            "eBay API error 400: publish_offer failed",
-            error_code="API_ERROR",
-            body="Error 25021: invalid item condition information. The provided condition id is invalid for the selected primary category id.",
-        )
-
-    monkeypatch.setattr("packages.ebay.src.inventory_client.EbayInventoryClient.publish_item", fake_publish_fail)
+    monkeypatch.setattr("packages.ebay.src.inventory_client.EbayInventoryClient.publish_item", _fail_publish_if_called)
 
     with _client() as client:
-        client.post("/api/ebay/publish/BK-000008")
-        plan_id = _plans_for_sku("BK-000008")[0].id
+        draft = client.post("/api/ebay/repair-queue/BK-000008/draft-fix")
+        plan_id = draft.json()["drafts"][0]["id"]
         resp = client.post(
             "/api/ebay/repair-queue/BK-000008/apply-draft-fix",
             json={"sku": "BK-000008", "repair_plan_id": plan_id, "approved": True},
@@ -382,25 +487,18 @@ def test_apply_high_risk_fix_without_explicit_value_is_rejected(monkeypatch, tmp
 def test_apply_approved_high_risk_fix_stores_before_after_audit(monkeypatch, tmp_path):
     _configure_temp_db(monkeypatch, tmp_path)
     _seed_item(ebay_category_id="14056", condition_id="5000")
-
-    def fake_publish_fail(_self, _item):
-        return Result.failure(
-            "eBay API error 400: publish_offer failed",
-            error_code="API_ERROR",
-            body="Error 25021: invalid item condition information. The provided condition id is invalid for the selected primary category id.",
-        )
-
-    monkeypatch.setattr("packages.ebay.src.inventory_client.EbayInventoryClient.publish_item", fake_publish_fail)
+    monkeypatch.setattr("packages.ebay.src.inventory_client.EbayInventoryClient.publish_item", _fail_publish_if_called)
 
     with _client() as client:
-        client.post("/api/ebay/publish/BK-000008")
-        plan_id = _plans_for_sku("BK-000008")[0].id
+        draft = client.post("/api/ebay/repair-queue/BK-000008/draft-fix")
+        plan_id = draft.json()["drafts"][0]["id"]
         resp = client.post(
             "/api/ebay/repair-queue/BK-000008/apply-draft-fix",
             json={"sku": "BK-000008", "repair_plan_id": plan_id, "approved": True, "edited_value": "3000"},
         )
 
     assert resp.status_code == 200
+    assert resp.json()["recheck"]["ready_to_retry"] is True
     decisions = _decisions_for_sku("BK-000008")
     assert decisions
     assert "5000" in decisions[0].before_value_json
