@@ -72,9 +72,7 @@ def test_publish_readiness_returns_ready_true_for_complete_approved_item(monkeyp
     monkeypatch.setenv("EBAY_RETURN_POLICY_ID", "return-1")
     _configure_temp_db(monkeypatch, tmp_path)
     _block_external_calls(monkeypatch)
-    local_photo = tmp_path / "BK-000005-01.jpg"
-    local_photo.write_bytes(b"ready")
-    _seed_item(image_paths=[str(local_photo)])
+    _seed_item(image_paths=["https://res.cloudinary.com/demo/image/upload/v1/BK-000005-01.jpg"])
 
     with _client() as client:
         resp = client.get("/api/listings/BK-000005/publish-readiness")
@@ -197,11 +195,18 @@ def test_publish_readiness_local_only_photos_require_hosting_without_upload(monk
     assert resp.status_code == 200
     body = resp.json()
     photo_check = next(check for check in body["checks"] if check["name"] == "photo_hosting_readiness")
-    assert body["ready"] is True
+    compatibility_check = next(check for check in body["checks"] if check["name"] == "category_publish_compatibility")
+    public_image_check = next(
+        check for check in compatibility_check["context"]["checks"] if check["name"] == "public_image_urls"
+    )
+    assert body["ready"] is False
     assert photo_check["ok"] is True
     assert photo_check["context"]["has_local_photos"] is True
     assert photo_check["context"]["needs_hosting"] is True
     assert photo_check["context"]["cloudinary_config_present"] is False
+    assert compatibility_check["ok"] is False
+    assert public_image_check["ok"] is False
+    assert public_image_check["action"] == "Host local photos before publish."
     assert "Host local photos before sandbox or live publish." in body["required_actions"]
     assert "Cloudinary is not configured" in " ".join(body["warnings"])
 
@@ -224,3 +229,91 @@ def test_publish_readiness_missing_local_photo_files_are_surfaced(monkeypatch, t
     assert photo_check["ok"] is False
     assert photo_check["context"]["missing_photo_files"] == [str(missing_path)]
     assert "Some stored local photo paths no longer exist on disk." in body["warnings"]
+
+
+def test_publish_readiness_mixed_hosted_and_local_urls_warns_but_does_not_block(monkeypatch, tmp_path):
+    monkeypatch.delenv("E2E_ROUTE_GUARD_ENABLED", raising=False)
+    monkeypatch.delenv("APPROVED_E2E_SKUS", raising=False)
+    monkeypatch.setenv("EBAY_FULFILLMENT_POLICY_ID", "fulfillment-1")
+    monkeypatch.setenv("EBAY_PAYMENT_POLICY_ID", "payment-1")
+    monkeypatch.setenv("EBAY_RETURN_POLICY_ID", "return-1")
+    _configure_temp_db(monkeypatch, tmp_path)
+    _block_external_calls(monkeypatch)
+    _seed_item(
+        image_paths=[
+            "https://res.cloudinary.com/demo/image/upload/v1/BK-000005-01.jpg",
+            "https://res.cloudinary.com/demo/image/upload/v1/BK-000005-02.jpg",
+            "https://res.cloudinary.com/demo/image/upload/v1/BK-000005-03.jpg",
+            r"C:\Users\Andrew\Desktop\BK-000005-01.jpg",
+            r"C:\Users\Andrew\Desktop\BK-000005-02.jpg",
+            r"C:\Users\Andrew\Desktop\BK-000005-03.jpg",
+        ]
+    )
+
+    with _client() as client:
+        resp = client.get("/api/listings/BK-000005/publish-readiness")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ready"] is True
+    compatibility_check = next(check for check in body["checks"] if check["name"] == "category_publish_compatibility")
+    public_image_check = next(
+        check for check in compatibility_check["context"]["checks"] if check["name"] == "public_image_urls"
+    )
+    assert compatibility_check["ok"] is True
+    assert public_image_check["ok"] is True
+    assert public_image_check["blocking"] is False
+    assert "only hosted public URLs will be sent to eBay" in str(public_image_check["warning"] or "")
+    assert "Repair malformed hosted image URLs before retrying publish." not in body["required_actions"]
+
+
+def test_publish_readiness_local_only_paths_block_compatibility(monkeypatch, tmp_path):
+    monkeypatch.delenv("E2E_ROUTE_GUARD_ENABLED", raising=False)
+    monkeypatch.delenv("APPROVED_E2E_SKUS", raising=False)
+    monkeypatch.setenv("EBAY_FULFILLMENT_POLICY_ID", "fulfillment-1")
+    monkeypatch.setenv("EBAY_PAYMENT_POLICY_ID", "payment-1")
+    monkeypatch.setenv("EBAY_RETURN_POLICY_ID", "return-1")
+    _configure_temp_db(monkeypatch, tmp_path)
+    _block_external_calls(monkeypatch)
+    local_photo = tmp_path / "BK-000005-local.jpg"
+    local_photo.write_bytes(b"local")
+    _seed_item(image_paths=[str(local_photo)])
+
+    with _client() as client:
+        resp = client.get("/api/listings/BK-000005/publish-readiness")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    compatibility_check = next(check for check in body["checks"] if check["name"] == "category_publish_compatibility")
+    public_image_check = next(
+        check for check in compatibility_check["context"]["checks"] if check["name"] == "public_image_urls"
+    )
+    assert body["ready"] is False
+    assert compatibility_check["ok"] is False
+    assert public_image_check["ok"] is False
+    assert public_image_check["action"] == "Host local photos before publish."
+
+
+def test_publish_readiness_malformed_hosted_url_blocks_compatibility(monkeypatch, tmp_path):
+    monkeypatch.delenv("E2E_ROUTE_GUARD_ENABLED", raising=False)
+    monkeypatch.delenv("APPROVED_E2E_SKUS", raising=False)
+    monkeypatch.setenv("EBAY_FULFILLMENT_POLICY_ID", "fulfillment-1")
+    monkeypatch.setenv("EBAY_PAYMENT_POLICY_ID", "payment-1")
+    monkeypatch.setenv("EBAY_RETURN_POLICY_ID", "return-1")
+    _configure_temp_db(monkeypatch, tmp_path)
+    _block_external_calls(monkeypatch)
+    _seed_item(image_paths=["https://", r"C:\Users\Andrew\Desktop\BK-000005-01.jpg"])
+
+    with _client() as client:
+        resp = client.get("/api/listings/BK-000005/publish-readiness")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    compatibility_check = next(check for check in body["checks"] if check["name"] == "category_publish_compatibility")
+    public_image_check = next(
+        check for check in compatibility_check["context"]["checks"] if check["name"] == "public_image_urls"
+    )
+    assert body["ready"] is False
+    assert compatibility_check["ok"] is False
+    assert public_image_check["ok"] is False
+    assert public_image_check["action"] == "Repair malformed hosted image URLs before retrying publish."

@@ -300,6 +300,61 @@ def test_recheck_readiness_marks_ready_to_retry_when_blockers_clear(monkeypatch,
     assert recheck.json()["ready_to_retry"] is True
 
 
+def test_repair_queue_bk_000008_mixed_hosted_and_local_urls_only_blocks_on_condition(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    _seed_item(
+        ebay_category_id="14056",
+        condition_id="5000",
+        image_paths=[
+            "https://res.cloudinary.com/demo/image/upload/v1/BK-000008-01.jpg",
+            "https://res.cloudinary.com/demo/image/upload/v1/BK-000008-02.jpg",
+            "https://res.cloudinary.com/demo/image/upload/v1/BK-000008-03.jpg",
+            r"C:\Users\Andrew\Desktop\BK-000008-01.jpg",
+            r"C:\Users\Andrew\Desktop\BK-000008-02.jpg",
+            r"C:\Users\Andrew\Desktop\BK-000008-03.jpg",
+        ],
+    )
+
+    def fake_publish_fail(_self, _item):
+        return Result.failure(
+            "eBay API error 400: publish_offer failed",
+            error_code="API_ERROR",
+            body="Error 25021: invalid item condition information. The provided condition id is invalid for the selected primary category id.",
+        )
+
+    monkeypatch.setattr("packages.ebay.src.inventory_client.EbayInventoryClient.publish_item", fake_publish_fail)
+
+    with _client() as client:
+        client.post("/api/ebay/publish/BK-000008")
+        detail = client.get("/api/ebay/repair-queue/BK-000008")
+        recheck = client.post("/api/ebay/repair-queue/BK-000008/recheck-readiness")
+
+    assert detail.status_code == 200
+    detail_body = detail.json()
+    public_image_check = next(
+        check
+        for check in detail_body["compatibility_summary"]["checks"]
+        if check["name"] == "public_image_urls"
+    )
+    assert public_image_check["ok"] is True
+    assert public_image_check["blocking"] is False
+    assert "only hosted public URLs will be sent to eBay" in str(public_image_check["warning"] or "")
+
+    assert recheck.status_code == 200
+    recheck_body = recheck.json()
+    assert recheck_body["ready_to_retry"] is False
+    assert recheck_body["compatibility"]["blockers"] == [
+        "Condition ID '5000' is not allowed for category '14056'."
+    ]
+    recheck_public_image_check = next(
+        check
+        for check in recheck_body["compatibility"]["checks"]
+        if check["name"] == "public_image_urls"
+    )
+    assert recheck_public_image_check["ok"] is True
+    assert recheck_public_image_check["blocking"] is False
+
+
 def test_apply_high_risk_fix_without_explicit_value_is_rejected(monkeypatch, tmp_path):
     _configure_temp_db(monkeypatch, tmp_path)
     _seed_item(ebay_category_id="14056", condition_id="5000")

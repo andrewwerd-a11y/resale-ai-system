@@ -298,6 +298,28 @@ def test_publish_item_uses_existing_hosted_urls_without_windows_path_conversion(
     assert result.value["photo_urls"] == [hosted_url]
 
 
+def test_build_inventory_payload_excludes_local_paths_when_hosted_urls_are_used():
+    client = EbayInventoryClient()
+    hosted_urls = [
+        "https://res.cloudinary.com/dhi6ll8la/image/upload/v1/BK-000008-01.jpg",
+        "https://res.cloudinary.com/dhi6ll8la/image/upload/v1/BK-000008-02.jpg",
+        "https://res.cloudinary.com/dhi6ll8la/image/upload/v1/BK-000008-03.jpg",
+    ]
+    item = make_clothing_item(
+        sku="BK-000008",
+        image_paths=hosted_urls + [
+            r"C:\Users\Andrew\Desktop\BK-000008-01.jpg",
+            r"C:\Users\Andrew\Desktop\BK-000008-02.jpg",
+            r"C:\Users\Andrew\Desktop\BK-000008-03.jpg",
+        ],
+    )
+
+    payload = client._build_inventory_payload(item, hosted_urls)
+
+    assert payload["product"]["imageUrls"] == hosted_urls
+    assert all(not url.startswith("C:\\") for url in payload["product"]["imageUrls"])
+
+
 def test_publish_item_rejects_non_public_image_url_before_mutation(monkeypatch):
     client = EbayInventoryClient()
     client.auth.settings.ebay_sandbox_app_id = "app-id"

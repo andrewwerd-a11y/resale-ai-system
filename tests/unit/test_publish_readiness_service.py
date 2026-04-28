@@ -25,6 +25,10 @@ def _make_item(photo_path: str, **overrides) -> Item:
     return Item(**base)
 
 
+def _hosted_photo_url() -> str:
+    return "https://res.cloudinary.com/demo/image/upload/v1/BK-000005-01.jpg"
+
+
 def _template(required_fields=None, recommended_fields=None, field_constraints=None) -> CategoryTemplate:
     return CategoryTemplate(
         category_id="29223",
@@ -54,10 +58,8 @@ def test_valid_category_condition_and_policy_config_pass_readiness(monkeypatch, 
     monkeypatch.setenv("EBAY_RETURN_POLICY_ID", "return-1")
     core_config.get_settings.cache_clear()
 
-    photo = tmp_path / "ready.jpg"
-    photo.write_bytes(b"ready")
     result = evaluate_publish_readiness(
-        _make_item(str(photo)),
+        _make_item(_hosted_photo_url()),
         category_template_provider=lambda _item: Result.success(_template()),
     )
 
@@ -125,10 +127,8 @@ def test_taxonomy_upstream_failure_is_classified_without_crashing(monkeypatch, t
     monkeypatch.setenv("EBAY_RETURN_POLICY_ID", "return-1")
     core_config.get_settings.cache_clear()
 
-    photo = tmp_path / "ready.jpg"
-    photo.write_bytes(b"ready")
     result = evaluate_publish_readiness(
-        _make_item(str(photo)),
+        _make_item(_hosted_photo_url()),
         category_template_provider=lambda _item: Result.failure(
             "template_fetch_error: timeout",
             error_code="UPSTREAM_TIMEOUT",
@@ -148,11 +148,9 @@ def test_overlong_color_is_normalized_under_limit(monkeypatch, tmp_path):
     monkeypatch.setenv("EBAY_RETURN_POLICY_ID", "return-1")
     core_config.get_settings.cache_clear()
 
-    photo = tmp_path / "ready.jpg"
-    photo.write_bytes(b"ready")
     result = evaluate_publish_readiness(
         _make_item(
-            str(photo),
+            _hosted_photo_url(),
             color="blue and white dress on a woman, various colors in the illustration background",
         ),
         category_template_provider=lambda _item: Result.success(_template()),

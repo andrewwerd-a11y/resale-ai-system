@@ -105,24 +105,36 @@ def evaluate_publish_compatibility(item: Item, *, strict_condition_policy: bool 
     local_image_paths = [value for value in raw_image_values if not looks_like_public_image_url_candidate(value)]
     windows_paths = [value for value in local_image_paths if ":" in value[:3] or "\\" in value]
 
-    image_urls_ok = not malformed_public_candidates and not (windows_paths and hosted_urls)
-    image_detail = (
-        f"{len(hosted_urls)} hosted public image URL(s) are valid."
-        if hosted_urls and not malformed_public_candidates
-        else "Hosted image URLs are missing or malformed for eBay publish."
-    )
+    has_hosted_urls = bool(hosted_urls)
+    has_malformed_hosted_urls = bool(malformed_public_candidates)
+    has_local_image_paths = bool(local_image_paths)
+    image_urls_ok = has_hosted_urls and not has_malformed_hosted_urls
+    image_blocking = not image_urls_ok
     image_warning = None
-    if malformed_public_candidates:
+    image_action = None
+
+    if has_hosted_urls and not has_malformed_hosted_urls:
+        image_detail = f"{len(hosted_urls)} hosted public image URL(s) are valid."
+        if windows_paths:
+            image_warning = "Local Windows photo paths are stored alongside hosted URLs; only hosted public URLs will be sent to eBay."
+    elif has_malformed_hosted_urls:
+        image_detail = "Hosted public image URLs are malformed for eBay publish."
         image_warning = "Some hosted image URL candidates are malformed and need repair."
-    elif windows_paths and hosted_urls:
-        image_warning = "Local Windows photo paths are stored alongside hosted URLs; only hosted public URLs will be sent to eBay."
+        image_action = "Repair malformed hosted image URLs before retrying publish."
+    else:
+        image_detail = "Hosted public image URLs are missing for eBay publish."
+        image_action = (
+            "Host local photos before publish."
+            if has_local_image_paths
+            else "Attach or host public image URLs before retrying publish."
+        )
     add_check(
         "public_image_urls",
-        image_urls_ok and bool(hosted_urls),
+        image_urls_ok,
         image_detail,
-        blocking=True,
+        blocking=image_blocking,
         warning=image_warning,
-        action="Repair hosted image URLs before retrying publish.",
+        action=image_action,
         context={
             "hosted_photo_urls": hosted_urls,
             "malformed_public_candidates": malformed_public_candidates,

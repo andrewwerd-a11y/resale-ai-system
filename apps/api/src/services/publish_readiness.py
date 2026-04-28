@@ -290,24 +290,6 @@ def evaluate_publish_readiness(
     compatibility_required_actions = list(compatibility["required_actions"])
     compatibility_check_ok = compatibility["ready"]
 
-    public_image_check = next(
-        (check for check in compatibility["checks"] if check.get("name") == "public_image_urls"),
-        None,
-    )
-    if public_image_check and needs_hosting and not hosted_photo_urls:
-        public_image_blocker = str(public_image_check.get("detail") or "").strip()
-        compatibility_check_ok = all(
-            check.get("ok") or check.get("name") == "public_image_urls"
-            for check in compatibility["checks"]
-        )
-        compatibility_blockers = [
-            blocker for blocker in compatibility_blockers if blocker != public_image_blocker
-        ]
-        if public_image_check.get("warning"):
-            add_warning(str(public_image_check["warning"]))
-        if public_image_check.get("action"):
-            add_required_action(str(public_image_check["action"]))
-
     add_check(
         "category_publish_compatibility",
         compatibility_check_ok,
