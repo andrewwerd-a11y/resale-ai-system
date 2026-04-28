@@ -145,3 +145,31 @@ def test_revise_preview_respects_e2e_allowlist(monkeypatch, tmp_path):
 
     assert resp.status_code == 403
     assert "Only approved E2E SKUs are allowed" in resp.json().get("detail", "")
+
+
+def test_revise_preview_uses_used_good_for_condition_id_3000(monkeypatch, tmp_path):
+    monkeypatch.delenv("E2E_ROUTE_GUARD_ENABLED", raising=False)
+    monkeypatch.delenv("APPROVED_E2E_SKUS", raising=False)
+    monkeypatch.setenv("EBAY_FULFILLMENT_POLICY_ID", "fulfillment-1")
+    monkeypatch.setenv("EBAY_PAYMENT_POLICY_ID", "payment-1")
+    monkeypatch.setenv("EBAY_RETURN_POLICY_ID", "return-1")
+    monkeypatch.setenv("EBAY_SANDBOX_APP_ID", "app-id")
+    monkeypatch.setenv("EBAY_SANDBOX_CERT_ID", "cert-id")
+    monkeypatch.setenv("EBAY_SANDBOX_USER_TOKEN", "user-token")
+    _configure_temp_db(monkeypatch, tmp_path)
+    _block_mutations(monkeypatch)
+    _seed_item(
+        sku="BK-000008",
+        ebay_category_id="14056",
+        condition_id="3000",
+        condition_label="Pre-owned - Good",
+        condition_notes="Cover creasing and possible discoloration or staining.",
+    )
+
+    with _client() as client:
+        resp = client.get("/api/listings/BK-000008/revise-preview")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["would_revise"] is True
+    assert body["inventory_item_payload_preview"]["condition"] == "USED_GOOD"

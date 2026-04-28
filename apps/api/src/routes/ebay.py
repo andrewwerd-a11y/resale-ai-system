@@ -553,7 +553,7 @@ def update_listing(sku: str, updates: dict, session: Session = Depends(get_sessi
     import re
     CONDITION_MAP = {
         "1000": "NEW", "1500": "NEW_OTHER", "2000": "NEW_WITH_DEFECTS",
-        "2500": "NEW_OTHER", "3000": "LIKE_NEW", "4000": "VERY_GOOD",
+        "2500": "NEW_OTHER", "3000": "USED_GOOD", "4000": "VERY_GOOD",
         "5000": "USED_GOOD", "6000": "USED_ACCEPTABLE",
         "7000": "FOR_PARTS_OR_NOT_WORKING",
     }
