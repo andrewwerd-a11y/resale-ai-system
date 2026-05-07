@@ -527,6 +527,101 @@ def test_publish_preview_marks_would_publish_false_when_repair_queue_blocks_retr
     assert body["policy_conflict"] is True
 
 
+def test_publish_diagnostics_for_blocked_existing_offer_is_local_only(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    _seed_item(
+        ebay_category_id="14056",
+        ebay_category_name="Atlases",
+        condition_id="3000",
+        offer_id="156719395011",
+        listing_id=None,
+        status=ItemStatus.EXPORT_READY,
+    )
+    plan_id = _seed_blocking_repair_plan()
+
+    def fail_external_call(*_args, **_kwargs):
+        raise AssertionError("publish diagnostics must not call eBay when live_readonly is false")
+
+    monkeypatch.setattr("apps.api.src.routes.listings.ebay_http.get", fail_external_call)
+    monkeypatch.setattr("apps.api.src.routes.listings.ebay_http.put", fail_external_call)
+    monkeypatch.setattr("apps.api.src.routes.listings.ebay_http.delete", fail_external_call)
+    monkeypatch.setattr("packages.ebay.src.inventory_client.ebay_http.get", fail_external_call)
+    monkeypatch.setattr("packages.ebay.src.inventory_client.ebay_http.put", fail_external_call)
+    monkeypatch.setattr("packages.ebay.src.inventory_client.ebay_http.post", fail_external_call)
+
+    with _client() as client:
+        resp = client.get("/api/listings/BK-000008/publish-diagnostics")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["read_only"] is True
+    assert body["live_readonly_requested"] is False
+    assert body["live_readonly_performed"] is False
+    assert body["sku"] == "BK-000008"
+    assert body["local_category_id"] == "14056"
+    assert body["local_category_name"] == "Atlases"
+    assert body["local_condition_id"] == "3000"
+    assert body["local_inventory_condition_enum"] == "USED_GOOD"
+    assert body["offer_id"] == "156719395011"
+    assert body["listing_id"] == ""
+    assert body["planned_action"] == "publish_existing_offer"
+    assert body["existing_offer_id_detected"] is True
+    assert body["repair_plan_id"] == plan_id
+    assert body["latest_publish_attempt_id"] == "attempt-blocked"
+    assert body["repair_status"]["status"] == "needs_manual_review"
+    assert body["retry_allowed"] is False
+    assert body["classified_error_code"] == "invalid_category_condition"
+    assert body["blocked_by_repair_queue"] is True
+    assert body["stale_existing_offer_hypothesis"] is True
+    assert body["category_policy_hypothesis"] is True
+    assert "Do not retry publish" in body["recommended_next_action"]
+
+    offer_diag = body["existing_offer_diagnostics"]
+    assert offer_diag["source"] == "local_only"
+    assert offer_diag["read_available"] is False
+    assert offer_diag["live_readonly_performed"] is False
+    assert offer_diag["local_system_thinks_existing_offer"] is True
+    assert offer_diag["existing_offer_publish_flow"]["updates_inventory_item_before_publish"] is True
+    assert offer_diag["existing_offer_publish_flow"]["updates_existing_offer_before_publish"] is False
+    assert offer_diag["existing_offer_publish_flow"]["publishes_existing_offer_id_directly"] is True
+    assert offer_diag["stale_existing_offer_hypothesis"] is True
+
+    policy_diag = body["category_condition_policy_diagnostics"]
+    assert policy_diag["source"] == "builtin"
+    assert policy_diag["local_policy_allows_condition"] is True
+    assert policy_diag["local_policy_status"] == "suspect_or_stale"
+    assert policy_diag["policy_conflict"] is True
+    assert policy_diag["contradicted_by"] == "ebay_error"
+    assert policy_diag["rejected_condition_id"] == "3000"
+    assert policy_diag["rejected_category_id"] == "14056"
+
+
+def test_publish_diagnostics_live_readonly_flag_is_explicit_stub(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    _seed_item(
+        ebay_category_id="14056",
+        condition_id="3000",
+        offer_id="156719395011",
+        listing_id=None,
+    )
+    _seed_blocking_repair_plan()
+
+    def fail_external_call(*_args, **_kwargs):
+        raise AssertionError("live_readonly=true is a diagnostic stub and must not call eBay yet")
+
+    monkeypatch.setattr("packages.ebay.src.inventory_client.ebay_http.get", fail_external_call)
+    monkeypatch.setattr("apps.api.src.routes.listings.ebay_http.get", fail_external_call)
+
+    with _client() as client:
+        resp = client.get("/api/listings/BK-000008/publish-diagnostics?allow_live_readonly=true")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["live_readonly_requested"] is True
+    assert body["live_readonly_performed"] is False
+    assert "not implemented" in body["live_readonly_warning"]
+
+
 def test_newer_needs_manual_review_overrides_older_ready_to_retry(monkeypatch, tmp_path):
     _configure_temp_db(monkeypatch, tmp_path)
     _seed_item(ebay_category_id="14056", condition_id="3000")

@@ -16,6 +16,7 @@ from pydantic import BaseModel
 from sqlmodel import Session, select
 
 from apps.api.src.services.ebay_auth_diagnostics import get_ebay_auth_readiness
+from apps.api.src.services.publish_diagnostics import build_publish_diagnostics
 from apps.api.src.services.publish_repair import get_publish_repair_blocker
 from apps.api.src.services.publish_readiness import evaluate_publish_readiness, not_found_publish_readiness
 from packages.core.src.config import get_settings
@@ -226,6 +227,27 @@ def get_publish_preview(sku: str, session: Session = Depends(get_session)):
             "allow_live_e2e": is_live_e2e_enabled(),
         },
     }
+
+
+@router.get("/{sku}/publish-diagnostics")
+def get_publish_diagnostics(
+    sku: str,
+    allow_live_readonly: bool = False,
+    session: Session = Depends(get_session),
+):
+    try:
+        assert_route_sku_allowed(sku, "listings.publish_diagnostics")
+    except E2ESafetyError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+
+    diagnostics = build_publish_diagnostics(
+        session,
+        sku,
+        allow_live_readonly=allow_live_readonly,
+    )
+    if not diagnostics.get("found"):
+        raise HTTPException(status_code=404, detail=diagnostics)
+    return diagnostics
 
 
 @router.get("/{sku}/revise-readiness")
