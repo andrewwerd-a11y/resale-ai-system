@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import json
+from datetime import datetime, timedelta
+
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlmodel import Session, create_engine, select
 
-from apps.api.src.routes import ebay, listings
+from apps.api.src.routes import ebay, listings, sync
 from packages.core.src import config as core_config
 from packages.core.src.constants import ItemStatus
 from packages.core.src.result import Result
@@ -20,6 +23,7 @@ def _client() -> TestClient:
     app = FastAPI()
     app.include_router(ebay.router, prefix="/api/ebay", tags=["ebay"])
     app.include_router(listings.router, prefix="/api/listings", tags=["listings"])
+    app.include_router(sync.router, prefix="/api/sync", tags=["sync"])
     return TestClient(app)
 
 
@@ -83,6 +87,60 @@ def _attempts_for_sku(sku: str) -> list[PublishAttemptRecord]:
             .where(PublishAttemptRecord.sku == sku)
             .order_by(PublishAttemptRecord.attempted_at.desc())
         ).all()
+
+
+def _seed_blocking_repair_plan(
+    sku: str = "BK-000008",
+    *,
+    status: str = "needs_manual_review",
+    retry_allowed: bool = False,
+    requires_review: bool = True,
+    updated_at: datetime | None = None,
+    publish_attempt_id: str | None = "attempt-blocked",
+) -> str:
+    with Session(sqlite_db.engine) as session:
+        if publish_attempt_id:
+            attempt = PublishAttemptRecord(
+                id=publish_attempt_id,
+                sku=sku,
+                stage="publish_offer",
+                status="failed",
+                ebay_error_id="25021",
+                ebay_error_message="The selected condition ID is invalid for the exact eBay category.",
+                classified_error_code="invalid_category_condition",
+                repair_layer="category_compatibility",
+                requires_review=True,
+                retry_allowed=False,
+            )
+            session.add(attempt)
+        plan = PublishRepairPlanRecord(
+            sku=sku,
+            publish_attempt_id=publish_attempt_id,
+            status=status,
+            affected_field="condition_id",
+            current_value_json=json.dumps({"category_id": "14056", "condition_id": "3000"}),
+            expected_value_json=json.dumps(
+                {
+                    "category_id": "14056",
+                    "known": True,
+                    "allowed_condition_ids": ["1000", "1500", "3000", "4000"],
+                    "source": "builtin",
+                }
+            ),
+            suggested_value_json=json.dumps({"condition_id": ""}),
+            suggested_actions_json=json.dumps(["Review category/condition compatibility before retrying publish."]),
+            risk_level="high",
+            safe_to_auto_apply=False,
+            requires_review=requires_review,
+            retry_allowed=retry_allowed,
+            source="ebay_error",
+            repair_layer="category_compatibility",
+            classified_error_code="invalid_category_condition",
+            updated_at=updated_at or datetime.utcnow(),
+        )
+        session.add(plan)
+        session.commit()
+        return plan.id
 
 
 def _decisions_for_sku(sku: str) -> list[PublishRepairDecisionRecord]:
@@ -302,6 +360,220 @@ def test_recheck_readiness_marks_ready_to_retry_when_blockers_clear(monkeypatch,
 
     assert recheck.status_code == 200
     assert recheck.json()["ready_to_retry"] is True
+
+
+def test_live_25021_on_locally_allowed_condition_marks_policy_suspect_and_blocks_retry(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    _seed_item(
+        ebay_category_id="14056",
+        condition_id="3000",
+        condition_label="Pre-owned - Good",
+        condition_notes="Cover creasing and possible discoloration/staining.",
+        offer_id="156719395011",
+    )
+
+    def fake_publish_fail(_self, _item):
+        return Result.failure(
+            "eBay API error 400: publish_offer failed",
+            error_code="API_ERROR",
+            body="Error 25021: invalid item condition information. The provided condition id is invalid for the selected primary category id.",
+            stage="publish_offer",
+            offer_id="156719395011",
+            category_id="14056",
+            local_condition_id="3000",
+            inventory_condition_enum="USED_GOOD",
+        )
+
+    monkeypatch.setattr("packages.ebay.src.inventory_client.EbayInventoryClient.publish_item", fake_publish_fail)
+
+    with _client() as client:
+        publish_resp = client.post("/api/ebay/publish/BK-000008")
+        draft_resp = client.post("/api/ebay/repair-queue/BK-000008/draft-fix")
+        recheck_resp = client.post("/api/ebay/repair-queue/BK-000008/recheck-readiness")
+        detail_resp = client.get("/api/ebay/repair-queue/BK-000008")
+
+    assert publish_resp.status_code == 500
+    publish_detail = publish_resp.json()["detail"]
+    assert publish_detail["stage"] == "publish_offer"
+    assert publish_detail["condition_diagnostics"] == {
+        "local_condition_id": "3000",
+        "inventory_condition_enum": "USED_GOOD",
+        "category_id": "14056",
+        "offer_id": "156719395011",
+        "stage": "publish_offer",
+    }
+    assert "25021" in " ".join(publish_detail["raw_ebay_errors"])
+
+    assert draft_resp.status_code == 200
+    draft_body = draft_resp.json()
+    assert draft_body["status"] == "draft_fix_available"
+    assert draft_body["drafts"]
+    draft = draft_body["drafts"][0]
+    assert draft["classified_error_code"] == "invalid_category_condition"
+    assert draft["retry_allowed"] is False
+    assert draft["expected_value"]["local_policy_status"] == "suspect_or_stale"
+    assert draft["expected_value"]["local_policy_allowed_condition_ids"] == ["1000", "1500", "3000", "4000"]
+    assert not draft["suggested_value"]["allowed_options"]
+    assert draft["suggested_value"]["rejected_by_live_validation"]["condition_id"] == "3000"
+    assert draft["suggested_value"]["rejected_by_live_validation"]["inventory_condition_enum"] == "USED_GOOD"
+    assert any("fetch live item-condition policy metadata" in action.lower() for action in draft["suggested_actions"])
+    assert any("review whether the selected category is wrong" in action.lower() for action in draft["suggested_actions"])
+
+    assert recheck_resp.status_code == 200
+    assert recheck_resp.json()["ready_to_retry"] is False
+
+    assert detail_resp.status_code == 200
+    detail_body = detail_resp.json()
+    assert detail_body["ready_to_retry"] is False
+    assert detail_body["latest_publish_attempt"]["retry_allowed"] is False
+    plan = detail_body["repair_plans"][0]
+    assert plan["expected_value"]["local_policy_status"] == "suspect_or_stale"
+    assert plan["current_value"]["inventory_condition_enum"] == "USED_GOOD"
+
+
+def test_publish_route_blocks_latest_needs_manual_review_before_mutation(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    _seed_item(ebay_category_id="14056", condition_id="3000")
+    plan_id = _seed_blocking_repair_plan()
+
+    def fail_if_called(*_args, **_kwargs):
+        raise AssertionError("publish_item should not be called when repair queue blocks retry")
+
+    monkeypatch.setattr("packages.ebay.src.inventory_client.EbayInventoryClient.publish_item", fail_if_called)
+
+    with _client() as client:
+        resp = client.post("/api/ebay/publish/BK-000008")
+
+    assert resp.status_code == 409
+    detail = resp.json()["detail"]
+    assert detail["code"] == "blocked_by_repair_queue"
+    assert detail["blocked_by_repair_queue"] is True
+    assert detail["repair_plan_id"] == plan_id
+    assert detail["latest_publish_attempt_id"] == "attempt-blocked"
+    assert detail["retry_allowed"] is False
+    assert detail["classified_error_code"] == "invalid_category_condition"
+
+
+def test_batch_publish_skips_repair_blocked_sku_before_mutation(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    _seed_item(sku="BK-000005", ebay_category_id="29223", condition_id="5000")
+    _seed_item(sku="BK-000008", ebay_category_id="14056", condition_id="3000")
+    plan_id = _seed_blocking_repair_plan("BK-000008")
+    published_skus = []
+
+    def fake_publish(_self, item):
+        published_skus.append(item.sku)
+        return Result.success(
+            {
+                "listing_id": f"listing-{item.sku}",
+                "listing_url": f"https://www.ebay.com/itm/listing-{item.sku}",
+                "offer_id": f"offer-{item.sku}",
+                "photo_urls": item.image_paths or [],
+            }
+        )
+
+    monkeypatch.setattr("packages.ebay.src.inventory_client.EbayInventoryClient.publish_item", fake_publish)
+
+    with _client() as client:
+        resp = client.post("/api/ebay/publish/batch", params={"skus": "BK-000005,BK-000008", "e2e_only": "true"})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert published_skus == ["BK-000005"]
+    assert body["published"] == 1
+    assert body["skipped"] == 1
+    assert body["skipped_skus"][0]["sku"] == "BK-000008"
+    assert body["skipped_skus"][0]["code"] == "blocked_by_repair_queue"
+    assert body["skipped_skus"][0]["repair_plan_id"] == plan_id
+
+
+def test_publish_preview_marks_would_publish_false_when_repair_queue_blocks_retry(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    _seed_item(
+        ebay_category_id="14056",
+        condition_id="3000",
+        condition_label="Pre-owned - Good",
+        offer_id="156719395011",
+    )
+    plan_id = _seed_blocking_repair_plan()
+
+    with _client() as client:
+        resp = client.get("/api/listings/BK-000008/publish-preview")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["readiness"]["ready"] is True
+    assert body["would_publish"] is False
+    assert body["blocked_by_repair_queue"] is True
+    assert body["repair_plan_id"] == plan_id
+    assert body["latest_publish_attempt_id"] == "attempt-blocked"
+    assert body["retry_allowed"] is False
+    assert body["classified_error_code"] == "invalid_category_condition"
+    assert body["condition_id"] == "3000"
+    assert body["inventory_condition_enum"] == "USED_GOOD"
+    assert body["category_id"] == "14056"
+    assert body["offer_id"] == "156719395011"
+    assert body["existing_offer_id_detected"] is True
+    assert body["policy_conflict"] is True
+
+
+def test_newer_needs_manual_review_overrides_older_ready_to_retry(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    _seed_item(ebay_category_id="14056", condition_id="3000")
+    _seed_blocking_repair_plan(
+        status="ready_to_retry",
+        retry_allowed=True,
+        requires_review=False,
+        updated_at=datetime.utcnow() - timedelta(hours=1),
+        publish_attempt_id="attempt-old",
+    )
+    new_plan_id = _seed_blocking_repair_plan(
+        status="needs_manual_review",
+        retry_allowed=False,
+        requires_review=True,
+        updated_at=datetime.utcnow(),
+        publish_attempt_id="attempt-new",
+    )
+
+    def fail_if_called(*_args, **_kwargs):
+        raise AssertionError("publish_item should not be called when a newer plan blocks retry")
+
+    monkeypatch.setattr("packages.ebay.src.inventory_client.EbayInventoryClient.publish_item", fail_if_called)
+
+    with _client() as client:
+        preview = client.get("/api/listings/BK-000008/publish-preview")
+        publish = client.post("/api/ebay/publish/BK-000008")
+
+    assert preview.status_code == 200
+    assert preview.json()["repair_plan_id"] == new_plan_id
+    assert preview.json()["would_publish"] is False
+    assert publish.status_code == 409
+    assert publish.json()["detail"]["repair_plan_id"] == new_plan_id
+
+
+def test_relist_blocks_repair_blocked_sku_before_publish_call(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    _seed_item(
+        ebay_category_id="14056",
+        condition_id="3000",
+        status=ItemStatus.LISTED,
+        listing_id="listing-1",
+        offer_id="offer-1",
+    )
+    plan_id = _seed_blocking_repair_plan()
+
+    def fail_if_called(*_args, **_kwargs):
+        raise AssertionError("relist should not call publish when repair queue blocks retry")
+
+    monkeypatch.setattr("packages.sync.src.relister.AutoRelister.relist", fail_if_called)
+
+    with _client() as client:
+        resp = client.post("/api/sync/relist/BK-000008")
+
+    assert resp.status_code == 409
+    detail = resp.json()["detail"]
+    assert detail["code"] == "blocked_by_repair_queue"
+    assert detail["repair_plan_id"] == plan_id
 
 
 def test_draft_fix_generates_high_risk_condition_draft_without_previous_publish_attempt(monkeypatch, tmp_path):

@@ -52,6 +52,8 @@ CONDITION_LABEL_FALLBACKS = {
     "NEW": ["1000", "1500"],
     "NEW_OTHER": ["1500", "1000"],
     "NEW_WITH_DEFECTS": ["2000", "1500"],
+    "USED_EXCELLENT": ["3000", "4000"],
+    "USED_VERY_GOOD": ["4000", "3000"],
     "LIKE_NEW": ["3000", "4000"],
     "VERY_GOOD": ["4000", "3000"],
     "USED_GOOD": ["3000", "4000"],
@@ -126,7 +128,17 @@ class DeterministicRepairSuggestionProvider(RepairSuggestionProvider):
 
         if classified_error_code == "invalid_category_condition":
             allowed_condition_ids = expected_value.get("allowed_condition_ids") or []
-            suggested_value = _condition_suggestion_payload(item, allowed_condition_ids)
+            if expected_value.get("local_policy_status") == "suspect_or_stale":
+                suggested_value = _empty_condition_suggestion_payload(item) | {
+                    "rejected_by_live_validation": {
+                        "condition_id": current_value.get("condition_id") or item.condition_id or "",
+                        "inventory_condition_enum": current_value.get("inventory_condition_enum")
+                        or expected_value.get("rejected_inventory_condition_enum")
+                        or _infer_internal_condition_key(item),
+                    }
+                }
+            else:
+                suggested_value = _condition_suggestion_payload(item, allowed_condition_ids)
             return {
                 "affected_field": "condition_id",
                 "suggested_value": suggested_value,
@@ -216,6 +228,8 @@ def get_repair_queue_detail(session: Session, sku: str) -> dict:
         and compatibility["ready"]
         and not any(str(plan.status) in ACTIVE_REPAIR_STATUSES - {"ready_to_retry", "resolved", "ignored"} for plan in plans)
     )
+    if ready_to_retry and item and _has_live_condition_policy_conflict(session, item):
+        ready_to_retry = False
 
     repair_status = summarize_repair_status(session, normalized)
     if ready_to_retry and plans:
@@ -246,11 +260,12 @@ def summarize_repair_status(session: Session, sku: str) -> dict:
         .where(PublishAttemptRecord.sku == normalized)
         .order_by(PublishAttemptRecord.attempted_at.desc())
     ).first()
-    latest_plan = session.exec(
+    plans = session.exec(
         select(PublishRepairPlanRecord)
         .where(PublishRepairPlanRecord.sku == normalized)
         .order_by(PublishRepairPlanRecord.updated_at.desc())
-    ).first()
+    ).all()
+    latest_plan = next((plan for plan in plans if str(plan.status or "") in ACTIVE_REPAIR_STATUSES), None)
     if not latest_plan:
         return {
             "has_open_repair": False,
@@ -269,6 +284,145 @@ def summarize_repair_status(session: Session, sku: str) -> dict:
         "risk_level": str(latest_plan.risk_level or ""),
         "suggested_fixes": _loads(latest_plan.suggested_actions_json, []),
         "ready_to_retry": bool(latest_plan.retry_allowed),
+    }
+
+
+def get_publish_repair_blocker(session: Session, sku: str) -> dict:
+    normalized = (sku or "").strip().upper()
+    latest_attempt = session.exec(
+        select(PublishAttemptRecord)
+        .where(PublishAttemptRecord.sku == normalized)
+        .order_by(PublishAttemptRecord.attempted_at.desc())
+    ).first()
+    latest_plan = session.exec(
+        select(PublishRepairPlanRecord)
+        .where(PublishRepairPlanRecord.sku == normalized)
+        .order_by(PublishRepairPlanRecord.updated_at.desc())
+    ).first()
+
+    empty_status = {
+        "has_open_repair": False,
+        "status": "none",
+        "last_error_code": "",
+        "repair_layer": "",
+        "risk_level": "",
+        "suggested_fixes": [],
+        "ready_to_retry": False,
+    }
+    if latest_plan is None:
+        return {
+            "sku": normalized,
+            "blocked_by_repair_queue": False,
+            "repair_plan_id": "",
+            "latest_publish_attempt_id": latest_attempt.id if latest_attempt else "",
+            "repair_status": empty_status,
+            "status": "none",
+            "retry_allowed": True,
+            "requires_review": False,
+            "classified_error_code": "",
+            "suggested_actions": [],
+            "reason": "",
+            "policy_conflict": False,
+            "condition_diagnostics": {},
+        }
+
+    status = str(latest_plan.status or "")
+    is_active = status in ACTIVE_REPAIR_STATUSES
+    decisions = session.exec(
+        select(PublishRepairDecisionRecord)
+        .where(PublishRepairDecisionRecord.repair_plan_id == latest_plan.id)
+        .order_by(PublishRepairDecisionRecord.created_at.desc())
+    ).all()
+    has_approval = bool(decisions)
+    requires_unapproved_review = bool(latest_plan.requires_review) and status not in {"resolved", "ignored"} and not has_approval
+    blocked = bool(
+        is_active
+        and (
+            status == "needs_manual_review"
+            or not bool(latest_plan.retry_allowed)
+            or requires_unapproved_review
+        )
+    )
+
+    expected_value = _loads(latest_plan.expected_value_json, {})
+    current_value = _loads(latest_plan.current_value_json, {})
+    raw_error = _loads(latest_attempt.raw_error_json, {}) if latest_attempt else {}
+    raw_details = raw_error.get("details") if isinstance(raw_error, dict) else {}
+    if not isinstance(raw_details, dict):
+        raw_details = {}
+    category_id = str(
+        current_value.get("category_id")
+        or raw_details.get("category_id")
+        or ""
+    )
+    condition_id = str(
+        current_value.get("condition_id")
+        or current_value.get("local_condition_id")
+        or raw_details.get("local_condition_id")
+        or ""
+    )
+    allowed_condition_ids = [str(value or "").strip() for value in expected_value.get("allowed_condition_ids") or expected_value.get("local_policy_allowed_condition_ids") or []]
+    policy_conflict = bool(
+        expected_value.get("local_policy_status") == "suspect_or_stale"
+        or expected_value.get("policy_conflict")
+        or expected_value.get("contradicted_by") == "ebay_error"
+        or (
+            str(latest_plan.classified_error_code or "") == "invalid_category_condition"
+            and str(latest_attempt.ebay_error_id if latest_attempt else "") == "25021"
+            and condition_id
+            and condition_id in allowed_condition_ids
+        )
+    )
+
+    suggested_actions = _loads(latest_plan.suggested_actions_json, [])
+    reason = ""
+    if blocked:
+        if status == "needs_manual_review":
+            reason = "Latest repair plan requires manual review before publish can be retried."
+        elif not bool(latest_plan.retry_allowed):
+            reason = "Latest repair plan does not allow retry."
+        elif requires_unapproved_review:
+            reason = "Latest repair plan requires an approved repair decision before publish can be retried."
+        else:
+            reason = "Latest repair plan blocks publish retry."
+
+    repair_status = {
+        "has_open_repair": is_active,
+        "status": status,
+        "last_error_code": str(latest_plan.classified_error_code or (latest_attempt.classified_error_code if latest_attempt else "")),
+        "repair_layer": str(latest_plan.repair_layer or ""),
+        "risk_level": str(latest_plan.risk_level or ""),
+        "suggested_fixes": suggested_actions,
+        "ready_to_retry": bool(latest_plan.retry_allowed) and not blocked,
+    }
+    return {
+        "sku": normalized,
+        "blocked_by_repair_queue": blocked,
+        "repair_plan_id": latest_plan.id,
+        "latest_publish_attempt_id": str(latest_plan.publish_attempt_id or (latest_attempt.id if latest_attempt else "")),
+        "repair_status": repair_status,
+        "status": status,
+        "retry_allowed": bool(latest_plan.retry_allowed) and not blocked,
+        "requires_review": bool(latest_plan.requires_review),
+        "classified_error_code": str(latest_plan.classified_error_code or ""),
+        "suggested_actions": suggested_actions,
+        "reason": reason,
+        "policy_conflict": policy_conflict,
+        "condition_diagnostics": {
+            "condition_id": condition_id,
+            "local_condition_id": condition_id,
+            "inventory_condition_enum": str(
+                current_value.get("inventory_condition_enum")
+                or raw_details.get("inventory_condition_enum")
+                or ""
+            ),
+            "category_id": category_id,
+            "offer_id": str(current_value.get("offer_id") or raw_details.get("offer_id") or ""),
+            "failed_stage": str(current_value.get("stage") or raw_details.get("stage") or (latest_attempt.stage if latest_attempt else "")),
+            "rejected_condition_id": condition_id if policy_conflict else "",
+            "rejected_category_id": category_id if policy_conflict else "",
+            "contradicted_by": "ebay_error" if policy_conflict else "",
+        },
     }
 
 
@@ -423,6 +577,8 @@ def classify_publish_failure(item: Item, *, result) -> dict:
 
     if "25021" in combined or "invalid item condition information" in combined or "invalid categoryid or condition" in combined:
         policy = get_category_condition_policy(str(item.ebay_category_id or ""))
+        if _local_policy_is_contradicted_by_live_error(item, policy):
+            return _classify_live_condition_policy_conflict(item, policy, result=result)
         return {
             "classified_error_code": "invalid_category_condition",
             "repair_layer": "category_compatibility",
@@ -630,6 +786,8 @@ def recheck_repair_readiness(session: Session, sku: str) -> dict:
     readiness = evaluate_publish_readiness(item).as_dict()
     compatibility = evaluate_publish_compatibility(item, strict_condition_policy=True)
     ready_to_retry = readiness["ready"] and compatibility["ready"]
+    if ready_to_retry and _has_live_condition_policy_conflict(session, item):
+        ready_to_retry = False
 
     plans = session.exec(
         select(PublishRepairPlanRecord).where(PublishRepairPlanRecord.sku == normalized)
@@ -1553,9 +1711,9 @@ def _infer_internal_condition_key(item: Item) -> str:
 
     condition_label = str(item.condition_label or "").strip().lower()
     if "very good" in condition_label:
-        return "VERY_GOOD"
+        return "USED_VERY_GOOD"
     if "like new" in condition_label or "excellent" in condition_label:
-        return "LIKE_NEW"
+        return "USED_EXCELLENT"
     if "acceptable" in condition_label or "fair" in condition_label:
         return "USED_ACCEPTABLE"
     if "parts" in condition_label:
@@ -1603,7 +1761,22 @@ def _condition_suggestion_payload(item: Item, allowed_condition_ids: list[str]) 
     return payload
 
 
+def _empty_condition_suggestion_payload(item: Item) -> dict:
+    return {
+        "allowed_options": [],
+        "likely_options": [],
+        "recommended_value": None,
+        "internal_condition_key": _infer_internal_condition_key(item),
+    }
+
+
 def _condition_suggested_actions(item: Item, policy_context: dict, suggestion_payload: dict) -> list[str]:
+    if policy_context.get("local_policy_status") == "suspect_or_stale":
+        return [
+            "Review whether the selected category is wrong for this item's actual condition.",
+            "Fetch live item-condition policy metadata before choosing another condition.",
+            "Do not blindly cycle to another local fallback condition ID until the live category policy is confirmed.",
+        ]
     actions = [
         "Choose one allowed condition ID for the exact eBay category.",
         "If the item does not fit any allowed condition, review whether the category is wrong.",
@@ -1673,3 +1846,95 @@ def _loads(value: Any, default: Any) -> Any:
         return json.loads(value)
     except Exception:
         return default
+
+
+def _local_policy_is_contradicted_by_live_error(item: Item, policy: dict) -> bool:
+    allowed_condition_ids = [str(value or "").strip() for value in policy.get("allowed_condition_ids") or []]
+    condition_id = str(item.condition_id or "").strip()
+    return bool(condition_id and allowed_condition_ids and condition_id in allowed_condition_ids)
+
+
+def _classify_live_condition_policy_conflict(item: Item, policy: dict, *, result) -> dict:
+    allowed_condition_ids = [str(value or "").strip() for value in policy.get("allowed_condition_ids") or []]
+    diagnostics = _condition_error_diagnostics(item, result=result)
+    expected_value = {
+        "category_id": str(item.ebay_category_id or ""),
+        "policy_source": str(policy.get("source") or ""),
+        "local_policy_status": "suspect_or_stale",
+        "local_policy_allowed_condition_ids": allowed_condition_ids,
+        "local_policy_allowed_condition_options": _condition_options(allowed_condition_ids),
+        "policy_conflict_reason": "Live eBay rejected a condition that the local built-in category policy marked as allowed.",
+        "review_required": True,
+        "next_action": "Review category selection or fetch live item-condition policy metadata before retrying.",
+    }
+    suggested_value = _empty_condition_suggestion_payload(item) | {
+        "rejected_by_live_validation": {
+            "condition_id": diagnostics["local_condition_id"],
+            "inventory_condition_enum": diagnostics["inventory_condition_enum"],
+        }
+    }
+    return {
+        "classified_error_code": "invalid_category_condition",
+        "repair_layer": "category_compatibility",
+        "requires_review": True,
+        "retry_allowed": False,
+        "ebay_error_id": _extract_ebay_error_id(str(result.details.get("body") or "")) or "25021",
+        "ebay_error_message": "Live eBay rejected the condition/category pairing even though the local built-in policy marked it as allowed.",
+        "plans": [
+            _plan_payload(
+                item,
+                affected_field="condition_id",
+                risk_level="high",
+                safe_to_auto_apply=False,
+                requires_review=True,
+                retry_allowed=False,
+                source="ebay_error_live_policy_conflict",
+                repair_layer="category_compatibility",
+                classified_error_code="invalid_category_condition",
+                current_value=diagnostics,
+                expected_value=expected_value,
+                suggested_value=suggested_value,
+                suggested_actions=_condition_suggested_actions(item, expected_value, suggested_value),
+            )
+        ],
+    }
+
+
+def _has_live_condition_policy_conflict(session: Session, item: Item) -> bool:
+    normalized = str(item.sku or "").strip().upper()
+    condition_id = str(item.condition_id or "").strip()
+    category_id = str(item.ebay_category_id or "").strip()
+    plans = session.exec(
+        select(PublishRepairPlanRecord)
+        .where(PublishRepairPlanRecord.sku == normalized)
+        .order_by(PublishRepairPlanRecord.updated_at.desc())
+    ).all()
+    for plan in plans:
+        if str(plan.classified_error_code or "") != "invalid_category_condition":
+            continue
+        if str(plan.repair_layer or "") != "category_compatibility":
+            continue
+        expected_value = _loads(plan.expected_value_json, {})
+        if str(expected_value.get("local_policy_status") or "") != "suspect_or_stale":
+            continue
+        current_value = _loads(plan.current_value_json, {})
+        if str(current_value.get("category_id") or "") != category_id:
+            continue
+        if str(current_value.get("condition_id") or "") != condition_id:
+            continue
+        if str(plan.status or "") in ACTIVE_REPAIR_STATUSES:
+            return True
+    return False
+
+
+def _condition_error_diagnostics(item: Item, *, result) -> dict:
+    details = dict(result.details or {})
+    return {
+        "category_id": str(details.get("category_id") or item.ebay_category_id or ""),
+        "condition_id": str(details.get("local_condition_id") or item.condition_id or ""),
+        "local_condition_id": str(details.get("local_condition_id") or item.condition_id or ""),
+        "inventory_condition_enum": str(details.get("inventory_condition_enum") or _infer_internal_condition_key(item) or ""),
+        "offer_id": str(details.get("offer_id") or item.offer_id or ""),
+        "stage": str(details.get("stage") or _infer_stage_from_error(str(result.error or "")) or ""),
+        "raw_ebay_error": str(details.get("body") or result.error or ""),
+    }

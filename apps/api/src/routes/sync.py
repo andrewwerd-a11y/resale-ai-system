@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session
 
 from packages.data.src.db.sqlite import get_session
+from apps.api.src.services.publish_repair import get_publish_repair_blocker
 from packages.testing.src.e2e_guard import (
     E2ESafetyError,
     assert_route_sku_allowed,
@@ -56,6 +57,24 @@ def relist_item(
     if not item:
         raise HTTPException(status_code=404, detail=f"Item {sku} not found")
 
+    repair_blocker = get_publish_repair_blocker(session, item.sku or sku)
+    if repair_blocker["blocked_by_repair_queue"]:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "blocked_by_repair_queue",
+                "sku": (item.sku or sku).upper(),
+                "blocked_by_repair_queue": True,
+                "repair_plan_id": repair_blocker["repair_plan_id"],
+                "latest_publish_attempt_id": repair_blocker["latest_publish_attempt_id"],
+                "repair_status": repair_blocker["repair_status"],
+                "retry_allowed": repair_blocker["retry_allowed"],
+                "classified_error_code": repair_blocker["classified_error_code"],
+                "suggested_actions": repair_blocker["suggested_actions"],
+                "reason": repair_blocker["reason"],
+            },
+        )
+
     relister = AutoRelister()
     result = relister.relist(item, price_adjustment)
     if not result.ok:
@@ -94,8 +113,25 @@ def relist_all(
         allowed = set(selected)
         ended = [item for item in ended if (item.sku or "").upper() in allowed]
 
-    results: dict = {"relisted": 0, "failed": 0, "errors": []}
+    results: dict = {"relisted": 0, "failed": 0, "skipped": 0, "errors": [], "skipped_skus": []}
     for item in ended:
+        repair_blocker = get_publish_repair_blocker(session, item.sku or "")
+        if repair_blocker["blocked_by_repair_queue"]:
+            results["skipped"] += 1
+            results["skipped_skus"].append(
+                {
+                    "sku": item.sku,
+                    "code": "blocked_by_repair_queue",
+                    "reason": repair_blocker["reason"],
+                    "repair_plan_id": repair_blocker["repair_plan_id"],
+                    "latest_publish_attempt_id": repair_blocker["latest_publish_attempt_id"],
+                    "repair_status": repair_blocker["repair_status"],
+                    "retry_allowed": repair_blocker["retry_allowed"],
+                    "classified_error_code": repair_blocker["classified_error_code"],
+                    "suggested_actions": repair_blocker["suggested_actions"],
+                }
+            )
+            continue
         result = relister.relist(item, price_adjustment)
         if result.ok:
             item.listing_id = result.value

@@ -126,6 +126,7 @@ class EbayInventoryClient:
                     invalid_image_urls=invalid_uploaded_urls,
                 )
 
+        inventory_condition = self._resolve_inventory_condition(item)
         try:
             publish_result = self._publish_via_api(item, photo_urls)
             recovered_existing_offer = False
@@ -171,6 +172,9 @@ class EbayInventoryClient:
                 body=exc.body,
                 stage=str(exc.context.get("stage") or exc.step or ""),
                 offer_id=str((exc.context or {}).get("offer_id") or ""),
+                category_id=str(item.ebay_category_id or ""),
+                local_condition_id=str(item.condition_id or ""),
+                inventory_condition_enum=inventory_condition,
                 recovered_existing_offer=bool((exc.context or {}).get("recovered_existing_offer")),
                 used_existing_offer=bool((exc.context or {}).get("used_existing_offer")),
                 already_published=bool((exc.context or {}).get("already_published")),
@@ -359,9 +363,7 @@ class EbayInventoryClient:
     # ── Payload builders ──────────────────────────────────────────────────────
 
     def _build_inventory_payload(self, item: Item, photo_urls: list[str]) -> dict:
-        raw = str(item.condition_id or "5000")
-        digits_only = re.sub(r"[^0-9]", "", raw)[:4]
-        condition = CONDITION_MAP.get(digits_only, "USED_GOOD")
+        condition = self._resolve_inventory_condition(item)
 
         # Load category template from disk cache if available
         template = None
@@ -396,6 +398,12 @@ class EbayInventoryClient:
         if item.condition_notes:
             payload["conditionDescription"] = item.condition_notes[:1000]
         return payload
+
+    @staticmethod
+    def _resolve_inventory_condition(item: Item) -> str:
+        raw = str(item.condition_id or "5000")
+        digits_only = re.sub(r"[^0-9]", "", raw)[:4]
+        return CONDITION_MAP.get(digits_only, "USED_GOOD")
 
     def _collect_item_specifics(self, item: Item, template=None) -> dict[str, list[str]]:
         """

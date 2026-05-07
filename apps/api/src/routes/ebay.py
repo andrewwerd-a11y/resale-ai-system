@@ -20,6 +20,7 @@ from apps.api.src.services.publish_repair import (
     draft_fix_for_sku,
     get_repair_queue,
     get_repair_queue_detail,
+    get_publish_repair_blocker,
     record_publish_blocked,
     record_publish_failure,
     recheck_repair_readiness,
@@ -304,8 +305,25 @@ def publish_batch(
     if not items:
         return {"message": "No items ready to publish", "count": 0}
     client = EbayInventoryClient()
-    results = {"published": 0, "failed": 0, "errors": []}
+    results = {"published": 0, "failed": 0, "skipped": 0, "errors": [], "skipped_skus": []}
     for item in items:
+        repair_blocker = get_publish_repair_blocker(session, item.sku or "")
+        if repair_blocker["blocked_by_repair_queue"]:
+            results["skipped"] += 1
+            results["skipped_skus"].append(
+                {
+                    "sku": item.sku,
+                    "code": "blocked_by_repair_queue",
+                    "reason": repair_blocker["reason"],
+                    "repair_plan_id": repair_blocker["repair_plan_id"],
+                    "latest_publish_attempt_id": repair_blocker["latest_publish_attempt_id"],
+                    "repair_status": repair_blocker["repair_status"],
+                    "retry_allowed": repair_blocker["retry_allowed"],
+                    "classified_error_code": repair_blocker["classified_error_code"],
+                    "suggested_actions": repair_blocker["suggested_actions"],
+                }
+            )
+            continue
         result = client.publish_item(item)
         if result.ok:
             data = result.value
@@ -345,6 +363,24 @@ def publish_item(sku: str, session: Session = Depends(get_session)):
         raise HTTPException(status_code=404, detail=f"Item {sku} not found")
     if item.status not in (ItemStatus.APPROVED, ItemStatus.EXPORT_READY):
         raise HTTPException(status_code=400, detail=f"Item must be approved. Current status: {item.status}")
+
+    repair_blocker = get_publish_repair_blocker(session, item.sku or sku)
+    if repair_blocker["blocked_by_repair_queue"]:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "blocked_by_repair_queue",
+                "sku": (item.sku or sku).upper(),
+                "blocked_by_repair_queue": True,
+                "repair_plan_id": repair_blocker["repair_plan_id"],
+                "latest_publish_attempt_id": repair_blocker["latest_publish_attempt_id"],
+                "repair_status": repair_blocker["repair_status"],
+                "retry_allowed": repair_blocker["retry_allowed"],
+                "classified_error_code": repair_blocker["classified_error_code"],
+                "suggested_actions": repair_blocker["suggested_actions"],
+                "reason": repair_blocker["reason"],
+            },
+        )
 
     readiness = evaluate_publish_readiness(item).as_dict()
     compatibility = evaluate_publish_compatibility(item, strict_condition_policy=True)
@@ -422,6 +458,17 @@ def publish_item(sku: str, session: Session = Depends(get_session)):
             "retry_allowed": False,
             "requires_review": bool(repair_record["classified_error"]["requires_review"]),
         }
+        if any(
+            result.details.get(key)
+            for key in ("local_condition_id", "inventory_condition_enum", "category_id", "offer_id")
+        ):
+            error_detail["condition_diagnostics"] = {
+                "local_condition_id": str(result.details.get("local_condition_id") or ""),
+                "inventory_condition_enum": str(result.details.get("inventory_condition_enum") or ""),
+                "category_id": str(result.details.get("category_id") or ""),
+                "offer_id": str(result.details.get("offer_id") or ""),
+                "stage": str(result.details.get("stage") or ""),
+            }
         if recovered_offer_saved:
             error_detail["recovered_offer_id"] = item.offer_id
         if result.details.get("next_action"):

@@ -16,7 +16,7 @@ from pydantic import BaseModel
 from sqlmodel import Session, select
 
 from apps.api.src.services.ebay_auth_diagnostics import get_ebay_auth_readiness
-from apps.api.src.services.publish_repair import summarize_repair_status
+from apps.api.src.services.publish_repair import get_publish_repair_blocker
 from apps.api.src.services.publish_readiness import evaluate_publish_readiness, not_found_publish_readiness
 from packages.core.src.config import get_settings
 from packages.data.src.db.sqlite import get_session
@@ -167,11 +167,25 @@ def get_publish_preview(sku: str, session: Session = Depends(get_session)):
     if not is_live_e2e_enabled():
         mutation_reasons.append("ALLOW_LIVE_E2E is false, so live mutation remains blocked.")
 
+    repair_blocker = get_publish_repair_blocker(session, item.sku or sku)
+    repair_status = repair_blocker["repair_status"]
+
     return {
         "sku": (item.sku or "").upper(),
         "readiness": readiness,
-        "repair_status": summarize_repair_status(session, sku),
-        "would_publish": readiness["ready"],
+        "repair_status": repair_status,
+        "blocked_by_repair_queue": bool(repair_blocker["blocked_by_repair_queue"]),
+        "would_publish": bool(readiness["ready"] and not repair_blocker["blocked_by_repair_queue"]),
+        "repair_plan_id": repair_blocker["repair_plan_id"],
+        "latest_publish_attempt_id": repair_blocker["latest_publish_attempt_id"],
+        "retry_allowed": repair_blocker["retry_allowed"],
+        "classified_error_code": repair_blocker["classified_error_code"],
+        "policy_conflict": repair_blocker["policy_conflict"],
+        "repair_queue_blocker": repair_blocker,
+        "condition_id": str(item.condition_id or ""),
+        "inventory_condition_enum": str(inventory_payload.get("condition") or ""),
+        "category_id": str(item.ebay_category_id or ""),
+        "offer_id": str(item.offer_id or ""),
         "existing_offer_id_detected": existing_offer_id_detected,
         "planned_action": planned_action,
         "listing_id_missing": not bool(str(item.listing_id or "").strip()),

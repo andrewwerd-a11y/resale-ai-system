@@ -47,3 +47,11 @@ def test_build_offer_payload_falls_back_to_location_lookup(monkeypatch: pytest.M
     )
 
     assert payload["merchantLocationKey"] == "warehouse-1"
+
+
+def test_condition_id_3000_resolves_to_used_good() -> None:
+    client = EbayInventoryClient()
+    item = _build_item()
+    item.condition_id = "3000"
+
+    assert client._resolve_inventory_condition(item) == "USED_GOOD"
