@@ -58,6 +58,25 @@ EBAY_ERROR_HINTS = {
 }
 
 
+def _repair_queue_blocked_detail(sku: str, repair_blocker: dict) -> dict:
+    return {
+        "code": "blocked_by_repair_queue",
+        "sku": (sku or repair_blocker.get("sku") or "").upper(),
+        "blocked_by_repair_queue": True,
+        "repair_plan_id": repair_blocker["repair_plan_id"],
+        "latest_publish_attempt_id": repair_blocker["latest_publish_attempt_id"],
+        "repair_status": repair_blocker["repair_status"],
+        "retry_allowed": repair_blocker["retry_allowed"],
+        "classified_error_code": repair_blocker["classified_error_code"],
+        "reason": repair_blocker["reason"],
+        "suggested_actions": repair_blocker["suggested_actions"],
+    }
+
+
+def _is_listed_on_ebay(item) -> bool:
+    return bool(str(item.listing_id or "").strip()) or str(item.status or "") == "listed"
+
+
 # ── GET /api/listings ──────────────────────────────────────────────────────────
 
 @router.get("")
@@ -470,6 +489,13 @@ def push_to_ebay(sku: str, payload: PushPayload, session: Session = Depends(get_
     if not item:
         raise HTTPException(status_code=404, detail=f"Item {sku} not found")
 
+    repair_blocker = get_publish_repair_blocker(session, item.sku or sku)
+    if repair_blocker["blocked_by_repair_queue"]:
+        raise HTTPException(
+            status_code=409,
+            detail=_repair_queue_blocked_detail(item.sku or sku, repair_blocker),
+        )
+
     if not item.offer_id:
         raise HTTPException(
             status_code=400,
@@ -625,6 +651,13 @@ def end_listing(sku: str, session: Session = Depends(get_session)):
         raise HTTPException(status_code=404, detail=f"Item {sku} not found")
     if not item.offer_id:
         raise HTTPException(status_code=400, detail="No offer ID — cannot withdraw")
+
+    repair_blocker = get_publish_repair_blocker(session, item.sku or sku)
+    if repair_blocker["blocked_by_repair_queue"] and not _is_listed_on_ebay(item):
+        raise HTTPException(
+            status_code=409,
+            detail=_repair_queue_blocked_detail(item.sku or sku, repair_blocker),
+        )
 
     auth = EbayAuth()
     if not auth.is_configured():

@@ -609,6 +609,115 @@ def test_relist_blocks_repair_blocked_sku_before_publish_call(monkeypatch, tmp_p
     assert detail["repair_plan_id"] == plan_id
 
 
+def test_listings_push_blocks_repair_blocked_sku_before_ebay_mutation(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    _seed_item(
+        offer_id="156719395011",
+        listing_id=None,
+        status=ItemStatus.EXPORT_READY,
+        title_final="Original title",
+        list_price=22.0,
+    )
+    plan_id = _seed_blocking_repair_plan()
+
+    def fail_put(*_args, **_kwargs):
+        raise AssertionError("listings.push must not call eBay PUT for a repair-blocked SKU")
+
+    monkeypatch.setattr("apps.api.src.routes.listings.ebay_http.put", fail_put)
+
+    with _client() as client:
+        resp = client.post(
+            "/api/listings/push/BK-000008",
+            json={"title": "Mutated title", "list_price": 99.99},
+        )
+
+    assert resp.status_code == 409
+    detail = resp.json()["detail"]
+    assert detail["code"] == "blocked_by_repair_queue"
+    assert detail["blocked_by_repair_queue"] is True
+    assert detail["repair_plan_id"] == plan_id
+    assert detail["retry_allowed"] is False
+    assert detail["repair_status"]["status"] == "needs_manual_review"
+    assert detail["classified_error_code"] == "invalid_category_condition"
+    assert detail["reason"]
+    assert detail["suggested_actions"]
+    with Session(sqlite_db.engine) as session:
+        item = ItemRepository(session).get_by_sku("BK-000008")
+        assert item is not None
+        assert item.title_final == "Original title"
+        assert item.list_price == 22.0
+        assert item.status == ItemStatus.EXPORT_READY
+        assert item.listing_id is None
+
+
+def test_listings_end_blocks_repair_blocked_unpublished_offer_before_withdraw(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    _seed_item(
+        offer_id="156719395011",
+        listing_id=None,
+        status=ItemStatus.EXPORT_READY,
+    )
+    plan_id = _seed_blocking_repair_plan()
+
+    def fail_delete(*_args, **_kwargs):
+        raise AssertionError("listings.end must not withdraw a repair-blocked unpublished offer")
+
+    monkeypatch.setattr("apps.api.src.routes.listings.ebay_http.delete", fail_delete)
+
+    with _client() as client:
+        resp = client.delete("/api/listings/end/BK-000008")
+
+    assert resp.status_code == 409
+    detail = resp.json()["detail"]
+    assert detail["code"] == "blocked_by_repair_queue"
+    assert detail["blocked_by_repair_queue"] is True
+    assert detail["repair_plan_id"] == plan_id
+    assert detail["retry_allowed"] is False
+    assert detail["repair_status"]["status"] == "needs_manual_review"
+    assert detail["classified_error_code"] == "invalid_category_condition"
+    assert detail["reason"]
+    assert detail["suggested_actions"]
+
+
+def test_listings_end_allows_listed_item_with_resolved_historical_repair(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    _seed_item(
+        sku="BK-000005",
+        offer_id="O-BK-000005",
+        listing_id="L-BK-000005",
+        status=ItemStatus.LISTED,
+    )
+    _seed_blocking_repair_plan(
+        sku="BK-000005",
+        status="resolved",
+        retry_allowed=False,
+        requires_review=False,
+        publish_attempt_id="attempt-resolved",
+    )
+
+    class _Resp:
+        status_code = 204
+        text = ""
+
+    delete_calls: list[str] = []
+
+    def fake_delete(url, *_args, **_kwargs):
+        delete_calls.append(url)
+        return _Resp()
+
+    monkeypatch.setattr("apps.api.src.routes.listings.ebay_http.delete", fake_delete)
+
+    with _client() as client:
+        resp = client.delete("/api/listings/end/BK-000005")
+
+    assert resp.status_code == 200
+    assert delete_calls and delete_calls[0].endswith("/offer/O-BK-000005/withdraw")
+    with Session(sqlite_db.engine) as session:
+        item = ItemRepository(session).get_by_sku("BK-000005")
+        assert item is not None
+        assert item.status == ItemStatus.EXPORT_READY
+
+
 def test_draft_fix_generates_high_risk_condition_draft_without_previous_publish_attempt(monkeypatch, tmp_path):
     _configure_temp_db(monkeypatch, tmp_path)
     _seed_item(ebay_category_id="14056", condition_id="5000")
