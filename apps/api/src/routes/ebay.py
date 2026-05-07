@@ -462,12 +462,32 @@ def publish_item(sku: str, session: Session = Depends(get_session)):
             result.details.get(key)
             for key in ("local_condition_id", "inventory_condition_enum", "category_id", "offer_id")
         ):
+            offer_id = str(result.details.get("offer_id") or item.offer_id or "")
+            existing_offer_id_detected = bool(
+                offer_id
+                and not str(item.listing_id or "").strip()
+                and str(item.status or "") != "listed"
+            )
+            stage = str(result.details.get("stage") or "")
+            stale_existing_offer_hypothesis = bool(existing_offer_id_detected and stage == "publish_offer")
             error_detail["condition_diagnostics"] = {
                 "local_condition_id": str(result.details.get("local_condition_id") or ""),
                 "inventory_condition_enum": str(result.details.get("inventory_condition_enum") or ""),
                 "category_id": str(result.details.get("category_id") or ""),
-                "offer_id": str(result.details.get("offer_id") or ""),
-                "stage": str(result.details.get("stage") or ""),
+                "current_category_id": str(item.ebay_category_id or ""),
+                "current_condition_id": str(item.condition_id or ""),
+                "previous_category_id": str(result.details.get("previous_category_id") or ""),
+                "previous_condition_id": str(result.details.get("previous_condition_id") or ""),
+                "offer_id": offer_id,
+                "existing_offer_id_detected": existing_offer_id_detected,
+                "planned_action": "publish_existing_offer" if existing_offer_id_detected else "create_offer_then_publish",
+                "stage": stage,
+                "stale_existing_offer_hypothesis": stale_existing_offer_hypothesis,
+                "stale_existing_offer_note": (
+                    "Existing unpublished offer may contain stale category or condition state; diagnose before retrying publish."
+                    if stale_existing_offer_hypothesis
+                    else ""
+                ),
             }
         if recovered_offer_saved:
             error_detail["recovered_offer_id"] = item.offer_id

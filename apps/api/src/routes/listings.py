@@ -187,6 +187,10 @@ def get_publish_preview(sku: str, session: Session = Depends(get_session)):
         "category_id": str(item.ebay_category_id or ""),
         "offer_id": str(item.offer_id or ""),
         "existing_offer_id_detected": existing_offer_id_detected,
+        "existing_offer_stale_state_diagnostic": repair_blocker["condition_diagnostics"].get("stale_existing_offer_note", ""),
+        "stale_existing_offer_hypothesis": bool(
+            repair_blocker["condition_diagnostics"].get("stale_existing_offer_hypothesis")
+        ),
         "planned_action": planned_action,
         "listing_id_missing": not bool(str(item.listing_id or "").strip()),
         "mutation_allowed": mutation_allowed,

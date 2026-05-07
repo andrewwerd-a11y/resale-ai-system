@@ -52,9 +52,9 @@ CONDITION_LABEL_FALLBACKS = {
     "NEW": ["1000", "1500"],
     "NEW_OTHER": ["1500", "1000"],
     "NEW_WITH_DEFECTS": ["2000", "1500"],
-    "USED_EXCELLENT": ["3000", "4000"],
+    "USED_EXCELLENT": ["4000"],
     "USED_VERY_GOOD": ["4000", "3000"],
-    "LIKE_NEW": ["3000", "4000"],
+    "LIKE_NEW": ["4000"],
     "VERY_GOOD": ["4000", "3000"],
     "USED_GOOD": ["3000", "4000"],
     "USED_ACCEPTABLE": ["6000", "5000", "3000"],
@@ -232,6 +232,7 @@ def get_repair_queue_detail(session: Session, sku: str) -> dict:
         ready_to_retry = False
 
     repair_status = summarize_repair_status(session, normalized)
+    repair_blocker = get_publish_repair_blocker(session, normalized)
     if ready_to_retry and plans:
         for plan in plans:
             if plan.status not in {"resolved", "ignored"}:
@@ -244,7 +245,7 @@ def get_repair_queue_detail(session: Session, sku: str) -> dict:
     return {
         "sku": normalized,
         "latest_publish_attempt": _serialize_attempt(latest_attempt),
-        "repair_plans": [_serialize_plan(plan) for plan in plans],
+        "repair_plans": [_serialize_plan(plan, repair_blocker=repair_blocker) for plan in plans],
         "repair_decisions": [_serialize_decision(decision) for decision in decisions],
         "readiness_summary": readiness,
         "compatibility_summary": compatibility,
@@ -275,7 +276,10 @@ def summarize_repair_status(session: Session, sku: str) -> dict:
             "risk_level": "",
             "suggested_fixes": [],
             "ready_to_retry": False,
+            "latest_blocking_plan_id": "",
+            "blocked_by_repair_queue": False,
         }
+    repair_blocker = get_publish_repair_blocker(session, normalized)
     return {
         "has_open_repair": str(latest_plan.status) in ACTIVE_REPAIR_STATUSES,
         "status": str(latest_plan.status),
@@ -283,12 +287,15 @@ def summarize_repair_status(session: Session, sku: str) -> dict:
         "repair_layer": str(latest_plan.repair_layer or ""),
         "risk_level": str(latest_plan.risk_level or ""),
         "suggested_fixes": _loads(latest_plan.suggested_actions_json, []),
-        "ready_to_retry": bool(latest_plan.retry_allowed),
+        "ready_to_retry": bool(latest_plan.retry_allowed) and not repair_blocker["blocked_by_repair_queue"],
+        "latest_blocking_plan_id": repair_blocker["repair_plan_id"] if repair_blocker["blocked_by_repair_queue"] else "",
+        "blocked_by_repair_queue": bool(repair_blocker["blocked_by_repair_queue"]),
     }
 
 
 def get_publish_repair_blocker(session: Session, sku: str) -> dict:
     normalized = (sku or "").strip().upper()
+    item = ItemRepository(session).get_by_sku(normalized)
     latest_attempt = session.exec(
         select(PublishAttemptRecord)
         .where(PublishAttemptRecord.sku == normalized)
@@ -350,15 +357,33 @@ def get_publish_repair_blocker(session: Session, sku: str) -> dict:
     raw_details = raw_error.get("details") if isinstance(raw_error, dict) else {}
     if not isinstance(raw_details, dict):
         raw_details = {}
+    request_summary = _loads(latest_attempt.request_summary_json, {}) if latest_attempt else {}
+    current_category_id = str(item.ebay_category_id or "") if item else ""
+    current_condition_id = str(item.condition_id or "") if item else ""
+    offer_id = str(
+        current_value.get("offer_id")
+        or raw_details.get("offer_id")
+        or (item.offer_id if item else "")
+        or ""
+    )
+    existing_offer_id_detected = bool(
+        offer_id
+        and item
+        and not str(item.listing_id or "").strip()
+        and str(item.status or "") != "listed"
+    )
+    planned_action = "publish_existing_offer" if existing_offer_id_detected else "create_offer_then_publish"
     category_id = str(
         current_value.get("category_id")
         or raw_details.get("category_id")
+        or current_category_id
         or ""
     )
     condition_id = str(
         current_value.get("condition_id")
         or current_value.get("local_condition_id")
         or raw_details.get("local_condition_id")
+        or current_condition_id
         or ""
     )
     allowed_condition_ids = [str(value or "").strip() for value in expected_value.get("allowed_condition_ids") or expected_value.get("local_policy_allowed_condition_ids") or []]
@@ -411,14 +436,36 @@ def get_publish_repair_blocker(session: Session, sku: str) -> dict:
         "condition_diagnostics": {
             "condition_id": condition_id,
             "local_condition_id": condition_id,
+            "current_condition_id": current_condition_id,
+            "current_category_id": current_category_id,
+            "previous_condition_id": str(
+                raw_details.get("previous_condition_id")
+                or request_summary.get("previous_condition_id")
+                or current_value.get("previous_condition_id")
+                or ""
+            ),
+            "previous_category_id": str(
+                raw_details.get("previous_category_id")
+                or request_summary.get("previous_category_id")
+                or current_value.get("previous_category_id")
+                or ""
+            ),
             "inventory_condition_enum": str(
                 current_value.get("inventory_condition_enum")
                 or raw_details.get("inventory_condition_enum")
                 or ""
             ),
             "category_id": category_id,
-            "offer_id": str(current_value.get("offer_id") or raw_details.get("offer_id") or ""),
+            "offer_id": offer_id,
+            "existing_offer_id_detected": existing_offer_id_detected,
+            "planned_action": planned_action,
             "failed_stage": str(current_value.get("stage") or raw_details.get("stage") or (latest_attempt.stage if latest_attempt else "")),
+            "stale_existing_offer_hypothesis": bool(existing_offer_id_detected and str(current_value.get("stage") or raw_details.get("stage") or (latest_attempt.stage if latest_attempt else "")) == "publish_offer"),
+            "stale_existing_offer_note": (
+                "Existing unpublished offer may contain stale category or condition state; diagnose before retrying publish."
+                if existing_offer_id_detected and str(current_value.get("stage") or raw_details.get("stage") or (latest_attempt.stage if latest_attempt else "")) == "publish_offer"
+                else ""
+            ),
             "rejected_condition_id": condition_id if policy_conflict else "",
             "rejected_category_id": category_id if policy_conflict else "",
             "contradicted_by": "ebay_error" if policy_conflict else "",
@@ -903,6 +950,21 @@ def apply_draft_fix(
     plan = session.get(PublishRepairPlanRecord, repair_plan_id)
     if not plan or str(plan.sku).upper() != normalized:
         return {"ok": False, "status_code": 404, "detail": f"Repair plan {repair_plan_id} not found for {normalized}"}
+    repair_blocker = get_publish_repair_blocker(session, normalized)
+    if (
+        repair_blocker["blocked_by_repair_queue"]
+        and repair_blocker["repair_plan_id"]
+        and repair_blocker["repair_plan_id"] != plan.id
+        and str(plan.status or "") in ACTIVE_REPAIR_STATUSES
+    ):
+        return {
+            "ok": False,
+            "status_code": 409,
+            "detail": "Repair plan is superseded by a newer blocking repair plan and is not actionable.",
+            "superseded_by_repair_plan_id": repair_blocker["repair_plan_id"],
+            "latest_publish_attempt_id": repair_blocker["latest_publish_attempt_id"],
+            "classified_error_code": repair_blocker["classified_error_code"],
+        }
     if not approved:
         return {"ok": False, "status_code": 400, "detail": "Repair approval is required before applying a draft fix."}
     if str(plan.risk_level) == "high" and edited_value is None:
@@ -1489,12 +1551,32 @@ def _serialize_attempt(attempt: PublishAttemptRecord | None) -> dict | None:
     }
 
 
-def _serialize_plan(plan: PublishRepairPlanRecord) -> dict:
+def _serialize_plan(plan: PublishRepairPlanRecord, *, repair_blocker: dict | None = None) -> dict:
+    blocker = repair_blocker or {}
+    blocked_plan_id = str(blocker.get("repair_plan_id") or "")
+    blocked = bool(blocker.get("blocked_by_repair_queue"))
+    status = str(plan.status or "")
+    active = status in ACTIVE_REPAIR_STATUSES
+    superseded = bool(blocked and active and blocked_plan_id and plan.id != blocked_plan_id)
+    actionable = bool(active and plan.retry_allowed and not blocked and not superseded)
     return {
         "id": plan.id,
         "sku": plan.sku,
         "publish_attempt_id": plan.publish_attempt_id or "",
         "status": plan.status,
+        "active": active and not superseded,
+        "actionable": actionable,
+        "superseded": superseded,
+        "superseded_by_repair_plan_id": blocked_plan_id if superseded else "",
+        "non_actionable_reason": (
+            "Superseded by a newer repair plan that blocks publish retry."
+            if superseded
+            else (
+                "Latest repair plan blocks publish retry."
+                if blocked and plan.id == blocked_plan_id
+                else ""
+            )
+        ),
         "affected_field": plan.affected_field or "",
         "current_value": _loads(plan.current_value_json, {}),
         "expected_value": _loads(plan.expected_value_json, {}),
@@ -1929,12 +2011,32 @@ def _has_live_condition_policy_conflict(session: Session, item: Item) -> bool:
 
 def _condition_error_diagnostics(item: Item, *, result) -> dict:
     details = dict(result.details or {})
+    offer_id = str(details.get("offer_id") or item.offer_id or "")
+    existing_offer_id_detected = bool(
+        offer_id
+        and not str(item.listing_id or "").strip()
+        and str(item.status or "") != "listed"
+    )
+    stage = str(details.get("stage") or _infer_stage_from_error(str(result.error or "")) or "")
+    stale_existing_offer_hypothesis = bool(existing_offer_id_detected and stage == "publish_offer")
     return {
         "category_id": str(details.get("category_id") or item.ebay_category_id or ""),
         "condition_id": str(details.get("local_condition_id") or item.condition_id or ""),
         "local_condition_id": str(details.get("local_condition_id") or item.condition_id or ""),
+        "current_category_id": str(item.ebay_category_id or ""),
+        "current_condition_id": str(item.condition_id or ""),
+        "previous_category_id": str(details.get("previous_category_id") or ""),
+        "previous_condition_id": str(details.get("previous_condition_id") or ""),
         "inventory_condition_enum": str(details.get("inventory_condition_enum") or _infer_internal_condition_key(item) or ""),
-        "offer_id": str(details.get("offer_id") or item.offer_id or ""),
-        "stage": str(details.get("stage") or _infer_stage_from_error(str(result.error or "")) or ""),
+        "offer_id": offer_id,
+        "existing_offer_id_detected": existing_offer_id_detected,
+        "planned_action": "publish_existing_offer" if existing_offer_id_detected else "create_offer_then_publish",
+        "stage": stage,
+        "stale_existing_offer_hypothesis": stale_existing_offer_hypothesis,
+        "stale_existing_offer_note": (
+            "Existing unpublished offer may contain stale category or condition state; diagnose before retrying publish."
+            if stale_existing_offer_hypothesis
+            else ""
+        ),
         "raw_ebay_error": str(details.get("body") or result.error or ""),
     }

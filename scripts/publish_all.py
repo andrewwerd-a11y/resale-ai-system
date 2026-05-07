@@ -29,8 +29,24 @@ from packages.data.src.db.sqlite import engine, init_db
 from packages.data.src.models.item_record import ItemRecord
 from packages.data.src.repositories.item_repo import ItemRepository
 from packages.ebay.src.inventory_client import EbayInventoryClient
+from apps.api.src.services.publish_repair import get_publish_repair_blocker
 
 console = Console()
+
+
+def format_repair_blocker_for_console(blocker: dict) -> str:
+    repair_status = blocker.get("repair_status") or {}
+    parts = [
+        "blocked_by_repair_queue",
+        f"repair_plan_id={blocker.get('repair_plan_id') or ''}",
+        f"retry_allowed={blocker.get('retry_allowed')}",
+        f"repair_status={repair_status.get('status') or blocker.get('status') or ''}",
+        f"classified_error_code={blocker.get('classified_error_code') or ''}",
+    ]
+    reason = str(blocker.get("reason") or "").strip()
+    if reason:
+        parts.append(f"reason={reason}")
+    return " | ".join(parts)
 
 
 def publish_all(
@@ -75,7 +91,7 @@ def publish_all(
 
     console.print(f"Publishing  : [green]{len(skus)}[/green] item(s)\n")
 
-    stats: dict[str, int] = {"published": 0, "failed": 0}
+    stats: dict[str, int] = {"published": 0, "failed": 0, "skipped": 0}
     errors: list[str] = []
 
     with Progress(
@@ -106,6 +122,15 @@ def publish_all(
                             f"{(item.title_final or item.title_raw or '')[:60]}[/dim]"
                         )
                         stats["published"] += 1
+                        progress.advance(task)
+                        continue
+
+                    repair_blocker = get_publish_repair_blocker(session, sku)
+                    if repair_blocker["blocked_by_repair_queue"]:
+                        detail = format_repair_blocker_for_console(repair_blocker)
+                        console.print(f"  [yellow]SKIP[/yellow] {sku}: {detail}")
+                        errors.append(f"{sku}: {detail}")
+                        stats["skipped"] += 1
                         progress.advance(task)
                         continue
 
@@ -145,6 +170,7 @@ def publish_all(
 
     console.rule("Complete")
     console.print(f"  [green]Published : {stats['published']}[/green]")
+    console.print(f"  [yellow]Skipped   : {stats['skipped']}[/yellow]")
     console.print(f"  [red]Failed    : {stats['failed']}[/red]")
     if errors:
         console.print("\n[bold red]Errors:[/bold red]")

@@ -55,3 +55,11 @@ def test_condition_id_3000_resolves_to_used_good() -> None:
     item.condition_id = "3000"
 
     assert client._resolve_inventory_condition(item) == "USED_GOOD"
+
+
+def test_condition_id_3000_is_not_excellent_or_like_new_fallback() -> None:
+    from apps.api.src.services.publish_repair import CONDITION_LABEL_FALLBACKS
+
+    assert "3000" not in CONDITION_LABEL_FALLBACKS["USED_EXCELLENT"]
+    assert "3000" not in CONDITION_LABEL_FALLBACKS["LIKE_NEW"]
+    assert "3000" in CONDITION_LABEL_FALLBACKS["USED_GOOD"]

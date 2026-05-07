@@ -395,13 +395,16 @@ def test_live_25021_on_locally_allowed_condition_marks_policy_suspect_and_blocks
     assert publish_resp.status_code == 500
     publish_detail = publish_resp.json()["detail"]
     assert publish_detail["stage"] == "publish_offer"
-    assert publish_detail["condition_diagnostics"] == {
-        "local_condition_id": "3000",
-        "inventory_condition_enum": "USED_GOOD",
-        "category_id": "14056",
-        "offer_id": "156719395011",
-        "stage": "publish_offer",
-    }
+    condition_diagnostics = publish_detail["condition_diagnostics"]
+    assert condition_diagnostics["local_condition_id"] == "3000"
+    assert condition_diagnostics["inventory_condition_enum"] == "USED_GOOD"
+    assert condition_diagnostics["category_id"] == "14056"
+    assert condition_diagnostics["offer_id"] == "156719395011"
+    assert condition_diagnostics["stage"] == "publish_offer"
+    assert condition_diagnostics["existing_offer_id_detected"] is True
+    assert condition_diagnostics["planned_action"] == "publish_existing_offer"
+    assert condition_diagnostics["stale_existing_offer_hypothesis"] is True
+    assert "stale category or condition state" in condition_diagnostics["stale_existing_offer_note"]
     assert "25021" in " ".join(publish_detail["raw_ebay_errors"])
 
     assert draft_resp.status_code == 200
@@ -429,6 +432,9 @@ def test_live_25021_on_locally_allowed_condition_marks_policy_suspect_and_blocks
     plan = detail_body["repair_plans"][0]
     assert plan["expected_value"]["local_policy_status"] == "suspect_or_stale"
     assert plan["current_value"]["inventory_condition_enum"] == "USED_GOOD"
+    assert plan["current_value"]["existing_offer_id_detected"] is True
+    assert plan["current_value"]["planned_action"] == "publish_existing_offer"
+    assert plan["current_value"]["stale_existing_offer_hypothesis"] is True
 
 
 def test_publish_route_blocks_latest_needs_manual_review_before_mutation(monkeypatch, tmp_path):
@@ -514,13 +520,17 @@ def test_publish_preview_marks_would_publish_false_when_repair_queue_blocks_retr
     assert body["category_id"] == "14056"
     assert body["offer_id"] == "156719395011"
     assert body["existing_offer_id_detected"] is True
+    assert body["stale_existing_offer_hypothesis"] is True
+    assert "stale category or condition state" in body["existing_offer_stale_state_diagnostic"]
+    assert body["repair_queue_blocker"]["condition_diagnostics"]["planned_action"] == "publish_existing_offer"
+    assert body["repair_queue_blocker"]["condition_diagnostics"]["failed_stage"] == "publish_offer"
     assert body["policy_conflict"] is True
 
 
 def test_newer_needs_manual_review_overrides_older_ready_to_retry(monkeypatch, tmp_path):
     _configure_temp_db(monkeypatch, tmp_path)
     _seed_item(ebay_category_id="14056", condition_id="3000")
-    _seed_blocking_repair_plan(
+    old_plan_id = _seed_blocking_repair_plan(
         status="ready_to_retry",
         retry_allowed=True,
         requires_review=False,
@@ -543,12 +553,35 @@ def test_newer_needs_manual_review_overrides_older_ready_to_retry(monkeypatch, t
     with _client() as client:
         preview = client.get("/api/listings/BK-000008/publish-preview")
         publish = client.post("/api/ebay/publish/BK-000008")
+        detail = client.get("/api/ebay/repair-queue/BK-000008")
+        apply_old = client.post(
+            "/api/ebay/repair-queue/BK-000008/apply-draft-fix",
+            json={
+                "sku": "BK-000008",
+                "repair_plan_id": old_plan_id,
+                "approved": True,
+                "edited_value": {"condition_id": "3000"},
+            },
+        )
 
     assert preview.status_code == 200
     assert preview.json()["repair_plan_id"] == new_plan_id
     assert preview.json()["would_publish"] is False
     assert publish.status_code == 409
     assert publish.json()["detail"]["repair_plan_id"] == new_plan_id
+    assert detail.status_code == 200
+    detail_body = detail.json()
+    assert detail_body["repair_status"]["latest_blocking_plan_id"] == new_plan_id
+    assert detail_body["repair_status"]["blocked_by_repair_queue"] is True
+    plans_by_id = {plan["id"]: plan for plan in detail_body["repair_plans"]}
+    assert plans_by_id[new_plan_id]["actionable"] is False
+    assert plans_by_id[new_plan_id]["non_actionable_reason"] == "Latest repair plan blocks publish retry."
+    assert plans_by_id[old_plan_id]["superseded"] is True
+    assert plans_by_id[old_plan_id]["active"] is False
+    assert plans_by_id[old_plan_id]["actionable"] is False
+    assert plans_by_id[old_plan_id]["superseded_by_repair_plan_id"] == new_plan_id
+    assert apply_old.status_code == 400
+    assert "superseded by a newer blocking repair plan" in apply_old.json()["detail"]
 
 
 def test_relist_blocks_repair_blocked_sku_before_publish_call(monkeypatch, tmp_path):
