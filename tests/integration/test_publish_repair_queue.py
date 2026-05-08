@@ -17,7 +17,7 @@ from packages.data.src.models.publish_repair_decision_record import PublishRepai
 from packages.data.src.models.publish_repair_plan_record import PublishRepairPlanRecord
 from packages.data.src.repositories.item_repo import ItemRepository
 from packages.domain.src.entities.item import Item
-from apps.api.src.services.stale_offer_remediation import build_remediation_payload_hash
+from apps.api.src.services.stale_offer_remediation import REQUIRED_TYPED_CONFIRMATION, build_remediation_payload_hash
 
 
 def _client() -> TestClient:
@@ -155,6 +155,169 @@ def _decisions_for_sku(sku: str) -> list[PublishRepairDecisionRecord]:
 
 def _fail_publish_if_called(*_args, **_kwargs):
     raise AssertionError("publish_item should not be called by draft/apply/recheck endpoints")
+
+
+def _eligible_refresh_diagnostics() -> dict:
+    inventory_payload = {
+        "condition": "USED_GOOD",
+        "product": {
+            "title": "Repair title",
+            "description": "Repair description",
+            "imageUrls": ["https://res.cloudinary.com/demo/image/upload/v1/BK-000008-01.jpg"],
+        },
+        "availability": {"shipToLocationAvailability": {"quantity": 1}},
+    }
+    offer_payload = {
+        "sku": "BK-000008",
+        "marketplaceId": "EBAY_US",
+        "format": "FIXED_PRICE",
+        "availableQuantity": 1,
+        "categoryId": "14056",
+        "listingDescription": "Repair description",
+        "merchantLocationKey": "preview-location",
+        "listingPolicies": {
+            "fulfillmentPolicyId": "preview-fulfillment-policy",
+            "paymentPolicyId": "preview-payment-policy",
+            "returnPolicyId": "preview-return-policy",
+            "countryCode": "US",
+        },
+        "pricingSummary": {"price": {"currency": "USD", "value": "22.00"}},
+        "includeCatalogProductDetails": False,
+    }
+    draft = {
+        "sku": "BK-000008",
+        "repair_plan_id": "repair-plan-1",
+        "latest_publish_attempt_id": "attempt-1",
+        "remediation_type": "refresh_existing_unpublished_offer",
+        "live_execution_enabled": False,
+        "operator_approval_required": True,
+        "publish_after_remediation": False,
+        "no_mutation_performed": True,
+        "actionable": False,
+        "safe_to_execute": False,
+        "status": "draft_preview_available",
+        "safe_to_preview": True,
+        "refusal_reasons": [],
+        "offer_id": "156719395011",
+        "listing_id": "",
+        "offer_status": "UNPUBLISHED",
+        "category_id": "14056",
+        "category_name": "Atlases",
+        "condition_id": "3000",
+        "inventory_condition_enum": "USED_GOOD",
+        "live_policy_result": {
+            "source": "live_readonly_metadata",
+            "read_available": True,
+            "live_policy_allows_condition": True,
+            "allowed_condition_ids": ["1000", "3000"],
+            "local_policy_status": "confirmed_by_live_readonly_metadata",
+        },
+        "stale_offer_reasoning": "Existing unpublished offer may need refresh.",
+        "intended_inventory_item_payload_preview": inventory_payload,
+        "intended_offer_payload_preview": offer_payload,
+        "intended_call_sequence_preview": [
+            {
+                "order": 1,
+                "method": "PUT",
+                "endpoint": "/sell/inventory/v1/inventory_item/BK-000008",
+                "preview_only": True,
+                "mutation_performed": False,
+            },
+            {
+                "order": 2,
+                "method": "PUT",
+                "endpoint": "/sell/inventory/v1/offer/156719395011",
+                "preview_only": True,
+                "mutation_performed": False,
+            },
+            {"order": 3, "method": "NONE", "endpoint": "", "preview_only": True, "mutation_performed": False},
+        ],
+    }
+    return {
+        "sku": "BK-000008",
+        "found": True,
+        "read_only": True,
+        "no_mutation_performed": True,
+        "live_readonly_requested": True,
+        "live_readonly_performed": True,
+        "live_readonly_methods_called": ["get_offer", "get_inventory_item", "get_item_condition_policies"],
+        "live_readonly_errors": [],
+        "local_status": "export_ready",
+        "local_category_id": "14056",
+        "local_category_name": "Atlases",
+        "local_condition_id": "3000",
+        "local_inventory_condition_enum": "USED_GOOD",
+        "offer_id": "156719395011",
+        "listing_id": "",
+        "planned_action": "publish_existing_offer",
+        "blocked_by_repair_queue": True,
+        "retry_allowed": False,
+        "repair_plan_id": "repair-plan-1",
+        "latest_publish_attempt_id": "attempt-1",
+        "existing_offer_diagnostics": {
+            "read_available": True,
+            "offer_id": "156719395011",
+            "offer_exists": True,
+            "status": "UNPUBLISHED",
+            "category_id": "14056",
+            "category_differs_from_local": False,
+        },
+        "inventory_item_diagnostics": {
+            "read_available": True,
+            "inventory_item_exists": True,
+            "condition_enum": "USED_GOOD",
+            "condition_differs_from_local": False,
+        },
+        "category_condition_policy_diagnostics": {
+            "read_available": True,
+            "live_policy_allows_condition": True,
+            "live_metadata_supports_changing_condition": False,
+        },
+        "stale_offer_remediation_draft": draft,
+    }
+
+
+def _eligible_refresh_approval(diagnostics: dict) -> dict:
+    draft = diagnostics["stale_offer_remediation_draft"]
+    return {
+        "sku": "BK-000008",
+        "remediation_type": "refresh_existing_unpublished_offer",
+        "repair_plan_id": draft["repair_plan_id"],
+        "latest_publish_attempt_id": draft["latest_publish_attempt_id"],
+        "offer_id": draft["offer_id"],
+        "confirm_offer_status": "UNPUBLISHED",
+        "confirm_listing_id_empty": True,
+        "confirm_category_id": "14056",
+        "confirm_condition_id": "3000",
+        "confirm_inventory_condition_enum": "USED_GOOD",
+        "confirm_publish_after_remediation": False,
+        "operator_approved": True,
+        "typed_confirmation": REQUIRED_TYPED_CONFIRMATION,
+        "approved_payload_hash": build_remediation_payload_hash(draft),
+    }
+
+
+class _FakeApprovedRefreshExecutor:
+    def __init__(self) -> None:
+        self.inventory_calls: list[tuple[str, dict]] = []
+        self.offer_calls: list[tuple[str, dict]] = []
+        self.publish_calls = 0
+        self.create_calls = 0
+        self.delete_calls = 0
+        self.withdraw_calls = 0
+        self.revise_calls = 0
+
+    def put_inventory_item(self, sku: str, payload: dict) -> dict:
+        self.inventory_calls.append((sku, payload))
+        return {"ok": True, "method": "put_inventory_item"}
+
+    def put_offer(self, offer_id: str, payload: dict) -> dict:
+        self.offer_calls.append((offer_id, payload))
+        return {"ok": True, "method": "put_offer"}
+
+    def publish_offer(self, *_args, **_kwargs):  # pragma: no cover
+        self.publish_calls += 1
+        raise AssertionError("approved refresh must not publish")
 
 
 def test_failed_publish_creates_repair_queue_entry(monkeypatch, tmp_path):
@@ -1164,6 +1327,172 @@ def test_stale_offer_remediation_approval_preview_respects_route_guard(monkeypat
         resp = client.get("/api/listings/BK-000009/stale-offer-remediation/approval-preview")
 
     assert resp.status_code == 403
+
+
+def test_execute_approved_refresh_requires_route_guard_and_allowlist(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    monkeypatch.setenv("APPROVED_E2E_SKUS", "BK-000008")
+    diagnostics = _eligible_refresh_diagnostics()
+    approval = _eligible_refresh_approval(diagnostics)
+    approval["sku"] = "BK-000009"
+
+    def fail_diagnostics(*_args, **_kwargs):
+        raise AssertionError("route guard should block before diagnostics")
+
+    monkeypatch.setattr("apps.api.src.routes.listings.build_publish_diagnostics", fail_diagnostics)
+
+    with _client() as client:
+        resp = client.post(
+            "/api/listings/BK-000009/stale-offer-remediation/execute-approved-refresh",
+            json=approval,
+        )
+
+    assert resp.status_code == 403
+    detail = resp.json()["detail"]
+    assert detail["code"] == "live_execution_disabled"
+    assert detail["no_publish_performed"] is True
+
+
+def test_execute_approved_refresh_requires_dedicated_env_flag(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    monkeypatch.setenv("ALLOW_LIVE_E2E", "true")
+    monkeypatch.delenv("ALLOW_EBAY_STALE_OFFER_REFRESH", raising=False)
+    diagnostics = _eligible_refresh_diagnostics()
+    approval = _eligible_refresh_approval(diagnostics)
+
+    def fail_diagnostics(*_args, **_kwargs):
+        raise AssertionError("dedicated env flag should block before live read-only diagnostics")
+
+    monkeypatch.setattr("apps.api.src.routes.listings.build_publish_diagnostics", fail_diagnostics)
+
+    with _client() as client:
+        resp = client.post(
+            "/api/listings/BK-000008/stale-offer-remediation/execute-approved-refresh",
+            json=approval,
+        )
+
+    assert resp.status_code == 403
+    detail = resp.json()["detail"]
+    assert detail["code"] == "live_execution_disabled"
+    assert detail["required_env_flag"] == "ALLOW_EBAY_STALE_OFFER_REFRESH=true"
+
+
+def test_execute_approved_refresh_blocks_when_live_remediation_disabled(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    monkeypatch.delenv("ALLOW_LIVE_E2E", raising=False)
+    monkeypatch.setenv("ALLOW_EBAY_STALE_OFFER_REFRESH", "true")
+    diagnostics = _eligible_refresh_diagnostics()
+    approval = _eligible_refresh_approval(diagnostics)
+
+    def fail_executor():
+        raise AssertionError("ALLOW_LIVE_E2E should block before executor construction")
+
+    monkeypatch.setattr("apps.api.src.routes.listings._build_stale_offer_refresh_executor", fail_executor)
+
+    with _client() as client:
+        resp = client.post(
+            "/api/listings/BK-000008/stale-offer-remediation/execute-approved-refresh",
+            json=approval,
+        )
+
+    assert resp.status_code == 403
+    assert resp.json()["detail"]["code"] == "live_execution_disabled"
+
+
+def test_execute_approved_refresh_requires_exact_typed_confirmation(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    monkeypatch.setenv("ALLOW_LIVE_E2E", "true")
+    monkeypatch.setenv("ALLOW_EBAY_STALE_OFFER_REFRESH", "true")
+    diagnostics = _eligible_refresh_diagnostics()
+    approval = _eligible_refresh_approval(diagnostics)
+    approval["typed_confirmation"] = "REFRESH"
+
+    def fail_diagnostics(*_args, **_kwargs):
+        raise AssertionError("typed confirmation should block before diagnostics")
+
+    monkeypatch.setattr("apps.api.src.routes.listings.build_publish_diagnostics", fail_diagnostics)
+
+    with _client() as client:
+        resp = client.post(
+            "/api/listings/BK-000008/stale-offer-remediation/execute-approved-refresh",
+            json=approval,
+        )
+
+    assert resp.status_code == 409
+    detail = resp.json()["detail"]
+    assert detail["execution_status"] == "blocked"
+    assert detail["refusal_reasons"][0]["code"] == "approval_typed_confirmation_mismatch"
+
+
+def test_execute_approved_refresh_calls_inventory_put_then_offer_put_only(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    monkeypatch.setenv("ALLOW_LIVE_E2E", "true")
+    monkeypatch.setenv("ALLOW_EBAY_STALE_OFFER_REFRESH", "true")
+    diagnostics = _eligible_refresh_diagnostics()
+    approval = _eligible_refresh_approval(diagnostics)
+    executor = _FakeApprovedRefreshExecutor()
+    diagnostics_calls = []
+
+    def fake_diagnostics(_session, sku, *, allow_live_readonly=False):
+        diagnostics_calls.append((sku, allow_live_readonly))
+        return _eligible_refresh_diagnostics()
+
+    monkeypatch.setattr("apps.api.src.routes.listings.build_publish_diagnostics", fake_diagnostics)
+    monkeypatch.setattr("apps.api.src.routes.listings._build_stale_offer_refresh_executor", lambda: executor)
+
+    with _client() as client:
+        resp = client.post(
+            "/api/listings/BK-000008/stale-offer-remediation/execute-approved-refresh",
+            json=approval,
+        )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["execution_status"] == "refresh_completed"
+    assert body["calls_performed"] == ["put_inventory_item", "put_offer"]
+    assert body["no_publish_performed"] is True
+    assert body["repair_queue_cleared"] is False
+    assert body["item_status_after"] == "export_ready"
+    assert diagnostics_calls == [("BK-000008", True), ("BK-000008", True)]
+    assert executor.inventory_calls == [
+        ("BK-000008", diagnostics["stale_offer_remediation_draft"]["intended_inventory_item_payload_preview"])
+    ]
+    assert executor.offer_calls == [
+        ("156719395011", diagnostics["stale_offer_remediation_draft"]["intended_offer_payload_preview"])
+    ]
+    assert executor.publish_calls == 0
+    assert executor.create_calls == 0
+    assert executor.delete_calls == 0
+    assert executor.withdraw_calls == 0
+    assert executor.revise_calls == 0
+
+
+def test_execute_approved_refresh_blocks_if_offer_not_unpublished(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    monkeypatch.setenv("ALLOW_LIVE_E2E", "true")
+    monkeypatch.setenv("ALLOW_EBAY_STALE_OFFER_REFRESH", "true")
+    approval = _eligible_refresh_approval(_eligible_refresh_diagnostics())
+    executor = _FakeApprovedRefreshExecutor()
+
+    def fake_diagnostics(_session, _sku, *, allow_live_readonly=False):
+        diagnostics = _eligible_refresh_diagnostics()
+        diagnostics["existing_offer_diagnostics"]["status"] = "PUBLISHED"
+        diagnostics["stale_offer_remediation_draft"]["offer_status"] = "PUBLISHED"
+        return diagnostics
+
+    monkeypatch.setattr("apps.api.src.routes.listings.build_publish_diagnostics", fake_diagnostics)
+    monkeypatch.setattr("apps.api.src.routes.listings._build_stale_offer_refresh_executor", lambda: executor)
+
+    with _client() as client:
+        resp = client.post(
+            "/api/listings/BK-000008/stale-offer-remediation/execute-approved-refresh",
+            json=approval,
+        )
+
+    assert resp.status_code == 409
+    assert "offer_status_not_unpublished" in {r["code"] for r in resp.json()["detail"]["refusal_reasons"]}
+    assert executor.inventory_calls == []
+    assert executor.offer_calls == []
 
 
 def test_publish_diagnostics_live_readonly_skips_reads_when_auth_unavailable(monkeypatch, tmp_path):

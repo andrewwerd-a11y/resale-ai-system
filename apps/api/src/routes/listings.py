@@ -5,6 +5,7 @@ Revision, sync, push-to-eBay, and takedown for listed/exported items.
 from __future__ import annotations
 
 import logging
+import os
 import re
 import sqlite3
 import time
@@ -19,7 +20,11 @@ from apps.api.src.services.ebay_auth_diagnostics import get_ebay_auth_readiness
 from apps.api.src.services.publish_diagnostics import build_publish_diagnostics
 from apps.api.src.services.publish_repair import get_publish_repair_blocker
 from apps.api.src.services.publish_readiness import evaluate_publish_readiness, not_found_publish_readiness
-from apps.api.src.services.stale_offer_remediation import build_stale_offer_remediation_approval_preview
+from apps.api.src.services.stale_offer_remediation import (
+    REQUIRED_TYPED_CONFIRMATION,
+    build_stale_offer_remediation_approval_preview,
+    execute_approved_refresh_existing_unpublished_offer,
+)
 from packages.core.src.config import get_settings
 from packages.data.src.db.sqlite import get_session
 from packages.data.src.models.item_record import ItemRecord
@@ -28,6 +33,7 @@ from packages.ebay.src.auth import EbayAuth
 from packages.ebay.src import http_client as ebay_http
 from packages.testing.src.e2e_guard import (
     E2ESafetyError,
+    assert_live_e2e_allowed,
     is_live_e2e_enabled,
     assert_route_sku_allowed,
     assert_route_skus_allowed,
@@ -60,6 +66,23 @@ EBAY_ERROR_HINTS = {
 }
 
 
+class StaleOfferApprovedRefreshPayload(BaseModel):
+    sku: str
+    remediation_type: str
+    repair_plan_id: str
+    latest_publish_attempt_id: str
+    offer_id: str
+    confirm_offer_status: str
+    confirm_listing_id_empty: bool
+    confirm_category_id: str
+    confirm_condition_id: str
+    confirm_inventory_condition_enum: str
+    confirm_publish_after_remediation: bool
+    operator_approved: bool
+    typed_confirmation: str
+    approved_payload_hash: str
+
+
 def _repair_queue_blocked_detail(sku: str, repair_blocker: dict) -> dict:
     return {
         "code": "blocked_by_repair_queue",
@@ -77,6 +100,16 @@ def _repair_queue_blocked_detail(sku: str, repair_blocker: dict) -> dict:
 
 def _is_listed_on_ebay(item) -> bool:
     return bool(str(item.listing_id or "").strip()) or str(item.status or "") == "listed"
+
+
+def _is_stale_offer_refresh_live_enabled() -> bool:
+    return os.getenv("ALLOW_EBAY_STALE_OFFER_REFRESH") == "true"
+
+
+def _build_stale_offer_refresh_executor():
+    from packages.ebay.src.inventory_client import EbayInventoryClient
+
+    return EbayInventoryClient()
 
 
 # ── GET /api/listings ──────────────────────────────────────────────────────────
@@ -270,6 +303,93 @@ def get_stale_offer_remediation_approval_preview(
     if not diagnostics.get("found"):
         raise HTTPException(status_code=404, detail=diagnostics)
     return build_stale_offer_remediation_approval_preview(diagnostics)
+
+
+@router.post("/{sku}/stale-offer-remediation/execute-approved-refresh")
+def execute_stale_offer_remediation_approved_refresh(
+    sku: str,
+    payload: StaleOfferApprovedRefreshPayload,
+    session: Session = Depends(get_session),
+):
+    normalized_sku = (sku or "").strip().upper()
+    try:
+        assert_route_sku_allowed(normalized_sku, "listings.stale_offer_remediation.execute_approved_refresh")
+        assert_live_e2e_allowed(normalized_sku)
+    except E2ESafetyError as exc:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "live_execution_disabled",
+                "sku": normalized_sku,
+                "execution_status": "live_execution_disabled",
+                "live_execution_enabled": False,
+                "no_publish_performed": True,
+                "repair_queue_cleared": False,
+                "reason": str(exc),
+            },
+        )
+
+    if not _is_stale_offer_refresh_live_enabled():
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "live_execution_disabled",
+                "sku": normalized_sku,
+                "execution_status": "live_execution_disabled",
+                "live_execution_enabled": False,
+                "required_env_flag": "ALLOW_EBAY_STALE_OFFER_REFRESH=true",
+                "no_publish_performed": True,
+                "repair_queue_cleared": False,
+                "reason": "Dedicated stale-offer refresh feature flag is disabled.",
+            },
+        )
+
+    approval_request = payload.model_dump()
+    if payload.typed_confirmation != REQUIRED_TYPED_CONFIRMATION:
+        # Fail before live-read-only preflight for clearly malformed approval.
+        result = {
+            "code": "approval_typed_confirmation_mismatch",
+            "sku": normalized_sku,
+            "execution_status": "blocked",
+            "live_execution_enabled": True,
+            "no_publish_performed": True,
+            "repair_queue_cleared": False,
+            "refusal_reasons": [
+                {
+                    "code": "approval_typed_confirmation_mismatch",
+                    "message": "typed_confirmation must exactly equal REFRESH UNPUBLISHED OFFER ONLY.",
+                }
+            ],
+        }
+        raise HTTPException(status_code=409, detail=result)
+
+    diagnostics = build_publish_diagnostics(
+        session,
+        normalized_sku,
+        allow_live_readonly=True,
+    )
+    if not diagnostics.get("found"):
+        raise HTTPException(status_code=404, detail=diagnostics)
+
+    executor = _build_stale_offer_refresh_executor()
+    result = execute_approved_refresh_existing_unpublished_offer(
+        sku=normalized_sku,
+        diagnostics=diagnostics,
+        approval_request=approval_request,
+        executor=executor,
+        live_remediation_enabled=True,
+        post_refresh_diagnostics_provider=lambda: build_publish_diagnostics(
+            session,
+            normalized_sku,
+            allow_live_readonly=True,
+        ),
+    )
+    status = result.get("execution_status")
+    if status in {"live_execution_disabled", "blocked"}:
+        raise HTTPException(status_code=409, detail=result)
+    if status in {"failed_before_offer_refresh", "partial_failure_offer_refresh_failed"}:
+        raise HTTPException(status_code=502, detail=result)
+    return result
 
 
 @router.get("/{sku}/revise-readiness")

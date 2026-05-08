@@ -374,6 +374,60 @@ class EbayInventoryClient:
         except Exception as exc:
             return Result.failure(f"condition_policy_parse_failed: {exc}", error_code="PARSE_ERROR")
 
+    def put_inventory_item(self, sku: str, payload: dict) -> Result[dict]:
+        """Replace one inventory item using PUT for an approved stale-offer refresh."""
+        normalized = str(sku or "").strip()
+        if not normalized:
+            return Result.failure("sku_required", error_code="INVALID_INPUT")
+        if not isinstance(payload, dict) or not payload:
+            return Result.failure("inventory_payload_required", error_code="INVALID_INPUT")
+        try:
+            value = self._put(
+                f"{self.auth.api_base}/sell/inventory/v1/inventory_item/{normalized}",
+                self._headers(),
+                payload,
+                sku=normalized,
+                step="put_inventory_item",
+            )
+            return Result.success(value)
+        except _EbayApiError as exc:
+            return Result.failure(
+                exc.message,
+                error_code="API_ERROR",
+                status_code=exc.status_code,
+                body=exc.body,
+                stage=exc.step or "put_inventory_item",
+            )
+        except Exception as exc:
+            return Result.failure(f"put_inventory_item_failed: {exc}", error_code="REQUEST_FAILED")
+
+    def put_offer(self, offer_id: str, payload: dict) -> Result[dict]:
+        """Update one existing offer using PUT for an approved stale-offer refresh."""
+        normalized = str(offer_id or "").strip()
+        if not normalized:
+            return Result.failure("offer_id_required", error_code="INVALID_INPUT")
+        if not isinstance(payload, dict) or not payload:
+            return Result.failure("offer_payload_required", error_code="INVALID_INPUT")
+        try:
+            value = self._put(
+                f"{self.auth.api_base}/sell/inventory/v1/offer/{normalized}",
+                self._headers(),
+                payload,
+                sku=str(payload.get("sku") or ""),
+                step="put_offer",
+            )
+            return Result.success(value)
+        except _EbayApiError as exc:
+            return Result.failure(
+                exc.message,
+                error_code="API_ERROR",
+                status_code=exc.status_code,
+                body=exc.body,
+                stage=exc.step or "put_offer",
+            )
+        except Exception as exc:
+            return Result.failure(f"put_offer_failed: {exc}", error_code="REQUEST_FAILED")
+
     def get_readonly_auth_diagnostics(self) -> dict:
         """Resolve read-only auth without refresh, token writes, or token disclosure."""
         token_state = self.auth.resolve_user_token(allow_refresh=False)

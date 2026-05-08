@@ -357,6 +357,168 @@ def execute_refresh_existing_unpublished_offer(
     }
 
 
+def execute_approved_refresh_existing_unpublished_offer(
+    *,
+    sku: str,
+    diagnostics: dict,
+    approval_request: dict,
+    executor: StaleOfferRemediationExecutor | None,
+    live_remediation_enabled: bool,
+    post_refresh_diagnostics_provider: Callable[[], dict] | None = None,
+) -> dict:
+    """Execute the narrowly approved stale-offer refresh.
+
+    This path is live-capable only when the caller supplies an executor after
+    all route-level live guards pass. It still fails closed unless the current
+    live-read-only diagnostics and exact operator approval both match.
+    """
+    normalized_sku = str(sku or "").strip().upper()
+    draft = diagnostics.get("stale_offer_remediation_draft") or {}
+    operator_approved = bool((approval_request or {}).get("operator_approved"))
+    publish_after_remediation = bool((approval_request or {}).get("confirm_publish_after_remediation"))
+    refusal_reasons = _eligibility_refusals(
+        sku=normalized_sku,
+        diagnostics=diagnostics,
+        draft=draft,
+        operator_approved=operator_approved,
+        remediation_type=str((approval_request or {}).get("remediation_type") or ""),
+        publish_after_remediation=publish_after_remediation,
+    )
+    refusal_reasons += _approval_refusals(
+        approval_request=approval_request,
+        sku=normalized_sku,
+        diagnostics=diagnostics,
+        draft=draft,
+        remediation_type=str((approval_request or {}).get("remediation_type") or ""),
+        publish_after_remediation=publish_after_remediation,
+        require_approval_request=True,
+    )
+    refusal_reasons += _live_preflight_refusals(
+        sku=normalized_sku,
+        diagnostics=diagnostics,
+        draft=draft,
+        approval_request=approval_request,
+    )
+    base = _base_result(
+        sku=normalized_sku,
+        diagnostics=diagnostics,
+        draft=draft,
+        operator_approved=operator_approved,
+        publish_after_remediation=publish_after_remediation,
+        live_remediation_enabled=live_remediation_enabled,
+        approval_request=approval_request,
+        preflight_recheck_performed=True,
+        executor=executor,
+    )
+    preflight_payload_hash = build_remediation_payload_hash(draft)
+    response_base = base | {
+        "mode": "live_gated",
+        "live_execution_enabled": bool(live_remediation_enabled),
+        "approved_payload_hash": str((approval_request or {}).get("approved_payload_hash") or ""),
+        "preflight_payload_hash": preflight_payload_hash,
+        "listing_id_before": str(diagnostics.get("listing_id") or draft.get("listing_id") or ""),
+        "listing_id_after": str(diagnostics.get("listing_id") or draft.get("listing_id") or ""),
+        "item_status_after": str(diagnostics.get("local_status") or ""),
+        "repair_queue_cleared": False,
+        "no_publish_performed": True,
+        "calls_performed": [],
+        "inventory_refresh_result": {},
+        "offer_refresh_result": {},
+        "post_refresh_diagnostics": {},
+        "post_refresh_diagnostics_performed": False,
+    }
+
+    if not live_remediation_enabled:
+        return response_base | {
+            "code": "live_execution_disabled",
+            "execution_status": "live_execution_disabled",
+            "live_execution_enabled": False,
+            "refusal_reasons": refusal_reasons
+            + [
+                {
+                    "code": "live_execution_disabled",
+                    "message": "Live stale-offer refresh is disabled by feature gate.",
+                }
+            ],
+            "next_recommended_action": "Keep using read-only diagnostics until live stale-offer refresh is explicitly enabled.",
+        }
+    if executor is None:
+        return response_base | {
+            "code": "live_executor_unavailable",
+            "execution_status": "live_execution_disabled",
+            "refusal_reasons": refusal_reasons
+            + [
+                {
+                    "code": "live_executor_unavailable",
+                    "message": "No approved stale-offer refresh executor is available.",
+                }
+            ],
+            "next_recommended_action": "Do not retry publish. Recheck the remediation runtime configuration.",
+        }
+    if refusal_reasons:
+        return response_base | {
+            "execution_status": "blocked",
+            "refusal_reasons": refusal_reasons,
+            "next_recommended_action": "Resolve the refusal reasons and rerun live-read-only diagnostics before remediation.",
+        }
+
+    inventory_payload = deepcopy(response_base["inventory_payload_preview"])
+    offer_payload = deepcopy(response_base["offer_payload_preview"])
+    calls_performed: list[str] = []
+
+    inventory_result = _call_put_safely(
+        lambda: executor.put_inventory_item(normalized_sku, deepcopy(inventory_payload)),
+        stage="put_inventory_item",
+    )
+    calls_performed.append("put_inventory_item")
+    if not inventory_result["ok"]:
+        return response_base | {
+            "execution_status": "failed_before_offer_refresh",
+            "stage": "put_inventory_item",
+            "calls_performed": calls_performed,
+            "inventory_refresh_result": inventory_result,
+            "offer_refresh_result": {"ok": False, "skipped": True, "reason": "inventory_refresh_failed"},
+            "refusal_reasons": [],
+            "next_recommended_action": "Rerun publish diagnostics before deciding whether to retry stale-offer refresh.",
+        }
+
+    offer_result = _call_put_safely(
+        lambda: executor.put_offer(response_base["offer_id"], deepcopy(offer_payload)),
+        stage="put_offer",
+    )
+    calls_performed.append("put_offer")
+    post_refresh_diagnostics = _run_post_refresh_diagnostics(post_refresh_diagnostics_provider)
+    if not offer_result["ok"]:
+        return response_base | {
+            "execution_status": "partial_failure_offer_refresh_failed",
+            "stage": "put_offer",
+            "calls_performed": calls_performed,
+            "inventory_refresh_result": inventory_result,
+            "offer_refresh_result": offer_result,
+            "post_refresh_diagnostics": post_refresh_diagnostics,
+            "post_refresh_diagnostics_performed": bool(post_refresh_diagnostics),
+            "refusal_reasons": [],
+            "next_recommended_action": "Rerun publish diagnostics. Do not publish until the partial offer refresh failure is reviewed.",
+        }
+
+    return response_base | {
+        "execution_status": "refresh_completed",
+        "calls_performed": calls_performed,
+        "inventory_refresh_result": inventory_result,
+        "offer_refresh_result": offer_result,
+        "post_refresh_diagnostics": post_refresh_diagnostics,
+        "post_refresh_diagnostics_performed": bool(post_refresh_diagnostics),
+        "refusal_reasons": [],
+        "no_mutation_performed": False,
+        "no_live_mutation_performed": False,
+        "real_ebay_mutation_performed": True,
+        "mocked_mutation_performed": False,
+        "next_recommended_action": (
+            "Rerun publish diagnostics/readiness. Publish still requires a separate explicit one-SKU approval."
+        ),
+    }
+
+
 def _eligibility_refusals(
     *,
     sku: str,
@@ -435,6 +597,96 @@ def _eligibility_refusals(
         refuse("category_condition_change_appears_needed", "Policy diagnostics indicate a condition/category change may be needed.")
 
     return refusal_reasons
+
+
+def _live_preflight_refusals(
+    *,
+    sku: str,
+    diagnostics: dict,
+    draft: dict,
+    approval_request: dict | None,
+) -> list[dict]:
+    refusal_reasons: list[dict] = []
+
+    def refuse(code: str, message: str) -> None:
+        refusal_reasons.append({"code": code, "message": message})
+
+    if diagnostics.get("found") is not True:
+        refuse("preflight_item_not_found", "Live refresh preflight could not find the item.")
+    if diagnostics.get("live_readonly_requested") is not True or diagnostics.get("live_readonly_performed") is not True:
+        refuse("live_readonly_preflight_required", "Live read-only diagnostics must run immediately before refresh.")
+    methods = set(diagnostics.get("live_readonly_methods_called") or [])
+    for method in ("get_offer", "get_inventory_item", "get_item_condition_policies"):
+        if method not in methods:
+            refuse("missing_live_readonly_method", f"Live read-only preflight did not call {method}.")
+    if diagnostics.get("live_readonly_errors"):
+        refuse("live_readonly_errors_present", "Live read-only preflight returned errors.")
+    if str((approval_request or {}).get("sku") or "").strip().upper() != sku:
+        refuse("approval_path_sku_mismatch", "Path SKU and approval SKU must match.")
+    if diagnostics.get("retry_allowed") is not False:
+        refuse("retry_allowed_not_false", "Repair queue retry_allowed must remain false before remediation.")
+    if str(diagnostics.get("local_status") or "") == "listed":
+        refuse("item_already_listed", "Item is already listed.")
+
+    offer = diagnostics.get("existing_offer_diagnostics") or {}
+    if offer.get("read_available") is not True:
+        refuse("offer_read_unavailable", "Live offer read must be available.")
+    if offer.get("offer_exists") is not True:
+        refuse("offer_not_found", "Existing offer must exist before refresh.")
+    if str(offer.get("offer_id") or diagnostics.get("offer_id") or "") != str(draft.get("offer_id") or ""):
+        refuse("offer_id_mismatch", "Live offer ID must match the approved draft offer ID.")
+
+    inventory = diagnostics.get("inventory_item_diagnostics") or {}
+    if inventory.get("read_available") is not True:
+        refuse("inventory_read_unavailable", "Live inventory item read must be available.")
+    if inventory.get("inventory_item_exists") is not True:
+        refuse("inventory_item_not_found", "Live inventory item must exist before refresh.")
+
+    policy = diagnostics.get("category_condition_policy_diagnostics") or {}
+    if policy.get("read_available") is not True:
+        refuse("category_policy_read_unavailable", "Live category-condition policy read must be available.")
+
+    if not draft.get("intended_inventory_item_payload_preview"):
+        refuse("missing_inventory_payload_preview", "Inventory payload preview is required.")
+    if not draft.get("intended_offer_payload_preview"):
+        refuse("missing_offer_payload_preview", "Offer payload preview is required.")
+    if build_remediation_payload_hash(draft) != str((approval_request or {}).get("approved_payload_hash") or ""):
+        refuse("preflight_payload_hash_mismatch", "Fresh preflight payload hash does not match approved payload hash.")
+
+    return refusal_reasons
+
+
+def _call_put_safely(call: Callable[[], object], *, stage: str) -> dict:
+    try:
+        result = call()
+    except Exception as exc:
+        return {"ok": False, "stage": stage, "error": str(exc), "error_code": "EXCEPTION"}
+    ok = getattr(result, "ok", None)
+    if ok is not None:
+        return {
+            "ok": bool(ok),
+            "stage": stage,
+            "value": deepcopy(getattr(result, "value", None) or {}),
+            "error": getattr(result, "error", None) or "",
+            "error_code": getattr(result, "error_code", None) or "",
+            "details": deepcopy(getattr(result, "details", None) or {}),
+        }
+    if isinstance(result, dict):
+        return {"ok": bool(result.get("ok", True)), "stage": stage, "value": deepcopy(result)}
+    return {"ok": True, "stage": stage, "value": result}
+
+
+def _run_post_refresh_diagnostics(provider: Callable[[], dict] | None) -> dict:
+    if provider is None:
+        return {}
+    try:
+        return provider() or {}
+    except Exception as exc:
+        return {
+            "read_only": True,
+            "no_mutation_performed": True,
+            "error": str(exc),
+        }
 
 
 def _approval_refusals(
