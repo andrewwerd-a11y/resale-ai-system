@@ -548,6 +548,10 @@ def test_publish_diagnostics_for_blocked_existing_offer_is_local_only(monkeypatc
     monkeypatch.setattr("packages.ebay.src.inventory_client.ebay_http.get", fail_external_call)
     monkeypatch.setattr("packages.ebay.src.inventory_client.ebay_http.put", fail_external_call)
     monkeypatch.setattr("packages.ebay.src.inventory_client.ebay_http.post", fail_external_call)
+    monkeypatch.setattr(
+        "packages.ebay.src.inventory_client.EbayInventoryClient.__init__",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("diagnostics should not instantiate eBay client without live_readonly")),
+    )
 
     with _client() as client:
         resp = client.get("/api/listings/BK-000008/publish-diagnostics")
@@ -596,7 +600,7 @@ def test_publish_diagnostics_for_blocked_existing_offer_is_local_only(monkeypatc
     assert policy_diag["rejected_category_id"] == "14056"
 
 
-def test_publish_diagnostics_live_readonly_flag_is_explicit_stub(monkeypatch, tmp_path):
+def test_publish_diagnostics_live_readonly_reads_offer_inventory_and_policy(monkeypatch, tmp_path):
     _configure_temp_db(monkeypatch, tmp_path)
     _seed_item(
         ebay_category_id="14056",
@@ -605,12 +609,63 @@ def test_publish_diagnostics_live_readonly_flag_is_explicit_stub(monkeypatch, tm
         listing_id=None,
     )
     _seed_blocking_repair_plan()
+    calls: list[str] = []
 
-    def fail_external_call(*_args, **_kwargs):
-        raise AssertionError("live_readonly=true is a diagnostic stub and must not call eBay yet")
+    def fake_offer(_self, offer_id):
+        calls.append("get_offer")
+        assert offer_id == "156719395011"
+        return Result.success(
+            {
+                "offerId": offer_id,
+                "status": "UNPUBLISHED",
+                "categoryId": "14056",
+                "conditionId": "5000",
+                "marketplaceId": "EBAY_US",
+                "listingPolicies": {"fulfillmentPolicyId": "fulfillment-1"},
+            }
+        )
 
-    monkeypatch.setattr("packages.ebay.src.inventory_client.ebay_http.get", fail_external_call)
-    monkeypatch.setattr("apps.api.src.routes.listings.ebay_http.get", fail_external_call)
+    def fake_inventory(_self, sku):
+        calls.append("get_inventory_item")
+        assert sku == "BK-000008"
+        return Result.success(
+            {
+                "sku": sku,
+                "condition": "USED_GOOD",
+                "conditionDescription": "Cover creasing.",
+                "product": {
+                    "title": "Atlas",
+                    "imageUrls": ["https://res.cloudinary.com/demo/image/upload/v1/BK-000008-01.jpg"],
+                },
+            }
+        )
+
+    def fake_policy(_self, category_id):
+        calls.append("get_item_condition_policies")
+        assert category_id == "14056"
+        return Result.success(
+            {
+                "itemConditionPolicies": [
+                    {
+                        "categoryId": "14056",
+                        "itemConditions": [
+                            {"conditionId": "1000", "conditionDescription": "New"},
+                            {"conditionId": "3000", "conditionDescription": "Used"},
+                        ],
+                    }
+                ]
+            }
+        )
+
+    def fail_mutation(*_args, **_kwargs):
+        raise AssertionError("publish diagnostics must not call mutation methods")
+
+    monkeypatch.setattr("packages.ebay.src.inventory_client.EbayInventoryClient.get_offer", fake_offer)
+    monkeypatch.setattr("packages.ebay.src.inventory_client.EbayInventoryClient.get_inventory_item", fake_inventory)
+    monkeypatch.setattr("packages.ebay.src.inventory_client.EbayInventoryClient.get_item_condition_policies", fake_policy)
+    monkeypatch.setattr("packages.ebay.src.inventory_client.EbayInventoryClient.publish_item", fail_mutation)
+    monkeypatch.setattr("packages.ebay.src.inventory_client.EbayInventoryClient._put", fail_mutation)
+    monkeypatch.setattr("packages.ebay.src.inventory_client.EbayInventoryClient._post", fail_mutation)
 
     with _client() as client:
         resp = client.get("/api/listings/BK-000008/publish-diagnostics?allow_live_readonly=true")
@@ -618,8 +673,113 @@ def test_publish_diagnostics_live_readonly_flag_is_explicit_stub(monkeypatch, tm
     assert resp.status_code == 200
     body = resp.json()
     assert body["live_readonly_requested"] is True
-    assert body["live_readonly_performed"] is False
-    assert "not implemented" in body["live_readonly_warning"]
+    assert body["live_readonly_performed"] is True
+    assert body["no_mutation_performed"] is True
+    assert body["live_readonly_methods_called"] == [
+        "get_offer",
+        "get_inventory_item",
+        "get_item_condition_policies",
+    ]
+    assert calls == body["live_readonly_methods_called"]
+    assert body["live_readonly_errors"] == []
+
+    offer = body["existing_offer_diagnostics"]
+    assert offer["source"] == "live_readonly"
+    assert offer["read_available"] is True
+    assert offer["offer_exists"] is True
+    assert offer["status"] == "UNPUBLISHED"
+    assert offer["category_id"] == "14056"
+    assert offer["condition_id"] == "5000"
+    assert offer["condition_differs_from_local"] is True
+    assert offer["stale_existing_offer_supported_by_live_read"] is True
+
+    inventory = body["inventory_item_diagnostics"]
+    assert inventory["source"] == "live_readonly"
+    assert inventory["read_available"] is True
+    assert inventory["condition_enum"] == "USED_GOOD"
+    assert inventory["condition_differs_from_local"] is False
+    assert inventory["image_urls_are_public_hosted"] is True
+
+    policy = body["category_condition_policy_diagnostics"]
+    assert policy["source"] == "live_readonly_metadata"
+    assert policy["read_available"] is True
+    assert policy["live_policy_allows_condition"] is True
+    assert policy["local_policy_status"] == "confirmed_by_live_readonly_metadata"
+    assert policy["allowed_condition_ids"] == ["1000", "3000"]
+
+
+def test_publish_diagnostics_live_readonly_surfaces_inventory_diff_and_policy_rejection(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    _seed_item(ebay_category_id="14056", condition_id="3000", offer_id="156719395011")
+    _seed_blocking_repair_plan()
+
+    monkeypatch.setattr(
+        "packages.ebay.src.inventory_client.EbayInventoryClient.get_offer",
+        lambda *_args, **_kwargs: Result.success({"offerId": "156719395011", "categoryId": "14056"}),
+    )
+    monkeypatch.setattr(
+        "packages.ebay.src.inventory_client.EbayInventoryClient.get_inventory_item",
+        lambda *_args, **_kwargs: Result.success({"sku": "BK-000008", "condition": "LIKE_NEW", "product": {"imageUrls": []}}),
+    )
+    monkeypatch.setattr(
+        "packages.ebay.src.inventory_client.EbayInventoryClient.get_item_condition_policies",
+        lambda *_args, **_kwargs: Result.success(
+            {
+                "itemConditionPolicies": [
+                    {
+                        "itemConditions": [
+                            {"conditionId": "1000", "conditionDescription": "New"},
+                            {"conditionId": "4000", "conditionDescription": "Very Good"},
+                        ]
+                    }
+                ]
+            }
+        ),
+    )
+
+    with _client() as client:
+        resp = client.get("/api/listings/BK-000008/publish-diagnostics?allow_live_readonly=true")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["inventory_item_diagnostics"]["condition_enum"] == "LIKE_NEW"
+    assert body["inventory_item_diagnostics"]["condition_differs_from_local"] is True
+    policy = body["category_condition_policy_diagnostics"]
+    assert policy["live_policy_allows_condition"] is False
+    assert policy["local_policy_status"] == "suspect_or_stale"
+    assert policy["rejected_condition_id"] == "3000"
+    assert body["category_policy_hypothesis"] is True
+
+
+def test_publish_diagnostics_live_readonly_handles_read_errors(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    _seed_item(ebay_category_id="14056", condition_id="3000", offer_id="156719395011")
+    _seed_blocking_repair_plan()
+
+    monkeypatch.setattr(
+        "packages.ebay.src.inventory_client.EbayInventoryClient.get_offer",
+        lambda *_args, **_kwargs: Result.failure("offer unavailable", error_code="API_ERROR"),
+    )
+    monkeypatch.setattr(
+        "packages.ebay.src.inventory_client.EbayInventoryClient.get_inventory_item",
+        lambda *_args, **_kwargs: Result.failure("inventory unavailable", error_code="API_ERROR"),
+    )
+    monkeypatch.setattr(
+        "packages.ebay.src.inventory_client.EbayInventoryClient.get_item_condition_policies",
+        lambda *_args, **_kwargs: Result.failure("policy unavailable", error_code="API_ERROR"),
+    )
+
+    with _client() as client:
+        resp = client.get("/api/listings/BK-000008/publish-diagnostics?allow_live_readonly=true")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["live_readonly_performed"] is True
+    assert len(body["live_readonly_errors"]) == 3
+    assert body["existing_offer_diagnostics"]["read_available"] is False
+    assert body["inventory_item_diagnostics"]["read_available"] is False
+    assert body["category_condition_policy_diagnostics"]["read_available"] is False
+    assert body["recommended_next_action"]
 
 
 def test_newer_needs_manual_review_overrides_older_ready_to_retry(monkeypatch, tmp_path):

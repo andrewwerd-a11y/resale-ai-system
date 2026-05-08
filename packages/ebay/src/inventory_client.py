@@ -277,6 +277,123 @@ class EbayInventoryClient:
 
     # ── Internal flow ─────────────────────────────────────────────────────────
 
+    def get_inventory_item(self, sku: str) -> Result[dict]:
+        """Read one eBay inventory item by SKU using GET only."""
+        normalized = str(sku or "").strip()
+        if not normalized:
+            return Result.failure("sku_required", error_code="INVALID_INPUT")
+        headers = self._readonly_headers()
+        if not headers.ok:
+            return Result.failure(headers.error or "eBay credentials not configured.", error_code=headers.error_code, **headers.details)
+
+        try:
+            resp = ebay_http.get(
+                f"{self.auth.api_base}/sell/inventory/v1/inventory_item/{normalized}",
+                headers=headers.value,
+                timeout=20,
+            )
+        except Exception as exc:
+            return Result.failure(f"inventory_item_read_failed: {exc}", error_code="REQUEST_FAILED")
+
+        if resp.status_code == 404:
+            return Result.failure("inventory_item_not_found", error_code="NOT_FOUND", status_code=404)
+        if resp.status_code != 200:
+            return Result.failure(
+                f"inventory_item_http_{resp.status_code}",
+                error_code="API_ERROR",
+                status_code=resp.status_code,
+                body=resp.text[:500],
+            )
+        try:
+            return Result.success(resp.json() if resp.content else {})
+        except Exception as exc:
+            return Result.failure(f"inventory_item_parse_failed: {exc}", error_code="PARSE_ERROR")
+
+    def get_offer(self, offer_id: str) -> Result[dict]:
+        """Read one eBay inventory offer by offer ID using GET only."""
+        normalized = str(offer_id or "").strip()
+        if not normalized:
+            return Result.failure("offer_id_required", error_code="INVALID_INPUT")
+        headers = self._readonly_headers()
+        if not headers.ok:
+            return Result.failure(headers.error or "eBay credentials not configured.", error_code=headers.error_code, **headers.details)
+
+        try:
+            resp = ebay_http.get(
+                f"{self.auth.api_base}/sell/inventory/v1/offer/{normalized}",
+                headers=headers.value,
+                timeout=20,
+            )
+        except Exception as exc:
+            return Result.failure(f"offer_read_failed: {exc}", error_code="REQUEST_FAILED")
+
+        if resp.status_code == 404:
+            return Result.failure("offer_not_found", error_code="NOT_FOUND", status_code=404)
+        if resp.status_code != 200:
+            return Result.failure(
+                f"offer_http_{resp.status_code}",
+                error_code="API_ERROR",
+                status_code=resp.status_code,
+                body=resp.text[:500],
+            )
+        try:
+            return Result.success(resp.json() if resp.content else {})
+        except Exception as exc:
+            return Result.failure(f"offer_parse_failed: {exc}", error_code="PARSE_ERROR")
+
+    def get_item_condition_policies(self, category_id: str) -> Result[dict]:
+        """Read category item-condition policy metadata using GET only."""
+        normalized = str(category_id or "").strip()
+        if not normalized:
+            return Result.failure("category_id_required", error_code="INVALID_INPUT")
+        headers = self._readonly_headers()
+        if not headers.ok:
+            return Result.failure(headers.error or "eBay credentials not configured.", error_code=headers.error_code, **headers.details)
+
+        try:
+            resp = ebay_http.get(
+                f"{self.auth.api_base}/sell/metadata/v1/marketplace/{self.auth.marketplace_id}/get_item_condition_policies",
+                headers=headers.value,
+                params={"filter": f"categoryIds:{{{normalized}}}"},
+                timeout=20,
+            )
+        except Exception as exc:
+            return Result.failure(f"condition_policy_read_failed: {exc}", error_code="REQUEST_FAILED")
+
+        if resp.status_code == 404:
+            return Result.failure("condition_policy_not_found", error_code="NOT_FOUND", status_code=404)
+        if resp.status_code != 200:
+            return Result.failure(
+                f"condition_policy_http_{resp.status_code}",
+                error_code="API_ERROR",
+                status_code=resp.status_code,
+                body=resp.text[:500],
+            )
+        try:
+            return Result.success(resp.json() if resp.content else {})
+        except Exception as exc:
+            return Result.failure(f"condition_policy_parse_failed: {exc}", error_code="PARSE_ERROR")
+
+    def _readonly_headers(self) -> Result[dict]:
+        """Build read-only request headers without OAuth refresh or token writes."""
+        token_state = self.auth.resolve_user_token(allow_refresh=False)
+        token = token_state.get("token") or ""
+        if not token:
+            return Result.failure(
+                "eBay credentials are not ready for read-only diagnostics.",
+                error_code="AUTH_NOT_READY",
+                auth_issue_code=token_state.get("issue_code") or "missing_token",
+            )
+        return Result.success(
+            {
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "Content-Language": "en-US",
+                "X-EBAY-C-MARKETPLACE-ID": self.auth.marketplace_id,
+            }
+        )
+
     def _publish_via_api(self, item: Item, photo_urls: list[str]) -> dict:
         base = self.auth.api_base
         headers = self._headers()
