@@ -3,12 +3,17 @@ from __future__ import annotations
 import copy
 
 from apps.api.src.services.stale_offer_remediation import (
+    PUBLISH_DECISION_TYPED_CONFIRMATION,
     REQUIRED_TYPED_CONFIRMATION,
+    build_stale_offer_publish_decision_preview,
+    build_publish_decision_payload_hash,
     build_remediation_payload_hash,
+    execute_approved_stale_offer_publish_decision,
     execute_approved_refresh_existing_unpublished_offer,
     execute_refresh_existing_unpublished_offer,
     render_stale_offer_remediation_approval_packet,
 )
+from packages.data.src.models.publish_repair_plan_record import PublishRepairPlanRecord
 
 
 class FakeRemediationExecutor:
@@ -60,6 +65,66 @@ class FailingOfferExecutor(FakeRemediationExecutor):
     def put_offer(self, offer_id: str, payload: dict) -> dict:
         self.offer_calls.append((offer_id, payload))
         return {"ok": False, "error": "offer failed"}
+
+
+class FakePublishDecisionExecutor:
+    def __init__(self) -> None:
+        self.publish_calls: list[tuple[str, str]] = []
+        self.inventory_calls = 0
+        self.offer_calls = 0
+        self.create_calls = 0
+        self.batch_calls = 0
+        self.generic_publish_calls = 0
+
+    def publish_existing_offer(self, offer_id: str, sku: str) -> dict:
+        self.publish_calls.append((offer_id, sku))
+        return {
+            "ok": True,
+            "listing_id": "123456789012",
+            "listing_url": "https://www.ebay.com/itm/123456789012",
+            "offer_id": offer_id,
+            "auth_headers_prepared": True,
+            "auth_token_source": "oauth",
+            "oauth_token_may_have_been_refreshed": False,
+        }
+
+    def publish_item(self, *_args, **_kwargs):  # pragma: no cover
+        self.generic_publish_calls += 1
+        raise AssertionError("generic publish_item must not be called")
+
+    def put_inventory_item(self, *_args, **_kwargs):  # pragma: no cover
+        self.inventory_calls += 1
+        raise AssertionError("inventory PUT must not be called")
+
+    def put_offer(self, *_args, **_kwargs):  # pragma: no cover
+        self.offer_calls += 1
+        raise AssertionError("offer PUT must not be called")
+
+    def create_offer(self, *_args, **_kwargs):  # pragma: no cover
+        self.create_calls += 1
+        raise AssertionError("offer creation must not be called")
+
+    def publish_batch(self, *_args, **_kwargs):  # pragma: no cover
+        self.batch_calls += 1
+        raise AssertionError("batch publish must not be called")
+
+
+class FailingPublishDecisionExecutor(FakePublishDecisionExecutor):
+    def publish_existing_offer(self, offer_id: str, sku: str) -> dict:
+        self.publish_calls.append((offer_id, sku))
+        return {
+            "ok": False,
+            "error": "publish failed",
+            "error_code": "API_ERROR",
+            "details": {
+                "body": "Error 25001: Listing format not supported.",
+                "stage": "publish_offer",
+                "offer_id": offer_id,
+                "auth_headers_prepared": True,
+                "auth_token_source": "oauth",
+                "oauth_token_may_have_been_refreshed": False,
+            },
+        }
 
 
 def _eligible_diagnostics() -> dict:
@@ -268,6 +333,132 @@ def _diagnostics_with_placeholder_offer_payload(field: str) -> dict:
     }
     diagnostics["existing_offer_diagnostics"]["listing_policies"][field] = key_map[field]
     return diagnostics
+
+
+class _FakePublishDecisionSession:
+    def __init__(self, plan: PublishRepairPlanRecord | None) -> None:
+        self._plan = plan
+
+    def get(self, model, plan_id: str):
+        if model is PublishRepairPlanRecord and self._plan and self._plan.id == plan_id:
+            return self._plan
+        return None
+
+
+def _publish_decision_plan(**overrides) -> PublishRepairPlanRecord:
+    values = {
+        "id": "repair-plan-1",
+        "sku": "BK-000008",
+        "publish_attempt_id": "attempt-1",
+        "status": "needs_manual_review",
+        "retry_allowed": False,
+        "requires_review": True,
+        "repair_layer": "post_refresh_publish_decision",
+        "classified_error_code": "requires_publish_decision_after_refresh",
+    }
+    values.update(overrides)
+    return PublishRepairPlanRecord(**values)
+
+
+def test_publish_decision_preview_builds_template_for_eligible_diagnostics(monkeypatch) -> None:
+    diagnostics = _eligible_diagnostics()
+    plan = _publish_decision_plan()
+
+    class _Repo:
+        def __init__(self, _session) -> None:
+            pass
+
+        def get_by_sku(self, _sku: str):
+            return type("ItemStub", (), {"offer_id": "156719395011", "image_paths": ["https://res.cloudinary.com/demo/image/upload/v1/BK-000008-01.jpg"]})()
+
+    class _Client:
+        def extract_hosted_photo_urls(self, values: list[str]) -> list[str]:
+            return values
+
+    monkeypatch.setattr("apps.api.src.services.stale_offer_remediation.ItemRepository", _Repo)
+    monkeypatch.setattr(
+        "apps.api.src.services.stale_offer_remediation.get_publish_repair_blocker",
+        lambda *_args, **_kwargs: {
+            "blocked_by_repair_queue": True,
+            "repair_plan_id": "repair-plan-1",
+            "latest_publish_attempt_id": "attempt-1",
+            "classified_error_code": "requires_publish_decision_after_refresh",
+            "retry_allowed": False,
+        },
+    )
+    monkeypatch.setattr("packages.ebay.src.inventory_client.EbayInventoryClient", _Client)
+
+    preview = build_stale_offer_publish_decision_preview(
+        session=_FakePublishDecisionSession(plan),
+        sku="BK-000008",
+        repair_plan_id="repair-plan-1",
+        diagnostics=diagnostics | {"classified_error_code": "requires_publish_decision_after_refresh"},
+    )
+
+    assert preview["eligible_for_publish_decision_preview"] is True
+    assert preview["read_only"] is True
+    assert preview["no_mutation_performed"] is True
+    assert preview["no_ebay_mutation_performed"] is True
+    assert preview["no_publish_performed"] is True
+    assert preview["publish_call_preview"]["method"] == "POST"
+    assert preview["publish_call_preview"]["endpoint"] == "/sell/inventory/v1/offer/156719395011/publish"
+    assert preview["typed_confirmation_required"] == PUBLISH_DECISION_TYPED_CONFIRMATION
+    assert preview["payload_hash"] == build_publish_decision_payload_hash(
+        {
+            "sku": "BK-000008",
+            "repair_plan_id": "repair-plan-1",
+            "latest_publish_attempt_id": "attempt-1",
+            "publish_call_preview": preview["publish_call_preview"],
+            "current_blocking_plan_summary": preview["current_blocking_plan_summary"],
+            "live_prerequisites_summary": preview["live_prerequisites_summary"],
+        }
+    )
+    template = preview["required_approval_fields_template"]
+    assert template["typed_confirmation"] == PUBLISH_DECISION_TYPED_CONFIRMATION
+    assert template["approved_payload_hash"] == preview["payload_hash"]
+    assert template["confirm_blocker_classified_error_code"] == "requires_publish_decision_after_refresh"
+
+
+def test_publish_decision_preview_refuses_placeholder_policy_and_missing_hosted_urls(monkeypatch) -> None:
+    diagnostics = _diagnostics_with_placeholder_offer_payload("fulfillmentPolicyId")
+    plan = _publish_decision_plan()
+
+    class _Repo:
+        def __init__(self, _session) -> None:
+            pass
+
+        def get_by_sku(self, _sku: str):
+            return type("ItemStub", (), {"offer_id": "156719395011", "image_paths": ["C:\\photos\\BK-000008\\01.jpg"]})()
+
+    class _Client:
+        def extract_hosted_photo_urls(self, values: list[str]) -> list[str]:
+            return []
+
+    monkeypatch.setattr("apps.api.src.services.stale_offer_remediation.ItemRepository", _Repo)
+    monkeypatch.setattr(
+        "apps.api.src.services.stale_offer_remediation.get_publish_repair_blocker",
+        lambda *_args, **_kwargs: {
+            "blocked_by_repair_queue": True,
+            "repair_plan_id": "repair-plan-1",
+            "latest_publish_attempt_id": "attempt-1",
+            "classified_error_code": "requires_publish_decision_after_refresh",
+            "retry_allowed": False,
+        },
+    )
+    monkeypatch.setattr("packages.ebay.src.inventory_client.EbayInventoryClient", _Client)
+
+    preview = build_stale_offer_publish_decision_preview(
+        session=_FakePublishDecisionSession(plan),
+        sku="BK-000008",
+        repair_plan_id="repair-plan-1",
+        diagnostics=diagnostics | {"classified_error_code": "requires_publish_decision_after_refresh"},
+    )
+
+    assert preview["eligible_for_publish_decision_preview"] is False
+    codes = {reason["code"] for reason in preview["blockers"]}
+    assert "missing_hosted_public_image_urls" in codes
+    assert "missing_real_listing_policy_ids" in codes
+    assert "placeholder_listing_policy_detected" in codes
 
 
 def test_stale_offer_remediation_approval_preview_builds_template_for_eligible_diagnostics() -> None:

@@ -21,10 +21,13 @@ from apps.api.src.services.publish_diagnostics import build_publish_diagnostics
 from apps.api.src.services.publish_repair import get_publish_repair_blocker
 from apps.api.src.services.publish_readiness import evaluate_publish_readiness, not_found_publish_readiness
 from apps.api.src.services.stale_offer_remediation import (
+    PUBLISH_DECISION_TYPED_CONFIRMATION,
     REQUIRED_TYPED_CONFIRMATION,
     SUPERSEDE_TYPED_CONFIRMATION,
+    build_stale_offer_publish_decision_preview,
     build_stale_offer_remediation_approval_preview,
     build_stale_offer_refresh_supersede_preview,
+    execute_approved_stale_offer_publish_decision,
     execute_approved_refresh_existing_unpublished_offer,
     execute_approved_stale_offer_refresh_supersede,
 )
@@ -105,6 +108,30 @@ class StaleOfferSupersedeApprovalPayload(BaseModel):
     approved_payload_hash: str
 
 
+class StaleOfferPublishDecisionApprovalPayload(BaseModel):
+    sku: str
+    action_type: str
+    repair_plan_id: str
+    latest_publish_attempt_id: str
+    offer_id: str
+    confirm_offer_status: str
+    confirm_listing_id_empty: bool
+    confirm_category_id: str
+    confirm_condition_id: str
+    confirm_inventory_condition_enum: str
+    confirm_blocker_classified_error_code: str
+    confirm_merchant_location_key: str
+    confirm_fulfillment_policy_id: str
+    confirm_payment_policy_id: str
+    confirm_return_policy_id: str
+    confirm_publish_existing_offer_only: bool
+    confirm_publish_after_decision: bool
+    operator_approved: bool
+    operator_label: str | None = None
+    typed_confirmation: str
+    approved_payload_hash: str
+
+
 def _repair_queue_blocked_detail(sku: str, repair_blocker: dict) -> dict:
     return {
         "code": "blocked_by_repair_queue",
@@ -129,6 +156,12 @@ def _is_stale_offer_refresh_live_enabled() -> bool:
 
 
 def _build_stale_offer_refresh_executor():
+    from packages.ebay.src.inventory_client import EbayInventoryClient
+
+    return EbayInventoryClient()
+
+
+def _build_publish_decision_executor():
     from packages.ebay.src.inventory_client import EbayInventoryClient
 
     return EbayInventoryClient()
@@ -354,6 +387,33 @@ def get_stale_offer_remediation_supersede_preview(
     )
 
 
+@router.get("/{sku}/stale-offer-remediation/publish-decision-preview")
+def get_stale_offer_remediation_publish_decision_preview(
+    sku: str,
+    repair_plan_id: str,
+    allow_live_readonly: bool = False,
+    session: Session = Depends(get_session),
+):
+    try:
+        assert_route_sku_allowed(sku, "listings.stale_offer_remediation.publish_decision_preview")
+    except E2ESafetyError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+
+    diagnostics = build_publish_diagnostics(
+        session,
+        sku,
+        allow_live_readonly=allow_live_readonly,
+    )
+    if not diagnostics.get("found"):
+        raise HTTPException(status_code=404, detail=diagnostics)
+    return build_stale_offer_publish_decision_preview(
+        session=session,
+        sku=sku,
+        repair_plan_id=repair_plan_id,
+        diagnostics=diagnostics,
+    )
+
+
 @router.post("/{sku}/stale-offer-remediation/execute-approved-refresh")
 def execute_stale_offer_remediation_approved_refresh(
     sku: str,
@@ -490,6 +550,69 @@ def execute_stale_offer_remediation_approved_supersede(
     )
     if result.get("execution_status") == "blocked":
         raise HTTPException(status_code=409, detail=result)
+    return result
+
+
+@router.post("/{sku}/stale-offer-remediation/execute-approved-publish-decision")
+def execute_stale_offer_remediation_approved_publish_decision(
+    sku: str,
+    payload: StaleOfferPublishDecisionApprovalPayload,
+    session: Session = Depends(get_session),
+):
+    normalized_sku = (sku or "").strip().upper()
+    try:
+        assert_route_sku_allowed(normalized_sku, "listings.stale_offer_remediation.execute_approved_publish_decision")
+        assert_live_e2e_allowed(normalized_sku)
+    except E2ESafetyError as exc:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "live_execution_disabled",
+                "sku": normalized_sku,
+                "execution_status": "live_execution_disabled",
+                "no_publish_performed": True,
+                "reason": str(exc),
+            },
+        )
+
+    if payload.typed_confirmation != PUBLISH_DECISION_TYPED_CONFIRMATION:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "approval_typed_confirmation_mismatch",
+                "sku": normalized_sku,
+                "action_type": payload.action_type,
+                "execution_status": "blocked",
+                "no_publish_performed": True,
+                "refusal_reasons": [
+                    {
+                        "code": "approval_typed_confirmation_mismatch",
+                        "message": f"typed_confirmation must exactly equal {PUBLISH_DECISION_TYPED_CONFIRMATION}.",
+                    }
+                ],
+            },
+        )
+
+    diagnostics = build_publish_diagnostics(
+        session,
+        normalized_sku,
+        allow_live_readonly=True,
+    )
+    if not diagnostics.get("found"):
+        raise HTTPException(status_code=404, detail=diagnostics)
+
+    result = execute_approved_stale_offer_publish_decision(
+        session=session,
+        sku=normalized_sku,
+        repair_plan_id=payload.repair_plan_id,
+        diagnostics=diagnostics,
+        approval_request=payload.model_dump(),
+        publisher=_build_publish_decision_executor(),
+    )
+    if result.get("execution_status") == "blocked":
+        raise HTTPException(status_code=409, detail=result)
+    if result.get("execution_status") == "publish_failed":
+        raise HTTPException(status_code=502, detail=result)
     return result
 
 

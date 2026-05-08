@@ -102,6 +102,10 @@ def _seed_blocking_repair_plan(
     requires_review: bool = True,
     updated_at: datetime | None = None,
     publish_attempt_id: str | None = "attempt-blocked",
+    classified_error_code: str = "invalid_category_condition",
+    repair_layer: str = "category_compatibility",
+    ebay_error_id: str = "25021",
+    ebay_error_message: str = "The selected condition ID is invalid for the exact eBay category.",
 ) -> str:
     with Session(sqlite_db.engine) as session:
         if publish_attempt_id:
@@ -110,12 +114,12 @@ def _seed_blocking_repair_plan(
                 sku=sku,
                 stage="publish_offer",
                 status="failed",
-                ebay_error_id="25021",
-                ebay_error_message="The selected condition ID is invalid for the exact eBay category.",
-                classified_error_code="invalid_category_condition",
-                repair_layer="category_compatibility",
-                requires_review=True,
-                retry_allowed=False,
+                ebay_error_id=ebay_error_id,
+                ebay_error_message=ebay_error_message,
+                classified_error_code=classified_error_code,
+                repair_layer=repair_layer,
+                requires_review=requires_review,
+                retry_allowed=retry_allowed,
             )
             session.add(attempt)
         plan = PublishRepairPlanRecord(
@@ -139,8 +143,8 @@ def _seed_blocking_repair_plan(
             requires_review=requires_review,
             retry_allowed=retry_allowed,
             source="ebay_error",
-            repair_layer="category_compatibility",
-            classified_error_code="invalid_category_condition",
+            repair_layer=repair_layer,
+            classified_error_code=classified_error_code,
             updated_at=updated_at or datetime.utcnow(),
         )
         session.add(plan)
@@ -325,6 +329,53 @@ def _eligible_supersede_diagnostics(
     return diagnostics
 
 
+def _eligible_publish_decision_diagnostics(
+    repair_plan_id: str,
+    *,
+    latest_publish_attempt_id: str = "attempt-blocked",
+) -> dict:
+    diagnostics = _eligible_refresh_diagnostics()
+    diagnostics["repair_plan_id"] = repair_plan_id
+    diagnostics["latest_publish_attempt_id"] = latest_publish_attempt_id
+    diagnostics["repair_status"] = {"status": "needs_manual_review", "blocked_by_repair_queue": True}
+    diagnostics["retry_allowed"] = False
+    diagnostics["classified_error_code"] = "requires_publish_decision_after_refresh"
+    diagnostics["repair_queue_blocker"] = {
+        "repair_plan_id": repair_plan_id,
+        "latest_publish_attempt_id": latest_publish_attempt_id,
+        "blocked_by_repair_queue": True,
+        "retry_allowed": False,
+        "classified_error_code": "requires_publish_decision_after_refresh",
+        "repair_status": diagnostics["repair_status"],
+    }
+    return diagnostics
+
+
+def _seed_publish_decision_blocker(
+    sku: str = "BK-000008",
+    *,
+    status: str = "needs_manual_review",
+    retry_allowed: bool = False,
+    requires_review: bool = True,
+    updated_at: datetime | None = None,
+    publish_attempt_id: str | None = "attempt-blocked",
+    classified_error_code: str = "requires_publish_decision_after_refresh",
+    repair_layer: str = "post_refresh_publish_decision",
+) -> str:
+    return _seed_blocking_repair_plan(
+        sku=sku,
+        status=status,
+        retry_allowed=retry_allowed,
+        requires_review=requires_review,
+        updated_at=updated_at,
+        publish_attempt_id=publish_attempt_id,
+        classified_error_code=classified_error_code,
+        repair_layer=repair_layer,
+        ebay_error_id="publish-decision",
+        ebay_error_message="Stale offer was refreshed successfully; separate publish approval is required.",
+    )
+
+
 def _expected_live_refresh_offer_payload(diagnostics: dict) -> dict:
     payload = dict(diagnostics["stale_offer_remediation_draft"]["intended_offer_payload_preview"])
     payload["merchantLocationKey"] = "real-location"
@@ -358,6 +409,45 @@ class _FakeApprovedRefreshExecutor:
     def publish_offer(self, *_args, **_kwargs):  # pragma: no cover
         self.publish_calls += 1
         raise AssertionError("approved refresh must not publish")
+
+
+class _FakePublishDecisionExecutor:
+    def __init__(self) -> None:
+        self.publish_calls: list[tuple[str, str]] = []
+        self.inventory_calls = 0
+        self.offer_put_calls = 0
+        self.create_offer_calls = 0
+        self.batch_publish_calls = 0
+
+    def publish_existing_offer(self, offer_id: str, sku: str) -> dict:
+        self.publish_calls.append((offer_id, sku))
+        return {
+            "ok": True,
+            "listing_id": "123456789012",
+            "listing_url": "https://www.ebay.com/itm/123456789012",
+            "offer_id": offer_id,
+            "auth_headers_prepared": True,
+            "auth_token_source": "oauth",
+            "oauth_token_may_have_been_refreshed": False,
+        }
+
+
+class _FailingPublishDecisionExecutor(_FakePublishDecisionExecutor):
+    def publish_existing_offer(self, offer_id: str, sku: str) -> dict:
+        self.publish_calls.append((offer_id, sku))
+        return {
+            "ok": False,
+            "error": "publish failed",
+            "error_code": "API_ERROR",
+            "details": {
+                "body": "Error 25001: Listing format not supported.",
+                "stage": "publish_offer",
+                "offer_id": offer_id,
+                "auth_headers_prepared": True,
+                "auth_token_source": "oauth",
+                "oauth_token_may_have_been_refreshed": False,
+            },
+        }
 
 
 def test_failed_publish_creates_repair_queue_entry(monkeypatch, tmp_path):
@@ -1367,6 +1457,648 @@ def test_stale_offer_remediation_approval_preview_respects_route_guard(monkeypat
         resp = client.get("/api/listings/BK-000009/stale-offer-remediation/approval-preview")
 
     assert resp.status_code == 403
+
+
+def test_publish_decision_preview_is_read_only_and_does_not_mutate_db(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    _seed_item(
+        ebay_category_id="14056",
+        condition_id="3000",
+        offer_id="156719395011",
+        listing_id=None,
+        status=ItemStatus.EXPORT_READY,
+    )
+    plan_id = _seed_publish_decision_blocker()
+    before_plans = _plans_for_sku("BK-000008")
+    before_decisions = _decisions_for_sku("BK-000008")
+
+    def fake_diagnostics(_session, _sku, *, allow_live_readonly=False):
+        return _eligible_publish_decision_diagnostics(plan_id)
+
+    def fail_mutation(*_args, **_kwargs):
+        raise AssertionError("publish-decision preview must not call eBay mutation APIs")
+
+    def fail_publish(*_args, **_kwargs):
+        raise AssertionError("publish-decision preview must not publish")
+
+    monkeypatch.setattr("apps.api.src.routes.listings.build_publish_diagnostics", fake_diagnostics)
+    monkeypatch.setattr("apps.api.src.routes.listings.ebay_http.put", fail_mutation)
+    monkeypatch.setattr("apps.api.src.routes.listings.ebay_http.post", fail_mutation)
+    monkeypatch.setattr("apps.api.src.routes.listings.ebay_http.delete", fail_mutation)
+    monkeypatch.setattr("packages.ebay.src.inventory_client.EbayInventoryClient.publish_item", fail_publish)
+
+    with _client() as client:
+        resp = client.get(
+            f"/api/listings/BK-000008/stale-offer-remediation/publish-decision-preview?repair_plan_id={plan_id}&allow_live_readonly=true"
+        )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["eligible_for_publish_decision_preview"] is True
+    assert body["read_only"] is True
+    assert body["no_mutation_performed"] is True
+    assert body["no_ebay_mutation_performed"] is True
+    assert body["no_publish_performed"] is True
+    assert body["publish_call_preview"]["method"] == "POST"
+    assert body["publish_call_preview"]["endpoint"] == "/sell/inventory/v1/offer/156719395011/publish"
+    assert body["typed_confirmation_required"] == "PUBLISH REFRESHED UNPUBLISHED OFFER ONLY"
+    assert body["required_approval_fields_template"]["repair_plan_id"] == plan_id
+    after_plans = _plans_for_sku("BK-000008")
+    after_decisions = _decisions_for_sku("BK-000008")
+    assert len(after_plans) == len(before_plans)
+    assert len(after_decisions) == len(before_decisions)
+    assert after_plans[0].id == before_plans[0].id
+    assert after_plans[0].status == before_plans[0].status
+
+
+def test_publish_decision_preview_refuses_when_active_blocker_missing(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    _seed_item(ebay_category_id="14056", condition_id="3000", offer_id="156719395011", listing_id=None)
+
+    def fake_diagnostics(_session, _sku, *, allow_live_readonly=False):
+        return _eligible_publish_decision_diagnostics("missing-plan")
+
+    monkeypatch.setattr("apps.api.src.routes.listings.build_publish_diagnostics", fake_diagnostics)
+
+    with _client() as client:
+        resp = client.get(
+            "/api/listings/BK-000008/stale-offer-remediation/publish-decision-preview"
+            "?repair_plan_id=missing-plan&allow_live_readonly=true"
+        )
+
+    assert resp.status_code == 200
+    codes = {reason["code"] for reason in resp.json()["blockers"]}
+    assert "repair_plan_not_found" in codes
+
+
+def test_publish_decision_preview_refuses_wrong_blocker_code(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    _seed_item(ebay_category_id="14056", condition_id="3000", offer_id="156719395011", listing_id=None)
+    plan_id = _seed_publish_decision_blocker(classified_error_code="invalid_category_condition", repair_layer="category_compatibility")
+
+    def fake_diagnostics(_session, _sku, *, allow_live_readonly=False):
+        return _eligible_publish_decision_diagnostics(plan_id)
+
+    monkeypatch.setattr("apps.api.src.routes.listings.build_publish_diagnostics", fake_diagnostics)
+
+    with _client() as client:
+        resp = client.get(
+            f"/api/listings/BK-000008/stale-offer-remediation/publish-decision-preview?repair_plan_id={plan_id}&allow_live_readonly=true"
+        )
+
+    assert resp.status_code == 200
+    codes = {reason["code"] for reason in resp.json()["blockers"]}
+    assert "selected_plan_not_publish_decision_blocker" in codes
+    assert "current_blocker_not_publish_decision_after_refresh" in codes
+
+
+def test_publish_decision_preview_refuses_wrong_repair_layer(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    _seed_item(ebay_category_id="14056", condition_id="3000", offer_id="156719395011", listing_id=None)
+    plan_id = _seed_publish_decision_blocker(repair_layer="category_compatibility")
+
+    def fake_diagnostics(_session, _sku, *, allow_live_readonly=False):
+        return _eligible_publish_decision_diagnostics(plan_id)
+
+    monkeypatch.setattr("apps.api.src.routes.listings.build_publish_diagnostics", fake_diagnostics)
+
+    with _client() as client:
+        resp = client.get(
+            f"/api/listings/BK-000008/stale-offer-remediation/publish-decision-preview?repair_plan_id={plan_id}&allow_live_readonly=true"
+        )
+
+    assert resp.status_code == 200
+    assert "selected_plan_wrong_repair_layer" in {reason["code"] for reason in resp.json()["blockers"]}
+
+
+def test_publish_decision_preview_refuses_retry_allowed_true(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    _seed_item(ebay_category_id="14056", condition_id="3000", offer_id="156719395011", listing_id=None)
+    plan_id = _seed_publish_decision_blocker(retry_allowed=True)
+
+    def fake_diagnostics(_session, _sku, *, allow_live_readonly=False):
+        return _eligible_publish_decision_diagnostics(plan_id)
+
+    monkeypatch.setattr("apps.api.src.routes.listings.build_publish_diagnostics", fake_diagnostics)
+
+    with _client() as client:
+        resp = client.get(
+            f"/api/listings/BK-000008/stale-offer-remediation/publish-decision-preview?repair_plan_id={plan_id}&allow_live_readonly=true"
+        )
+
+    assert resp.status_code == 200
+    assert "selected_plan_retry_allowed_not_false" in {reason["code"] for reason in resp.json()["blockers"]}
+
+
+def test_publish_decision_preview_refuses_offer_not_unpublished(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    _seed_item(ebay_category_id="14056", condition_id="3000", offer_id="156719395011", listing_id=None)
+    plan_id = _seed_publish_decision_blocker()
+
+    def fake_diagnostics(_session, _sku, *, allow_live_readonly=False):
+        diagnostics = _eligible_publish_decision_diagnostics(plan_id)
+        diagnostics["existing_offer_diagnostics"]["status"] = "PUBLISHED"
+        return diagnostics
+
+    monkeypatch.setattr("apps.api.src.routes.listings.build_publish_diagnostics", fake_diagnostics)
+
+    with _client() as client:
+        resp = client.get(
+            f"/api/listings/BK-000008/stale-offer-remediation/publish-decision-preview?repair_plan_id={plan_id}&allow_live_readonly=true"
+        )
+
+    assert resp.status_code == 200
+    assert "offer_status_not_unpublished" in {reason["code"] for reason in resp.json()["blockers"]}
+
+
+def test_publish_decision_preview_refuses_listing_id_present(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    _seed_item(ebay_category_id="14056", condition_id="3000", offer_id="156719395011", listing_id="123456789012")
+    plan_id = _seed_publish_decision_blocker()
+
+    def fake_diagnostics(_session, _sku, *, allow_live_readonly=False):
+        diagnostics = _eligible_publish_decision_diagnostics(plan_id)
+        diagnostics["listing_id"] = "123456789012"
+        return diagnostics
+
+    monkeypatch.setattr("apps.api.src.routes.listings.build_publish_diagnostics", fake_diagnostics)
+
+    with _client() as client:
+        resp = client.get(
+            f"/api/listings/BK-000008/stale-offer-remediation/publish-decision-preview?repair_plan_id={plan_id}&allow_live_readonly=true"
+        )
+
+    assert resp.status_code == 200
+    assert "listing_id_present" in {reason["code"] for reason in resp.json()["blockers"]}
+
+
+def test_publish_decision_preview_refuses_missing_offer_id(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    _seed_item(ebay_category_id="14056", condition_id="3000", offer_id="", listing_id=None)
+    plan_id = _seed_publish_decision_blocker()
+
+    def fake_diagnostics(_session, _sku, *, allow_live_readonly=False):
+        diagnostics = _eligible_publish_decision_diagnostics(plan_id)
+        diagnostics["offer_id"] = ""
+        diagnostics["existing_offer_diagnostics"]["offer_id"] = ""
+        return diagnostics
+
+    monkeypatch.setattr("apps.api.src.routes.listings.build_publish_diagnostics", fake_diagnostics)
+
+    with _client() as client:
+        resp = client.get(
+            f"/api/listings/BK-000008/stale-offer-remediation/publish-decision-preview?repair_plan_id={plan_id}&allow_live_readonly=true"
+        )
+
+    assert resp.status_code == 200
+    assert "missing_offer_id" in {reason["code"] for reason in resp.json()["blockers"]}
+
+
+def test_publish_decision_preview_refuses_dirty_category_condition(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    _seed_item(ebay_category_id="14056", condition_id="3000", offer_id="156719395011", listing_id=None)
+    plan_id = _seed_publish_decision_blocker()
+
+    def fake_diagnostics(_session, _sku, *, allow_live_readonly=False):
+        diagnostics = _eligible_publish_decision_diagnostics(plan_id)
+        diagnostics["local_condition_id"] = "5000"
+        diagnostics["local_inventory_condition_enum"] = "LIKE_NEW"
+        diagnostics["inventory_item_diagnostics"]["condition_enum"] = "LIKE_NEW"
+        diagnostics["category_condition_policy_diagnostics"]["live_policy_allows_condition"] = False
+        return diagnostics
+
+    monkeypatch.setattr("apps.api.src.routes.listings.build_publish_diagnostics", fake_diagnostics)
+
+    with _client() as client:
+        resp = client.get(
+            f"/api/listings/BK-000008/stale-offer-remediation/publish-decision-preview?repair_plan_id={plan_id}&allow_live_readonly=true"
+        )
+
+    assert resp.status_code == 200
+    codes = {reason["code"] for reason in resp.json()["blockers"]}
+    assert "condition_id_not_confirmed" in codes
+    assert "inventory_condition_not_confirmed" in codes
+    assert "live_inventory_condition_not_used_good" in codes
+    assert "live_policy_does_not_allow_condition" in codes
+
+
+def test_publish_decision_preview_refuses_placeholder_policy_ids(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    _seed_item(ebay_category_id="14056", condition_id="3000", offer_id="156719395011", listing_id=None)
+    plan_id = _seed_publish_decision_blocker()
+
+    def fake_diagnostics(_session, _sku, *, allow_live_readonly=False):
+        diagnostics = _eligible_publish_decision_diagnostics(plan_id)
+        diagnostics["existing_offer_diagnostics"]["listing_policies"]["fulfillmentPolicyId"] = "preview-fulfillment-policy"
+        return diagnostics
+
+    monkeypatch.setattr("apps.api.src.routes.listings.build_publish_diagnostics", fake_diagnostics)
+
+    with _client() as client:
+        resp = client.get(
+            f"/api/listings/BK-000008/stale-offer-remediation/publish-decision-preview?repair_plan_id={plan_id}&allow_live_readonly=true"
+        )
+
+    assert resp.status_code == 200
+    codes = {reason["code"] for reason in resp.json()["blockers"]}
+    assert "missing_real_listing_policy_ids" in codes
+    assert "placeholder_listing_policy_detected" in codes
+
+
+def test_publish_decision_preview_refuses_missing_or_placeholder_merchant_location(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    _seed_item(ebay_category_id="14056", condition_id="3000", offer_id="156719395011", listing_id=None)
+    plan_id = _seed_publish_decision_blocker()
+
+    def fake_diagnostics(_session, _sku, *, allow_live_readonly=False):
+        diagnostics = _eligible_publish_decision_diagnostics(plan_id)
+        diagnostics["existing_offer_diagnostics"]["merchant_location_key"] = "preview-location"
+        return diagnostics
+
+    monkeypatch.setattr("apps.api.src.routes.listings.build_publish_diagnostics", fake_diagnostics)
+
+    with _client() as client:
+        resp = client.get(
+            f"/api/listings/BK-000008/stale-offer-remediation/publish-decision-preview?repair_plan_id={plan_id}&allow_live_readonly=true"
+        )
+
+    assert resp.status_code == 200
+    assert "merchant_location_key_unresolved" in {reason["code"] for reason in resp.json()["blockers"]}
+
+
+def test_publish_decision_preview_refuses_missing_hosted_public_image_urls(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    _seed_item(
+        ebay_category_id="14056",
+        condition_id="3000",
+        offer_id="156719395011",
+        listing_id=None,
+        image_paths=["C:\\photos\\BK-000008\\01.jpg"],
+    )
+    plan_id = _seed_publish_decision_blocker()
+
+    def fake_diagnostics(_session, _sku, *, allow_live_readonly=False):
+        return _eligible_publish_decision_diagnostics(plan_id)
+
+    monkeypatch.setattr("apps.api.src.routes.listings.build_publish_diagnostics", fake_diagnostics)
+
+    with _client() as client:
+        resp = client.get(
+            f"/api/listings/BK-000008/stale-offer-remediation/publish-decision-preview?repair_plan_id={plan_id}&allow_live_readonly=true"
+        )
+
+    assert resp.status_code == 200
+    assert "missing_hosted_public_image_urls" in {reason["code"] for reason in resp.json()["blockers"]}
+
+
+def test_execute_approved_publish_decision_refuses_wrong_typed_confirmation(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    _seed_item(ebay_category_id="14056", condition_id="3000", offer_id="156719395011", listing_id=None)
+    plan_id = _seed_publish_decision_blocker()
+
+    def fake_diagnostics(_session, _sku, *, allow_live_readonly=False):
+        return _eligible_publish_decision_diagnostics(plan_id)
+
+    monkeypatch.setattr("apps.api.src.routes.listings.build_publish_diagnostics", fake_diagnostics)
+    monkeypatch.setattr("apps.api.src.routes.listings.assert_live_e2e_allowed", lambda *_args, **_kwargs: None)
+
+    with _client() as client:
+        preview = client.get(
+            f"/api/listings/BK-000008/stale-offer-remediation/publish-decision-preview?repair_plan_id={plan_id}&allow_live_readonly=true"
+        )
+        approval = preview.json()["required_approval_fields_template"]
+        approval["typed_confirmation"] = "wrong"
+        resp = client.post(
+            "/api/listings/BK-000008/stale-offer-remediation/execute-approved-publish-decision",
+            json=approval,
+        )
+
+    assert resp.status_code == 409
+    assert "approval_typed_confirmation_mismatch" in {r["code"] for r in resp.json()["detail"]["refusal_reasons"]}
+
+
+def test_execute_approved_publish_decision_refuses_stale_payload_hash(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    _seed_item(ebay_category_id="14056", condition_id="3000", offer_id="156719395011", listing_id=None)
+    plan_id = _seed_publish_decision_blocker()
+
+    def fake_diagnostics(_session, _sku, *, allow_live_readonly=False):
+        return _eligible_publish_decision_diagnostics(plan_id)
+
+    monkeypatch.setattr("apps.api.src.routes.listings.build_publish_diagnostics", fake_diagnostics)
+    monkeypatch.setattr("apps.api.src.routes.listings.assert_live_e2e_allowed", lambda *_args, **_kwargs: None)
+
+    with _client() as client:
+        preview = client.get(
+            f"/api/listings/BK-000008/stale-offer-remediation/publish-decision-preview?repair_plan_id={plan_id}&allow_live_readonly=true"
+        )
+        approval = preview.json()["required_approval_fields_template"]
+        approval["approved_payload_hash"] = "wrong-hash"
+        resp = client.post(
+            "/api/listings/BK-000008/stale-offer-remediation/execute-approved-publish-decision",
+            json=approval,
+        )
+
+    assert resp.status_code == 409
+    assert "approval_payload_hash_mismatch" in {r["code"] for r in resp.json()["detail"]["refusal_reasons"]}
+
+
+def test_execute_approved_publish_decision_requires_operator_approval_and_explicit_publish_intent(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    _seed_item(ebay_category_id="14056", condition_id="3000", offer_id="156719395011", listing_id=None)
+    plan_id = _seed_publish_decision_blocker()
+
+    def fake_diagnostics(_session, _sku, *, allow_live_readonly=False):
+        return _eligible_publish_decision_diagnostics(plan_id)
+
+    monkeypatch.setattr("apps.api.src.routes.listings.build_publish_diagnostics", fake_diagnostics)
+    monkeypatch.setattr("apps.api.src.routes.listings.assert_live_e2e_allowed", lambda *_args, **_kwargs: None)
+
+    with _client() as client:
+        preview = client.get(
+            f"/api/listings/BK-000008/stale-offer-remediation/publish-decision-preview?repair_plan_id={plan_id}&allow_live_readonly=true"
+        )
+        approval = preview.json()["required_approval_fields_template"]
+        approval["operator_approved"] = False
+        approval["confirm_publish_after_decision"] = False
+        resp = client.post(
+            "/api/listings/BK-000008/stale-offer-remediation/execute-approved-publish-decision",
+            json=approval,
+        )
+
+    assert resp.status_code == 409
+    codes = {r["code"] for r in resp.json()["detail"]["refusal_reasons"]}
+    assert "approval_publish_after_decision_not_confirmed" in codes
+    assert "approval_operator_not_approved" in codes
+
+
+def test_execute_approved_publish_decision_refuses_if_active_blocker_changed_after_preview(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    _seed_item(ebay_category_id="14056", condition_id="3000", offer_id="156719395011", listing_id=None)
+    old_plan_id = _seed_publish_decision_blocker(updated_at=datetime.utcnow() - timedelta(hours=1), publish_attempt_id="attempt-old")
+    new_plan_id = _seed_publish_decision_blocker(updated_at=datetime.utcnow(), publish_attempt_id="attempt-new")
+
+    def preview_diagnostics(_session, _sku, *, allow_live_readonly=False):
+        return _eligible_publish_decision_diagnostics(old_plan_id, latest_publish_attempt_id="attempt-old")
+
+    def execution_diagnostics(_session, _sku, *, allow_live_readonly=False):
+        return _eligible_publish_decision_diagnostics(new_plan_id, latest_publish_attempt_id="attempt-new")
+
+    state = {"preview": True}
+
+    def fake_diagnostics(_session, _sku, *, allow_live_readonly=False):
+        if state["preview"]:
+            state["preview"] = False
+            return preview_diagnostics(_session, _sku, allow_live_readonly=allow_live_readonly)
+        return execution_diagnostics(_session, _sku, allow_live_readonly=allow_live_readonly)
+
+    monkeypatch.setattr("apps.api.src.routes.listings.build_publish_diagnostics", fake_diagnostics)
+    monkeypatch.setattr("apps.api.src.routes.listings.assert_live_e2e_allowed", lambda *_args, **_kwargs: None)
+
+    with _client() as client:
+        preview = client.get(
+            f"/api/listings/BK-000008/stale-offer-remediation/publish-decision-preview?repair_plan_id={old_plan_id}&allow_live_readonly=true"
+        )
+        approval = preview.json()["required_approval_fields_template"]
+        resp = client.post(
+            "/api/listings/BK-000008/stale-offer-remediation/execute-approved-publish-decision",
+            json=approval,
+        )
+
+    assert resp.status_code == 409
+    assert "selected_plan_not_current_blocker" in {r["code"] for r in resp.json()["detail"]["refusal_reasons"]}
+
+
+def test_execute_approved_publish_decision_refuses_if_listing_state_changed(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    _seed_item(ebay_category_id="14056", condition_id="3000", offer_id="156719395011", listing_id=None)
+    plan_id = _seed_publish_decision_blocker()
+
+    def preview_diagnostics(_session, _sku, *, allow_live_readonly=False):
+        return _eligible_publish_decision_diagnostics(plan_id)
+
+    def execution_diagnostics(_session, _sku, *, allow_live_readonly=False):
+        diagnostics = _eligible_publish_decision_diagnostics(plan_id)
+        diagnostics["listing_id"] = "123456789012"
+        diagnostics["existing_offer_diagnostics"]["status"] = "PUBLISHED"
+        return diagnostics
+
+    state = {"preview": True}
+
+    def fake_diagnostics(_session, _sku, *, allow_live_readonly=False):
+        if state["preview"]:
+            state["preview"] = False
+            return preview_diagnostics(_session, _sku, allow_live_readonly=allow_live_readonly)
+        return execution_diagnostics(_session, _sku, allow_live_readonly=allow_live_readonly)
+
+    monkeypatch.setattr("apps.api.src.routes.listings.build_publish_diagnostics", fake_diagnostics)
+    monkeypatch.setattr("apps.api.src.routes.listings.assert_live_e2e_allowed", lambda *_args, **_kwargs: None)
+
+    with _client() as client:
+        preview = client.get(
+            f"/api/listings/BK-000008/stale-offer-remediation/publish-decision-preview?repair_plan_id={plan_id}&allow_live_readonly=true"
+        )
+        approval = preview.json()["required_approval_fields_template"]
+        resp = client.post(
+            "/api/listings/BK-000008/stale-offer-remediation/execute-approved-publish-decision",
+            json=approval,
+        )
+
+    assert resp.status_code == 409
+    codes = {r["code"] for r in resp.json()["detail"]["refusal_reasons"]}
+    assert "listing_id_present" in codes
+    assert "offer_status_not_unpublished" in codes
+
+
+def test_execute_approved_publish_decision_refuses_placeholder_policy_merchant_location_and_missing_hosted_urls(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    _seed_item(
+        ebay_category_id="14056",
+        condition_id="3000",
+        offer_id="156719395011",
+        listing_id=None,
+        image_paths=["C:\\photos\\BK-000008\\01.jpg"],
+    )
+    plan_id = _seed_publish_decision_blocker()
+
+    def preview_diagnostics(_session, _sku, *, allow_live_readonly=False):
+        return _eligible_publish_decision_diagnostics(plan_id)
+
+    def execution_diagnostics(_session, _sku, *, allow_live_readonly=False):
+        diagnostics = _eligible_publish_decision_diagnostics(plan_id)
+        diagnostics["existing_offer_diagnostics"]["listing_policies"]["fulfillmentPolicyId"] = "preview-fulfillment-policy"
+        diagnostics["existing_offer_diagnostics"]["merchant_location_key"] = "preview-location"
+        return diagnostics
+
+    state = {"preview": True}
+
+    def fake_diagnostics(_session, _sku, *, allow_live_readonly=False):
+        if state["preview"]:
+            state["preview"] = False
+            return preview_diagnostics(_session, _sku, allow_live_readonly=allow_live_readonly)
+        return execution_diagnostics(_session, _sku, allow_live_readonly=allow_live_readonly)
+
+    monkeypatch.setattr("apps.api.src.routes.listings.build_publish_diagnostics", fake_diagnostics)
+    monkeypatch.setattr("apps.api.src.routes.listings.assert_live_e2e_allowed", lambda *_args, **_kwargs: None)
+
+    with _client() as client:
+        preview = client.get(
+            f"/api/listings/BK-000008/stale-offer-remediation/publish-decision-preview?repair_plan_id={plan_id}&allow_live_readonly=true"
+        )
+        approval = preview.json()["required_approval_fields_template"]
+        resp = client.post(
+            "/api/listings/BK-000008/stale-offer-remediation/execute-approved-publish-decision",
+            json=approval,
+        )
+
+    assert resp.status_code == 409
+    codes = {r["code"] for r in resp.json()["detail"]["refusal_reasons"]}
+    assert "missing_hosted_public_image_urls" in codes
+    assert "placeholder_listing_policy_detected" in codes
+    assert "merchant_location_key_unresolved" in codes
+
+
+def test_execute_approved_publish_decision_success_calls_publish_existing_offer_once_and_updates_local_state(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    _seed_item(
+        ebay_category_id="14056",
+        condition_id="3000",
+        offer_id="156719395011",
+        listing_id=None,
+        status=ItemStatus.EXPORT_READY,
+        image_paths=["https://res.cloudinary.com/demo/image/upload/v1/BK-000008-01.jpg"],
+    )
+    plan_id = _seed_publish_decision_blocker()
+    unrelated_plan_id = _seed_publish_decision_blocker(sku="BK-000009", publish_attempt_id="attempt-009")
+    executor = _FakePublishDecisionExecutor()
+
+    def fake_diagnostics(_session, _sku, *, allow_live_readonly=False):
+        return _eligible_publish_decision_diagnostics(plan_id)
+
+    def fail_mutation(*_args, **_kwargs):
+        raise AssertionError("publish-decision execution must not call generic eBay mutation helpers")
+
+    def fail_publish_item(*_args, **_kwargs):
+        raise AssertionError("generic publish_item must not be called")
+
+    monkeypatch.setattr("apps.api.src.routes.listings.build_publish_diagnostics", fake_diagnostics)
+    monkeypatch.setattr("apps.api.src.routes.listings.assert_live_e2e_allowed", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("apps.api.src.routes.listings._build_publish_decision_executor", lambda: executor)
+    monkeypatch.setattr("apps.api.src.routes.listings.ebay_http.put", fail_mutation)
+    monkeypatch.setattr("apps.api.src.routes.listings.ebay_http.delete", fail_mutation)
+    monkeypatch.setattr("apps.api.src.routes.listings.ebay_http.post", fail_mutation)
+    monkeypatch.setattr("packages.ebay.src.inventory_client.EbayInventoryClient.publish_item", fail_publish_item)
+
+    with _client() as client:
+        preview = client.get(
+            f"/api/listings/BK-000008/stale-offer-remediation/publish-decision-preview?repair_plan_id={plan_id}&allow_live_readonly=true"
+        )
+        approval = preview.json()["required_approval_fields_template"]
+        approval["operator_label"] = "phase-1v-test"
+        resp = client.post(
+            "/api/listings/BK-000008/stale-offer-remediation/execute-approved-publish-decision",
+            json=approval,
+        )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["execution_status"] == "publish_completed"
+    assert body["publish_performed"] is True
+    assert body["published_existing_offer_only"] is True
+    assert body["created_new_offer"] is False
+    assert body["inventory_refreshed"] is False
+    assert body["offer_refreshed"] is False
+    assert body["batch_publish_performed"] is False
+    assert body["blocker_resolved"] is True
+    assert body["item_marked_listed"] is True
+    assert body["listing_id_after"] == "123456789012"
+    assert executor.publish_calls == [("156719395011", "BK-000008")]
+
+    with Session(sqlite_db.engine) as session:
+        item = ItemRepository(session).get_by_sku("BK-000008")
+        assert item is not None
+        assert item.listing_id == "123456789012"
+        assert item.status == ItemStatus.LISTED
+        assert item.platform == "ebay"
+        assert item.date_listed is not None
+        assert item.offer_id == "156719395011"
+        assert item.ebay_category_id == "14056"
+        assert item.condition_id == "3000"
+        assert item.image_paths == ["https://res.cloudinary.com/demo/image/upload/v1/BK-000008-01.jpg"]
+
+    plans = _plans_for_sku("BK-000008")
+    target_plan = next(plan for plan in plans if plan.id == plan_id)
+    assert target_plan.status == "resolved"
+    assert target_plan.retry_allowed is False
+    decisions = _decisions_for_sku("BK-000008")
+    matching = [d for d in decisions if d.repair_plan_id == plan_id and d.action == "publish_decision_approved_existing_offer"]
+    assert len(matching) == 1
+    other_plans = _plans_for_sku("BK-000009")
+    assert len(other_plans) == 1
+    assert other_plans[0].id == unrelated_plan_id
+    assert other_plans[0].status == "needs_manual_review"
+
+
+def test_execute_approved_publish_decision_failure_keeps_blocker_active_and_item_unlisted(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    _seed_item(
+        ebay_category_id="14056",
+        condition_id="3000",
+        offer_id="156719395011",
+        listing_id=None,
+        status=ItemStatus.EXPORT_READY,
+        image_paths=["https://res.cloudinary.com/demo/image/upload/v1/BK-000008-01.jpg"],
+    )
+    plan_id = _seed_publish_decision_blocker()
+    executor = _FailingPublishDecisionExecutor()
+
+    def fake_diagnostics(_session, _sku, *, allow_live_readonly=False):
+        return _eligible_publish_decision_diagnostics(plan_id)
+
+    def fail_publish_item(*_args, **_kwargs):
+        raise AssertionError("generic publish_item must not be called")
+
+    monkeypatch.setattr("apps.api.src.routes.listings.build_publish_diagnostics", fake_diagnostics)
+    monkeypatch.setattr("apps.api.src.routes.listings.assert_live_e2e_allowed", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("apps.api.src.routes.listings._build_publish_decision_executor", lambda: executor)
+    monkeypatch.setattr("packages.ebay.src.inventory_client.EbayInventoryClient.publish_item", fail_publish_item)
+
+    with _client() as client:
+        preview = client.get(
+            f"/api/listings/BK-000008/stale-offer-remediation/publish-decision-preview?repair_plan_id={plan_id}&allow_live_readonly=true"
+        )
+        approval = preview.json()["required_approval_fields_template"]
+        resp = client.post(
+            "/api/listings/BK-000008/stale-offer-remediation/execute-approved-publish-decision",
+            json=approval,
+        )
+
+    assert resp.status_code == 502
+    body = resp.json()["detail"]
+    assert body["execution_status"] == "publish_failed"
+    assert body["publish_attempted"] is True
+    assert body["publish_performed"] is False
+    assert body["item_marked_listed"] is False
+    assert body["listing_id_after"] == ""
+    assert body["blocker_resolved"] is False
+    assert executor.publish_calls == [("156719395011", "BK-000008")]
+
+    with Session(sqlite_db.engine) as session:
+        item = ItemRepository(session).get_by_sku("BK-000008")
+        assert item is not None
+        assert item.listing_id in (None, "")
+        assert item.status == ItemStatus.EXPORT_READY
+        assert item.offer_id == "156719395011"
+        assert item.ebay_category_id == "14056"
+        assert item.condition_id == "3000"
+        assert item.image_paths == ["https://res.cloudinary.com/demo/image/upload/v1/BK-000008-01.jpg"]
+
+    plans = _plans_for_sku("BK-000008")
+    target_plan = next(plan for plan in plans if plan.id == plan_id)
+    assert target_plan.status == "needs_manual_review"
+    assert target_plan.retry_allowed is False
+    decisions = _decisions_for_sku("BK-000008")
+    assert not [d for d in decisions if d.repair_plan_id == plan_id and d.action == "publish_decision_approved_existing_offer"]
 
 
 def test_stale_offer_supersede_preview_is_read_only_and_does_not_mutate_db(monkeypatch, tmp_path):

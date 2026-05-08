@@ -8,18 +8,24 @@ from collections.abc import Callable
 from typing import Protocol
 
 from packages.core.src.config import get_settings
+from packages.core.src.constants import ItemStatus, Platform
 from packages.logging.src.audit_log import AuditLog
 from sqlmodel import Session, select
 
+from apps.api.src.services.publish_repair import classify_publish_failure
 from apps.api.src.services.publish_repair import get_publish_repair_blocker
+from packages.data.src.models.item_record import ItemRecord
 from packages.data.src.models.publish_repair_decision_record import PublishRepairDecisionRecord
 from packages.data.src.models.publish_repair_plan_record import PublishRepairPlanRecord
+from packages.data.src.repositories.item_repo import ItemRepository
 
 REMEDIATION_TYPE = "refresh_existing_unpublished_offer"
 REQUIRED_TYPED_CONFIRMATION = "REFRESH UNPUBLISHED OFFER ONLY"
 SUPERSEDE_ACTION_TYPE = "supersede_repair_plan_after_refresh"
 SUPERSEDE_TYPED_CONFIRMATION = "RESOLVE REPAIR PLAN AFTER REFRESH ONLY"
 REPLACEMENT_BLOCKING_ERROR_CODE = "requires_publish_decision_after_refresh"
+PUBLISH_DECISION_ACTION_TYPE = "publish_refreshed_unpublished_offer"
+PUBLISH_DECISION_TYPED_CONFIRMATION = "PUBLISH REFRESHED UNPUBLISHED OFFER ONLY"
 PREVIEW_PLACEHOLDER_VALUES = {
     "preview-fulfillment-policy",
     "preview-payment-policy",
@@ -35,6 +41,13 @@ class StaleOfferRemediationExecutor(Protocol):
         ...
 
     def put_offer(self, offer_id: str, payload: dict) -> dict:
+        ...
+
+
+class PublishDecisionExecutor(Protocol):
+    """Minimal publisher for an existing eBay offer."""
+
+    def publish_existing_offer(self, offer_id: str, sku: str):
         ...
 
 
@@ -594,6 +607,261 @@ def build_stale_offer_refresh_supersede_preview(
     }
 
 
+def build_stale_offer_publish_decision_preview(
+    *,
+    session: Session,
+    sku: str,
+    repair_plan_id: str,
+    diagnostics: dict,
+) -> dict:
+    context = _build_publish_decision_context(
+        session=session,
+        sku=sku,
+        repair_plan_id=repair_plan_id,
+        diagnostics=diagnostics,
+    )
+    return {
+        "sku": context["sku"],
+        "repair_plan_id": context["repair_plan_id"],
+        "eligible_for_publish_decision_preview": not context["refusal_reasons"],
+        "action_type": PUBLISH_DECISION_ACTION_TYPE,
+        "approval_required": True,
+        "typed_confirmation_required": PUBLISH_DECISION_TYPED_CONFIRMATION,
+        "read_only": True,
+        "no_mutation_performed": True,
+        "no_ebay_mutation_performed": True,
+        "no_publish_performed": True,
+        "safe_to_execute_now": False,
+        "final_live_listing_step_if_approved": True,
+        "publish_call_preview": context["publish_call_preview"],
+        "current_blocking_plan_summary": context["current_blocking_plan_summary"],
+        "live_prerequisites_summary": context["live_prerequisites_summary"],
+        "payload_hash": context["payload_hash"],
+        "required_approval_fields_template": context["approval_template"],
+        "blockers": context["refusal_reasons"],
+        "reason": (
+            ""
+            if not context["refusal_reasons"]
+            else context["refusal_reasons"][0]["message"]
+        ),
+        "next_step_warning": (
+            "This preview does not publish, does not call eBay mutation APIs, and does not clear the repair queue. "
+            "If later approved, this would be the final live listing step for the existing unpublished offer."
+        ),
+    }
+
+
+def execute_approved_stale_offer_publish_decision(
+    *,
+    session: Session,
+    sku: str,
+    repair_plan_id: str,
+    diagnostics: dict,
+    approval_request: dict,
+    publisher: PublishDecisionExecutor,
+) -> dict:
+    context = _build_publish_decision_context(
+        session=session,
+        sku=sku,
+        repair_plan_id=repair_plan_id,
+        diagnostics=diagnostics,
+    )
+    approval_refusals = _publish_decision_approval_refusals(
+        approval_request=approval_request,
+        expected=context["approval_template"],
+    )
+    if context["refusal_reasons"] or approval_refusals:
+        return {
+            "sku": context["sku"],
+            "repair_plan_id": context["repair_plan_id"],
+            "action_type": PUBLISH_DECISION_ACTION_TYPE,
+            "execution_status": "blocked",
+            "no_mutation_performed": True,
+            "no_ebay_mutation_performed": True,
+            "db_mutation_performed": False,
+            "publish_attempted": False,
+            "publish_performed": False,
+            "blocker_resolved": False,
+            "item_marked_listed": False,
+            "listing_id_after": str(diagnostics.get("listing_id") or ""),
+            "refusal_reasons": context["refusal_reasons"] + approval_refusals,
+            "payload_hash": context["payload_hash"],
+            "required_approval_fields_template": context["approval_template"],
+        }
+
+    publish_result = _call_publish_existing_offer_safely(
+        lambda: publisher.publish_existing_offer(
+            str((approval_request or {}).get("offer_id") or context["live_prerequisites_summary"].get("offer_id") or ""),
+            context["sku"],
+        )
+    )
+    if not publish_result["ok"]:
+        classified_error = classify_publish_failure(context["item"], result=_as_failure_result(publish_result))
+        return {
+            "sku": context["sku"],
+            "repair_plan_id": context["repair_plan_id"],
+            "action_type": PUBLISH_DECISION_ACTION_TYPE,
+            "execution_status": "publish_failed",
+            "no_mutation_performed": False,
+            "no_ebay_mutation_performed": False,
+            "db_mutation_performed": False,
+            "publish_attempted": True,
+            "publish_performed": False,
+            "published_existing_offer_only": False,
+            "created_new_offer": False,
+            "inventory_refreshed": False,
+            "offer_refreshed": False,
+            "batch_publish_performed": False,
+            "blocker_resolved": False,
+            "item_marked_listed": False,
+            "listing_id_before": str(diagnostics.get("listing_id") or ""),
+            "listing_id_after": str(diagnostics.get("listing_id") or ""),
+            "auth_headers_prepared": bool(publish_result["details"].get("auth_headers_prepared")),
+            "auth_token_source": str(publish_result["details"].get("auth_token_source") or ""),
+            "oauth_token_may_have_been_refreshed": bool(publish_result["details"].get("oauth_token_may_have_been_refreshed")),
+            "publish_result": publish_result,
+            "classified_error": classified_error,
+            "refusal_reasons": [],
+        }
+
+    listing_id = str(
+        publish_result["value"].get("listing_id")
+        or publish_result["value"].get("listingId")
+        or context["live_prerequisites_summary"].get("offer_id")
+        or ""
+    ).strip()
+    listing_url = str(publish_result["value"].get("listing_url") or publish_result["value"].get("listingUrl") or "").strip()
+    offer_id = str(
+        publish_result["value"].get("offer_id")
+        or publish_result["value"].get("offerId")
+        or context["live_prerequisites_summary"].get("offer_id")
+        or ""
+    ).strip()
+    item_record = session.exec(select(ItemRecord).where(ItemRecord.sku == context["sku"])).first()
+    if item_record is None:
+        return {
+            "sku": context["sku"],
+            "repair_plan_id": context["repair_plan_id"],
+            "action_type": PUBLISH_DECISION_ACTION_TYPE,
+            "execution_status": "blocked",
+            "no_mutation_performed": False,
+            "no_ebay_mutation_performed": False,
+            "db_mutation_performed": False,
+            "publish_attempted": True,
+            "publish_performed": False,
+            "blocker_resolved": False,
+            "item_marked_listed": False,
+            "listing_id_after": str(diagnostics.get("listing_id") or ""),
+            "refusal_reasons": [{"code": "item_not_found_after_publish", "message": "Local item disappeared before success could be recorded."}],
+            "payload_hash": context["payload_hash"],
+        }
+
+    plan = context["plan"]
+    before_snapshot = {
+        "repair_plan_id": plan.id,
+        "status": str(plan.status or ""),
+        "retry_allowed": bool(plan.retry_allowed),
+        "requires_review": bool(plan.requires_review),
+        "classified_error_code": str(plan.classified_error_code or ""),
+        "publish_attempt_id": str(plan.publish_attempt_id or ""),
+        "offer_id": str(context["live_prerequisites_summary"].get("offer_id") or ""),
+        "listing_id_before": str(item_record.listing_id or ""),
+    }
+    now = datetime.utcnow()
+    item_record.listing_id = listing_id
+    item_record.listing_url = listing_url or item_record.listing_url
+    item_record.offer_id = offer_id or item_record.offer_id
+    item_record.status = ItemStatus.LISTED
+    item_record.platform = Platform.EBAY
+    item_record.date_listed = now
+    item_record.updated_at = now
+    session.add(item_record)
+
+    plan.status = "resolved"
+    plan.retry_allowed = False
+    plan.updated_at = now
+    session.add(plan)
+
+    decision = PublishRepairDecisionRecord(
+        sku=context["sku"],
+        repair_plan_id=plan.id,
+        action="publish_decision_approved_existing_offer",
+        before_value_json=json.dumps(before_snapshot, sort_keys=True),
+        after_value_json=json.dumps(
+            {
+                "status": "resolved",
+                "retry_allowed": False,
+                "offer_id": offer_id,
+                "listing_id": listing_id,
+                "published_existing_offer_only": True,
+                "created_new_offer": False,
+                "inventory_refreshed": False,
+                "offer_refreshed": False,
+                "batch_publish_performed": False,
+                "category_condition_changed": False,
+                "auth_headers_prepared": bool(publish_result["value"].get("auth_headers_prepared")),
+                "auth_token_source": str(publish_result["value"].get("auth_token_source") or ""),
+                "oauth_token_may_have_been_refreshed": bool(publish_result["value"].get("oauth_token_may_have_been_refreshed")),
+            },
+            sort_keys=True,
+        ),
+        operator_label=str((approval_request or {}).get("operator_label") or ""),
+        approved_at=now,
+    )
+    session.add(decision)
+    session.commit()
+
+    AuditLog()._write(
+        {
+            "event": "publish_decision_approved_existing_offer",
+            "sku": context["sku"],
+            "repair_plan_id": plan.id,
+            "offer_id": offer_id,
+            "listing_id": listing_id,
+            "published_existing_offer_only": True,
+            "created_new_offer": False,
+            "inventory_refreshed": False,
+            "offer_refreshed": False,
+            "batch_publish_performed": False,
+            "category_condition_changed": False,
+            "auth_headers_prepared": bool(publish_result["value"].get("auth_headers_prepared")),
+            "auth_token_source": str(publish_result["value"].get("auth_token_source") or ""),
+            "oauth_token_may_have_been_refreshed": bool(publish_result["value"].get("oauth_token_may_have_been_refreshed")),
+        }
+    )
+
+    return {
+        "sku": context["sku"],
+        "repair_plan_id": plan.id,
+        "action_type": PUBLISH_DECISION_ACTION_TYPE,
+        "execution_status": "publish_completed",
+        "no_mutation_performed": False,
+        "no_ebay_mutation_performed": False,
+        "db_mutation_performed": True,
+        "publish_attempted": True,
+        "publish_performed": True,
+        "published_existing_offer_only": True,
+        "created_new_offer": False,
+        "inventory_refreshed": False,
+        "offer_refreshed": False,
+        "batch_publish_performed": False,
+        "blocker_resolved": True,
+        "item_marked_listed": True,
+        "listing_id_before": str(diagnostics.get("listing_id") or ""),
+        "listing_id_after": listing_id,
+        "listing_url_after": str(item_record.listing_url or ""),
+        "item_status_after": str(item_record.status or ""),
+        "platform_after": str(item_record.platform or ""),
+        "date_listed_after": item_record.date_listed.isoformat() if item_record.date_listed else "",
+        "auth_headers_prepared": bool(publish_result["value"].get("auth_headers_prepared")),
+        "auth_token_source": str(publish_result["value"].get("auth_token_source") or ""),
+        "oauth_token_may_have_been_refreshed": bool(publish_result["value"].get("oauth_token_may_have_been_refreshed")),
+        "publish_result": publish_result,
+        "refusal_reasons": [],
+        "payload_hash": context["payload_hash"],
+    }
+
+
 def execute_approved_stale_offer_refresh_supersede(
     *,
     session: Session,
@@ -742,6 +1010,269 @@ def execute_approved_stale_offer_refresh_supersede(
         "item_marked_listed": str(diagnostics.get("local_status") or "").lower() == "listed",
         "refusal_reasons": [],
         "payload_hash": context["payload_hash"],
+    }
+
+
+def _build_publish_decision_context(
+    *,
+    session: Session,
+    sku: str,
+    repair_plan_id: str,
+    diagnostics: dict,
+) -> dict:
+    from packages.ebay.src.inventory_client import EbayInventoryClient
+
+    normalized_sku = str(sku or "").strip().upper()
+    normalized_plan_id = str(repair_plan_id or "").strip()
+    item = ItemRepository(session).get_by_sku(normalized_sku) if normalized_sku else None
+    plan = session.get(PublishRepairPlanRecord, normalized_plan_id) if normalized_plan_id else None
+    repair_blocker = get_publish_repair_blocker(session, normalized_sku) if normalized_sku else {}
+    latest_publish_attempt_id = str(
+        (plan.publish_attempt_id if plan else "")
+        or diagnostics.get("latest_publish_attempt_id")
+        or repair_blocker.get("latest_publish_attempt_id")
+        or ""
+    )
+    hosted_photo_urls: list[str] = []
+    if item is not None:
+        hosted_photo_urls = EbayInventoryClient().extract_hosted_photo_urls(
+            [str(value) for value in (item.image_paths or [])]
+        )
+    refusal_reasons = _publish_decision_refusals(
+        sku=normalized_sku,
+        repair_plan_id=normalized_plan_id,
+        item=item,
+        plan=plan,
+        diagnostics=diagnostics,
+        repair_blocker=repair_blocker,
+        hosted_photo_urls=hosted_photo_urls,
+    )
+    offer_id = str(diagnostics.get("offer_id") or (item.offer_id if item else "") or "").strip()
+    live_offer = diagnostics.get("existing_offer_diagnostics") or {}
+    listing_policies = _extract_listing_policy_ids(live_offer.get("listing_policies") or {})
+    merchant_location_key = str(live_offer.get("merchant_location_key") or "").strip()
+    current_blocking_plan_summary = {
+        "repair_plan_id": normalized_plan_id,
+        "belongs_to_sku": bool(plan and str(plan.sku or "").upper() == normalized_sku),
+        "status": str(plan.status or "") if plan else "",
+        "retry_allowed": bool(plan.retry_allowed) if plan else False,
+        "requires_review": bool(plan.requires_review) if plan else False,
+        "classified_error_code": str(plan.classified_error_code or "") if plan else "",
+        "repair_layer": str(plan.repair_layer or "") if plan else "",
+        "publish_attempt_id": str(plan.publish_attempt_id or "") if plan else "",
+        "is_current_blocking_plan": bool(
+            repair_blocker.get("blocked_by_repair_queue")
+            and str(repair_blocker.get("repair_plan_id") or "") == normalized_plan_id
+        ),
+    }
+    publish_call_preview = {
+        "order": 1,
+        "method": "POST",
+        "endpoint": f"/sell/inventory/v1/offer/{offer_id}/publish" if offer_id else "",
+        "preview_only": True,
+        "mutation_performed": False,
+        "note": "If later approved, this would create a live eBay listing for the existing unpublished offer.",
+    }
+    live_prerequisites_summary = {
+        "offer_id": offer_id,
+        "offer_status": str(live_offer.get("status") or ""),
+        "listing_id": str(diagnostics.get("listing_id") or ""),
+        "merchant_location_key": merchant_location_key,
+        "listing_policies": listing_policies,
+        "hosted_photo_urls": hosted_photo_urls,
+        "local_category_id": str(diagnostics.get("local_category_id") or ""),
+        "local_condition_id": str(diagnostics.get("local_condition_id") or ""),
+        "local_inventory_condition_enum": str(diagnostics.get("local_inventory_condition_enum") or ""),
+        "inventory_item_exists": bool((diagnostics.get("inventory_item_diagnostics") or {}).get("inventory_item_exists")),
+        "live_policy_allows_condition": (diagnostics.get("category_condition_policy_diagnostics") or {}).get("live_policy_allows_condition"),
+        "planned_action": str(diagnostics.get("planned_action") or ""),
+    }
+    payload_hash = build_publish_decision_payload_hash(
+        {
+            "sku": normalized_sku,
+            "repair_plan_id": normalized_plan_id,
+            "latest_publish_attempt_id": latest_publish_attempt_id,
+            "publish_call_preview": publish_call_preview,
+            "current_blocking_plan_summary": current_blocking_plan_summary,
+            "live_prerequisites_summary": live_prerequisites_summary,
+        }
+    )
+    approval_template = _publish_decision_approval_template(
+        sku=normalized_sku,
+        repair_plan_id=normalized_plan_id,
+        latest_publish_attempt_id=latest_publish_attempt_id,
+        diagnostics=diagnostics,
+        merchant_location_key=merchant_location_key,
+        listing_policies=listing_policies,
+        payload_hash=payload_hash,
+    )
+    return {
+        "sku": normalized_sku,
+        "repair_plan_id": normalized_plan_id,
+        "item": item,
+        "plan": plan,
+        "repair_blocker": repair_blocker,
+        "latest_publish_attempt_id": latest_publish_attempt_id,
+        "current_blocking_plan_summary": current_blocking_plan_summary,
+        "publish_call_preview": publish_call_preview,
+        "live_prerequisites_summary": live_prerequisites_summary,
+        "payload_hash": payload_hash,
+        "approval_template": approval_template,
+        "refusal_reasons": refusal_reasons,
+    }
+
+
+def _publish_decision_refusals(
+    *,
+    sku: str,
+    repair_plan_id: str,
+    item,
+    plan: PublishRepairPlanRecord | None,
+    diagnostics: dict,
+    repair_blocker: dict,
+    hosted_photo_urls: list[str],
+) -> list[dict]:
+    refusal_reasons: list[dict] = []
+
+    def refuse(code: str, message: str) -> None:
+        refusal_reasons.append({"code": code, "message": message})
+
+    if not sku:
+        refuse("missing_sku", "SKU is required.")
+    if item is None:
+        refuse("item_not_found", "Requested SKU was not found locally.")
+    if not repair_plan_id:
+        refuse("missing_repair_plan_id", "repair_plan_id is required.")
+    if plan is None:
+        refuse("repair_plan_not_found", "Selected repair plan was not found.")
+        return refusal_reasons
+    if str(plan.sku or "").upper() != sku:
+        refuse("repair_plan_sku_mismatch", "Selected repair plan does not belong to the requested SKU.")
+    if str(plan.classified_error_code or "") != REPLACEMENT_BLOCKING_ERROR_CODE:
+        refuse(
+            "selected_plan_not_publish_decision_blocker",
+            "Selected repair plan is not the active requires_publish_decision_after_refresh blocker.",
+        )
+    if str(plan.repair_layer or "") != "post_refresh_publish_decision":
+        refuse("selected_plan_wrong_repair_layer", "Selected repair plan must remain in post_refresh_publish_decision.")
+    if str(plan.status or "") != "needs_manual_review":
+        refuse("selected_plan_status_not_needs_manual_review", "Selected repair plan status must still be needs_manual_review.")
+    if bool(plan.retry_allowed):
+        refuse("selected_plan_retry_allowed_not_false", "Selected repair plan retry_allowed must remain false.")
+    if not repair_blocker.get("blocked_by_repair_queue"):
+        refuse("repair_queue_not_blocking", "Repair queue no longer blocks publish for this SKU.")
+    if str(repair_blocker.get("repair_plan_id") or "") != repair_plan_id:
+        refuse("selected_plan_not_current_blocker", "Selected repair plan is not the current blocking plan for this SKU.")
+    if str(repair_blocker.get("classified_error_code") or "") != REPLACEMENT_BLOCKING_ERROR_CODE:
+        refuse(
+            "current_blocker_not_publish_decision_after_refresh",
+            "Current blocking plan is not requires_publish_decision_after_refresh.",
+        )
+
+    if diagnostics.get("live_readonly_requested") is not True or diagnostics.get("live_readonly_performed") is not True:
+        refuse("live_readonly_preflight_required", "Live read-only diagnostics are required for publish-decision preview.")
+    methods = set(diagnostics.get("live_readonly_methods_called") or [])
+    for method in ("get_offer", "get_inventory_item", "get_item_condition_policies"):
+        if method not in methods:
+            refuse("missing_live_readonly_method", f"Live read-only diagnostics did not call {method}.")
+    if diagnostics.get("live_readonly_errors"):
+        refuse("live_readonly_errors_present", "Live read-only diagnostics returned errors.")
+
+    offer_id = str(diagnostics.get("offer_id") or "").strip()
+    if not offer_id:
+        refuse("missing_offer_id", "offer_id is required before publish-decision preview.")
+    if str(diagnostics.get("listing_id") or "").strip():
+        refuse("listing_id_present", "listing_id must remain empty.")
+    if str(diagnostics.get("planned_action") or "") != "publish_existing_offer":
+        refuse("not_existing_offer_publish_flow", "Current planned action is not publish_existing_offer.")
+
+    offer = diagnostics.get("existing_offer_diagnostics") or {}
+    if offer.get("read_available") is not True:
+        refuse("offer_read_unavailable", "Live offer read must be available.")
+    if offer.get("offer_exists") is not True:
+        refuse("offer_not_found", "Existing offer must still exist.")
+    if str(offer.get("status") or "").upper() != "UNPUBLISHED":
+        refuse("offer_status_not_unpublished", "Existing offer must still be UNPUBLISHED.")
+    if offer.get("category_differs_from_local") is True:
+        refuse("existing_offer_category_differs_from_local", "Existing offer category differs from local category.")
+    if offer.get("condition_differs_from_local") is True:
+        refuse("existing_offer_condition_differs_from_local", "Existing offer condition differs from local condition.")
+
+    inventory = diagnostics.get("inventory_item_diagnostics") or {}
+    if inventory.get("read_available") is not True:
+        refuse("inventory_read_unavailable", "Live inventory item read must be available.")
+    if inventory.get("inventory_item_exists") is not True:
+        refuse("inventory_item_not_found", "Live inventory item must still exist.")
+    if str(inventory.get("condition_enum") or "") != "USED_GOOD":
+        refuse("live_inventory_condition_not_used_good", "Live inventory condition must remain USED_GOOD.")
+
+    if str(diagnostics.get("local_condition_id") or "") != "3000":
+        refuse("condition_id_not_confirmed", "Current condition_id must remain 3000.")
+    if str(diagnostics.get("local_inventory_condition_enum") or "") != "USED_GOOD":
+        refuse("inventory_condition_not_confirmed", "Current inventory condition enum must remain USED_GOOD.")
+    if str(diagnostics.get("local_category_id") or "") != "14056":
+        refuse("category_id_not_confirmed", "Current category_id must remain 14056.")
+
+    policy = diagnostics.get("category_condition_policy_diagnostics") or {}
+    if policy.get("read_available") is not True:
+        refuse("category_policy_read_unavailable", "Live category policy read must be available.")
+    if policy.get("live_policy_allows_condition") is not True:
+        refuse("live_policy_does_not_allow_condition", "Live category policy must still allow condition 3000.")
+    if policy.get("live_metadata_supports_changing_condition") is True:
+        refuse("category_condition_change_appears_needed", "Live policy indicates a category or condition change may still be required.")
+
+    if not hosted_photo_urls:
+        refuse("missing_hosted_public_image_urls", "Hosted public image URLs are required before publish-decision preview.")
+
+    listing_policies = _extract_listing_policy_ids(offer.get("listing_policies") or {})
+    if not all(_is_real_value(value) for value in listing_policies.values()):
+        refuse("missing_real_listing_policy_ids", "Real fulfillment, payment, and return policy IDs are required.")
+    if _contains_preview_placeholder(listing_policies):
+        refuse("placeholder_listing_policy_detected", "Preview placeholder listing policy IDs are not allowed.")
+
+    merchant_location_key = str(offer.get("merchant_location_key") or "").strip()
+    if not _is_real_value(merchant_location_key):
+        refuse("merchant_location_key_unresolved", "A real merchantLocationKey is required before publish-decision preview.")
+
+    return refusal_reasons
+
+
+def build_publish_decision_payload_hash(payload: dict) -> str:
+    encoded = json.dumps(payload or {}, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _publish_decision_approval_template(
+    *,
+    sku: str,
+    repair_plan_id: str,
+    latest_publish_attempt_id: str,
+    diagnostics: dict,
+    merchant_location_key: str,
+    listing_policies: dict[str, str],
+    payload_hash: str,
+) -> dict:
+    return {
+        "sku": sku,
+        "action_type": PUBLISH_DECISION_ACTION_TYPE,
+        "repair_plan_id": repair_plan_id,
+        "latest_publish_attempt_id": latest_publish_attempt_id,
+        "offer_id": str(diagnostics.get("offer_id") or ""),
+        "confirm_offer_status": "UNPUBLISHED",
+        "confirm_listing_id_empty": True,
+        "confirm_category_id": str(diagnostics.get("local_category_id") or ""),
+        "confirm_condition_id": str(diagnostics.get("local_condition_id") or ""),
+        "confirm_inventory_condition_enum": str(diagnostics.get("local_inventory_condition_enum") or ""),
+        "confirm_blocker_classified_error_code": REPLACEMENT_BLOCKING_ERROR_CODE,
+        "confirm_merchant_location_key": merchant_location_key,
+        "confirm_fulfillment_policy_id": str(listing_policies.get("fulfillmentPolicyId") or ""),
+        "confirm_payment_policy_id": str(listing_policies.get("paymentPolicyId") or ""),
+        "confirm_return_policy_id": str(listing_policies.get("returnPolicyId") or ""),
+        "confirm_publish_existing_offer_only": True,
+        "confirm_publish_after_decision": True,
+        "operator_approved": True,
+        "typed_confirmation": PUBLISH_DECISION_TYPED_CONFIRMATION,
+        "approved_payload_hash": payload_hash,
     }
 
 
@@ -1189,6 +1720,50 @@ def _supersede_approval_refusals(*, approval_request: dict, expected: dict) -> l
     return refusal_reasons
 
 
+def _publish_decision_approval_refusals(*, approval_request: dict, expected: dict) -> list[dict]:
+    refusal_reasons: list[dict] = []
+
+    def refuse(code: str, message: str) -> None:
+        refusal_reasons.append({"code": code, "message": message})
+
+    approval = approval_request or {}
+    checks = [
+        ("sku", "approval_sku_mismatch"),
+        ("action_type", "approval_action_type_mismatch"),
+        ("repair_plan_id", "approval_repair_plan_id_mismatch"),
+        ("latest_publish_attempt_id", "approval_latest_publish_attempt_id_mismatch"),
+        ("offer_id", "approval_offer_id_mismatch"),
+        ("confirm_offer_status", "approval_offer_status_mismatch"),
+        ("confirm_category_id", "approval_category_id_mismatch"),
+        ("confirm_condition_id", "approval_condition_id_mismatch"),
+        ("confirm_inventory_condition_enum", "approval_inventory_condition_enum_mismatch"),
+        ("confirm_blocker_classified_error_code", "approval_blocker_classified_error_code_mismatch"),
+        ("confirm_merchant_location_key", "approval_merchant_location_key_mismatch"),
+        ("confirm_fulfillment_policy_id", "approval_fulfillment_policy_id_mismatch"),
+        ("confirm_payment_policy_id", "approval_payment_policy_id_mismatch"),
+        ("confirm_return_policy_id", "approval_return_policy_id_mismatch"),
+        ("typed_confirmation", "approval_typed_confirmation_mismatch"),
+        ("approved_payload_hash", "approval_payload_hash_mismatch"),
+    ]
+    for field, code in checks:
+        if str(approval.get(field) or "") != str(expected.get(field) or ""):
+            refuse(code, f"Approval field {field} does not match current publish-decision preview.")
+
+    if approval.get("confirm_listing_id_empty") is not True:
+        refuse("approval_listing_id_empty_not_confirmed", "Approval must confirm listing_id is empty.")
+    if approval.get("confirm_publish_existing_offer_only") is not True:
+        refuse(
+            "approval_publish_existing_offer_only_not_confirmed",
+            "Approval must confirm only the existing offer will be published.",
+        )
+    if approval.get("confirm_publish_after_decision") is not True:
+        refuse("approval_publish_after_decision_not_confirmed", "Approval must explicitly confirm publish_after_decision=true.")
+    if approval.get("operator_approved") is not True:
+        refuse("approval_operator_not_approved", "Approval must include operator_approved=true.")
+
+    return refusal_reasons
+
+
 def _build_live_executable_offer_payload(
     *,
     preview_payload: dict,
@@ -1289,6 +1864,46 @@ def _call_put_safely(call: Callable[[], object], *, stage: str) -> dict:
     if isinstance(result, dict):
         return {"ok": bool(result.get("ok", True)), "stage": stage, "value": deepcopy(result)}
     return {"ok": True, "stage": stage, "value": result}
+
+
+def _call_publish_existing_offer_safely(call: Callable[[], object]) -> dict:
+    try:
+        result = call()
+    except Exception as exc:
+        return {"ok": False, "stage": "publish_offer", "error": str(exc), "error_code": "EXCEPTION", "details": {}}
+    ok = getattr(result, "ok", None)
+    if ok is not None:
+        return {
+            "ok": bool(ok),
+            "stage": "publish_offer",
+            "value": deepcopy(getattr(result, "value", None) or {}),
+            "error": getattr(result, "error", None) or "",
+            "error_code": getattr(result, "error_code", None) or "",
+            "details": deepcopy(getattr(result, "details", None) or {}),
+        }
+    if isinstance(result, dict):
+        details = {
+            "auth_headers_prepared": result.get("auth_headers_prepared"),
+            "auth_token_source": result.get("auth_token_source"),
+            "oauth_token_may_have_been_refreshed": result.get("oauth_token_may_have_been_refreshed"),
+        }
+        return {"ok": bool(result.get("ok", True)), "stage": "publish_offer", "value": deepcopy(result), "details": details}
+    return {"ok": True, "stage": "publish_offer", "value": result, "details": {}}
+
+
+def _as_failure_result(payload: dict):
+    class _FailureResult:
+        def __init__(self, data: dict) -> None:
+            self.ok = False
+            self.value = {}
+            self.error = data.get("error", "")
+            self.error_code = data.get("error_code", "")
+            self.details = dict(data.get("details") or {})
+            self.details.setdefault("body", data.get("details", {}).get("body", ""))
+            self.details.setdefault("stage", data.get("stage", "publish_offer"))
+            self.details.setdefault("offer_id", data.get("value", {}).get("offer_id", ""))
+
+    return _FailureResult(payload)
 
 
 def _run_post_refresh_diagnostics(provider: Callable[[], dict] | None) -> dict:

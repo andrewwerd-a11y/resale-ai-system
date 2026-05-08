@@ -428,6 +428,79 @@ class EbayInventoryClient:
         except Exception as exc:
             return Result.failure(f"put_offer_failed: {exc}", error_code="REQUEST_FAILED")
 
+    def publish_existing_offer(self, offer_id: str, sku: str) -> Result[dict]:
+        """Publish one existing offer using POST only."""
+        normalized_offer_id = str(offer_id or "").strip()
+        normalized_sku = str(sku or "").strip()
+        if not normalized_offer_id:
+            return Result.failure("offer_id_required", error_code="INVALID_INPUT")
+        if not normalized_sku:
+            return Result.failure("sku_required", error_code="INVALID_INPUT")
+        if hasattr(self.auth, "is_configured") and not self.auth.is_configured():
+            return Result.failure("eBay credentials not configured.", error_code="NOT_CONFIGURED")
+
+        token_state = self.auth.resolve_user_token()
+        settings = self.auth.settings
+        if not (settings.ebay_app_id and settings.ebay_cert_id and token_state["token"]):
+            return Result.failure(
+                "eBay credentials are not ready for authenticated requests.",
+                error_code="AUTH_NOT_READY",
+                auth_issue_code=token_state["issue_code"] or "missing_token",
+                auth_token_source=token_state["source"] or "",
+                auth_headers_prepared=False,
+                oauth_token_may_have_been_refreshed=token_state["source"] == "oauth_refresh",
+            )
+
+        headers = {
+            "Authorization": f"Bearer {token_state['token']}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "Content-Language": "en-US",
+            "X-EBAY-C-MARKETPLACE-ID": self.auth.marketplace_id,
+        }
+        try:
+            publish_resp = self._post(
+                f"{self.auth.api_base}/sell/inventory/v1/offer/{normalized_offer_id}/publish",
+                headers,
+                {},
+                sku=normalized_sku,
+                step="publish_offer",
+            )
+            listing_id = str(publish_resp.get("listingId") or normalized_offer_id)
+            env_domain = "sandbox.ebay.com" if self.auth.settings.ebay_environment == "sandbox" else "ebay.com"
+            return Result.success(
+                {
+                    "listing_id": listing_id,
+                    "listing_url": f"https://www.{env_domain}/itm/{listing_id}",
+                    "offer_id": normalized_offer_id,
+                    "auth_headers_prepared": True,
+                    "auth_token_source": token_state["source"] or "",
+                    "oauth_token_may_have_been_refreshed": token_state["source"] == "oauth_refresh",
+                }
+            )
+        except _EbayApiError as exc:
+            return Result.failure(
+                exc.message,
+                error_code="API_ERROR",
+                status_code=exc.status_code,
+                body=exc.body,
+                stage=exc.step or "publish_offer",
+                offer_id=normalized_offer_id,
+                auth_headers_prepared=True,
+                auth_token_source=token_state["source"] or "",
+                oauth_token_may_have_been_refreshed=token_state["source"] == "oauth_refresh",
+            )
+        except Exception as exc:
+            return Result.failure(
+                f"publish_existing_offer_failed: {exc}",
+                error_code="REQUEST_FAILED",
+                stage="publish_offer",
+                offer_id=normalized_offer_id,
+                auth_headers_prepared=True,
+                auth_token_source=token_state["source"] or "",
+                oauth_token_may_have_been_refreshed=token_state["source"] == "oauth_refresh",
+            )
+
     def get_readonly_auth_diagnostics(self) -> dict:
         """Resolve read-only auth without refresh, token writes, or token disclosure."""
         token_state = self.auth.resolve_user_token(allow_refresh=False)
