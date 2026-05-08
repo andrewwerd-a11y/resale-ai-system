@@ -17,7 +17,11 @@ from packages.data.src.models.publish_repair_decision_record import PublishRepai
 from packages.data.src.models.publish_repair_plan_record import PublishRepairPlanRecord
 from packages.data.src.repositories.item_repo import ItemRepository
 from packages.domain.src.entities.item import Item
-from apps.api.src.services.stale_offer_remediation import REQUIRED_TYPED_CONFIRMATION, build_remediation_payload_hash
+from apps.api.src.services.stale_offer_remediation import (
+    REQUIRED_TYPED_CONFIRMATION,
+    SUPERSEDE_TYPED_CONFIRMATION,
+    build_remediation_payload_hash,
+)
 
 
 def _client() -> TestClient:
@@ -280,6 +284,10 @@ def _eligible_refresh_diagnostics() -> dict:
             "live_policy_allows_condition": True,
             "live_metadata_supports_changing_condition": False,
         },
+        "stale_offer_refresh_status": {
+            "execution_status": "refresh_completed",
+            "no_publish_performed": True,
+        },
         "stale_offer_remediation_draft": draft,
     }
 
@@ -302,6 +310,19 @@ def _eligible_refresh_approval(diagnostics: dict) -> dict:
         "typed_confirmation": REQUIRED_TYPED_CONFIRMATION,
         "approved_payload_hash": build_remediation_payload_hash(draft),
     }
+
+
+def _eligible_supersede_diagnostics(
+    repair_plan_id: str,
+    *,
+    latest_publish_attempt_id: str = "attempt-blocked",
+) -> dict:
+    diagnostics = _eligible_refresh_diagnostics()
+    diagnostics["repair_plan_id"] = repair_plan_id
+    diagnostics["latest_publish_attempt_id"] = latest_publish_attempt_id
+    diagnostics["repair_status"] = {"status": "needs_manual_review", "blocked_by_repair_queue": True}
+    diagnostics["retry_allowed"] = False
+    return diagnostics
 
 
 def _expected_live_refresh_offer_payload(diagnostics: dict) -> dict:
@@ -1348,6 +1369,376 @@ def test_stale_offer_remediation_approval_preview_respects_route_guard(monkeypat
     assert resp.status_code == 403
 
 
+def test_stale_offer_supersede_preview_is_read_only_and_does_not_mutate_db(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    _seed_item(
+        ebay_category_id="14056",
+        condition_id="3000",
+        offer_id="156719395011",
+        listing_id=None,
+        status=ItemStatus.EXPORT_READY,
+    )
+    plan_id = _seed_blocking_repair_plan()
+    before_plans = _plans_for_sku("BK-000008")
+    before_decisions = _decisions_for_sku("BK-000008")
+
+    def fake_diagnostics(_session, _sku, *, allow_live_readonly=False):
+        return _eligible_supersede_diagnostics(plan_id)
+
+    def fail_mutation(*_args, **_kwargs):
+        raise AssertionError("supersede preview must not call eBay mutation APIs")
+
+    def fail_executor():
+        raise AssertionError("supersede preview must not construct refresh executors")
+
+    monkeypatch.setattr("apps.api.src.routes.listings.build_publish_diagnostics", fake_diagnostics)
+    monkeypatch.setattr("apps.api.src.routes.listings.ebay_http.put", fail_mutation)
+    monkeypatch.setattr("apps.api.src.routes.listings.ebay_http.post", fail_mutation)
+    monkeypatch.setattr("apps.api.src.routes.listings.ebay_http.delete", fail_mutation)
+    monkeypatch.setattr("apps.api.src.routes.listings._build_stale_offer_refresh_executor", fail_executor)
+
+    with _client() as client:
+        resp = client.get(
+            f"/api/listings/BK-000008/stale-offer-remediation/supersede-preview?repair_plan_id={plan_id}&allow_live_readonly=true"
+        )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["eligible_for_supersede_preview"] is True
+    assert body["read_only"] is True
+    assert body["no_mutation_performed"] is True
+    assert body["no_ebay_mutation_performed"] is True
+    assert body["no_publish_performed"] is True
+    assert body["publish_remains_blocked_after_supersede"] is True
+    assert body["required_approval_fields_template"]["repair_plan_id"] == plan_id
+    after_plans = _plans_for_sku("BK-000008")
+    after_decisions = _decisions_for_sku("BK-000008")
+    assert len(after_plans) == len(before_plans)
+    assert len(after_decisions) == len(before_decisions)
+    assert after_plans[0].id == before_plans[0].id
+    assert after_plans[0].status == before_plans[0].status
+
+
+def test_execute_approved_supersede_refuses_without_exact_typed_confirmation(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    _seed_item(ebay_category_id="14056", condition_id="3000", offer_id="156719395011", listing_id=None)
+    plan_id = _seed_blocking_repair_plan()
+
+    def fake_diagnostics(_session, _sku, *, allow_live_readonly=False):
+        return _eligible_supersede_diagnostics(plan_id)
+
+    monkeypatch.setattr("apps.api.src.routes.listings.build_publish_diagnostics", fake_diagnostics)
+
+    with _client() as client:
+        preview = client.get(
+            f"/api/listings/BK-000008/stale-offer-remediation/supersede-preview?repair_plan_id={plan_id}&allow_live_readonly=true"
+        )
+        approval = preview.json()["required_approval_fields_template"]
+        approval["typed_confirmation"] = "wrong"
+        resp = client.post(
+            "/api/listings/BK-000008/stale-offer-remediation/execute-approved-supersede",
+            json=approval,
+        )
+
+    assert resp.status_code == 409
+    assert "approval_typed_confirmation_mismatch" in {r["code"] for r in resp.json()["detail"]["refusal_reasons"]}
+
+
+def test_execute_approved_supersede_refuses_with_wrong_payload_hash(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    _seed_item(ebay_category_id="14056", condition_id="3000", offer_id="156719395011", listing_id=None)
+    plan_id = _seed_blocking_repair_plan()
+
+    def fake_diagnostics(_session, _sku, *, allow_live_readonly=False):
+        return _eligible_supersede_diagnostics(plan_id)
+
+    monkeypatch.setattr("apps.api.src.routes.listings.build_publish_diagnostics", fake_diagnostics)
+
+    with _client() as client:
+        preview = client.get(
+            f"/api/listings/BK-000008/stale-offer-remediation/supersede-preview?repair_plan_id={plan_id}&allow_live_readonly=true"
+        )
+        approval = preview.json()["required_approval_fields_template"]
+        approval["approved_payload_hash"] = "wrong-hash"
+        resp = client.post(
+            "/api/listings/BK-000008/stale-offer-remediation/execute-approved-supersede",
+            json=approval,
+        )
+
+    assert resp.status_code == 409
+    assert "approval_payload_hash_mismatch" in {r["code"] for r in resp.json()["detail"]["refusal_reasons"]}
+
+
+def test_execute_approved_supersede_refuses_if_repair_plan_id_does_not_belong_to_sku(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    _seed_item(ebay_category_id="14056", condition_id="3000", offer_id="156719395011", listing_id=None)
+    _seed_item(sku="BK-000009", ebay_category_id="14056", condition_id="3000", offer_id="156719395012", listing_id=None)
+    wrong_plan_id = _seed_blocking_repair_plan(sku="BK-000009", publish_attempt_id="attempt-009")
+
+    def fake_diagnostics(_session, _sku, *, allow_live_readonly=False):
+        return _eligible_supersede_diagnostics(wrong_plan_id)
+
+    monkeypatch.setattr("apps.api.src.routes.listings.build_publish_diagnostics", fake_diagnostics)
+
+    with _client() as client:
+        preview = client.get(
+            f"/api/listings/BK-000008/stale-offer-remediation/supersede-preview?repair_plan_id={wrong_plan_id}&allow_live_readonly=true"
+        )
+        approval = preview.json()["required_approval_fields_template"]
+        resp = client.post(
+            "/api/listings/BK-000008/stale-offer-remediation/execute-approved-supersede",
+            json=approval,
+        )
+
+    assert resp.status_code == 409
+    assert "repair_plan_sku_mismatch" in {r["code"] for r in resp.json()["detail"]["refusal_reasons"]}
+
+
+def test_execute_approved_supersede_refuses_if_selected_plan_is_not_current_blocker(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    _seed_item(ebay_category_id="14056", condition_id="3000", offer_id="156719395011", listing_id=None)
+    old_plan_id = _seed_blocking_repair_plan(updated_at=datetime.utcnow() - timedelta(hours=1), publish_attempt_id="attempt-old")
+    _seed_blocking_repair_plan(updated_at=datetime.utcnow(), publish_attempt_id="attempt-new")
+
+    def fake_diagnostics(_session, _sku, *, allow_live_readonly=False):
+        return _eligible_supersede_diagnostics(old_plan_id, latest_publish_attempt_id="attempt-old")
+
+    monkeypatch.setattr("apps.api.src.routes.listings.build_publish_diagnostics", fake_diagnostics)
+
+    with _client() as client:
+        preview = client.get(
+            f"/api/listings/BK-000008/stale-offer-remediation/supersede-preview?repair_plan_id={old_plan_id}&allow_live_readonly=true"
+        )
+        approval = preview.json()["required_approval_fields_template"]
+        resp = client.post(
+            "/api/listings/BK-000008/stale-offer-remediation/execute-approved-supersede",
+            json=approval,
+        )
+
+    assert resp.status_code == 409
+    assert "selected_plan_not_current_blocker" in {r["code"] for r in resp.json()["detail"]["refusal_reasons"]}
+
+
+def test_execute_approved_supersede_refuses_if_refresh_success_is_not_confirmed_when_available(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    _seed_item(ebay_category_id="14056", condition_id="3000", offer_id="156719395011", listing_id=None)
+    plan_id = _seed_blocking_repair_plan()
+
+    def fake_diagnostics(_session, _sku, *, allow_live_readonly=False):
+        diagnostics = _eligible_supersede_diagnostics(plan_id)
+        diagnostics["stale_offer_refresh_status"] = {
+            "execution_status": "partial_failure_offer_refresh_failed",
+            "no_publish_performed": True,
+        }
+        return diagnostics
+
+    monkeypatch.setattr("apps.api.src.routes.listings.build_publish_diagnostics", fake_diagnostics)
+
+    with _client() as client:
+        preview = client.get(
+            f"/api/listings/BK-000008/stale-offer-remediation/supersede-preview?repair_plan_id={plan_id}&allow_live_readonly=true"
+        )
+        approval = preview.json()["required_approval_fields_template"]
+        resp = client.post(
+            "/api/listings/BK-000008/stale-offer-remediation/execute-approved-supersede",
+            json=approval,
+        )
+
+    assert resp.status_code == 409
+    assert "stale_offer_refresh_not_confirmed" in {r["code"] for r in resp.json()["detail"]["refusal_reasons"]}
+
+
+def test_execute_approved_supersede_refuses_if_listing_id_or_offer_state_is_not_clean(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    _seed_item(ebay_category_id="14056", condition_id="3000", offer_id="156719395011", listing_id=None)
+    plan_id = _seed_blocking_repair_plan()
+
+    def fake_diagnostics(_session, _sku, *, allow_live_readonly=False):
+        diagnostics = _eligible_supersede_diagnostics(plan_id)
+        diagnostics["listing_id"] = "123456789012"
+        diagnostics["existing_offer_diagnostics"]["status"] = "PUBLISHED"
+        return diagnostics
+
+    monkeypatch.setattr("apps.api.src.routes.listings.build_publish_diagnostics", fake_diagnostics)
+
+    with _client() as client:
+        preview = client.get(
+            f"/api/listings/BK-000008/stale-offer-remediation/supersede-preview?repair_plan_id={plan_id}&allow_live_readonly=true"
+        )
+        approval = preview.json()["required_approval_fields_template"]
+        resp = client.post(
+            "/api/listings/BK-000008/stale-offer-remediation/execute-approved-supersede",
+            json=approval,
+        )
+
+    assert resp.status_code == 409
+    refusal_codes = {r["code"] for r in resp.json()["detail"]["refusal_reasons"]}
+    assert "listing_id_present" in refusal_codes
+    assert "offer_status_not_unpublished" in refusal_codes
+
+
+def test_execute_approved_supersede_refuses_if_category_condition_are_not_clean(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    _seed_item(ebay_category_id="14056", condition_id="3000", offer_id="156719395011", listing_id=None)
+    plan_id = _seed_blocking_repair_plan()
+
+    def fake_diagnostics(_session, _sku, *, allow_live_readonly=False):
+        diagnostics = _eligible_supersede_diagnostics(plan_id)
+        diagnostics["local_condition_id"] = "5000"
+        diagnostics["local_inventory_condition_enum"] = "LIKE_NEW"
+        diagnostics["inventory_item_diagnostics"]["condition_enum"] = "LIKE_NEW"
+        diagnostics["category_condition_policy_diagnostics"]["live_policy_allows_condition"] = False
+        return diagnostics
+
+    monkeypatch.setattr("apps.api.src.routes.listings.build_publish_diagnostics", fake_diagnostics)
+
+    with _client() as client:
+        preview = client.get(
+            f"/api/listings/BK-000008/stale-offer-remediation/supersede-preview?repair_plan_id={plan_id}&allow_live_readonly=true"
+        )
+        approval = preview.json()["required_approval_fields_template"]
+        resp = client.post(
+            "/api/listings/BK-000008/stale-offer-remediation/execute-approved-supersede",
+            json=approval,
+        )
+
+    assert resp.status_code == 409
+    refusal_codes = {r["code"] for r in resp.json()["detail"]["refusal_reasons"]}
+    assert "condition_id_not_confirmed" in refusal_codes
+    assert "inventory_condition_not_confirmed" in refusal_codes
+    assert "live_inventory_condition_not_used_good" in refusal_codes
+    assert "live_policy_does_not_allow_condition" in refusal_codes
+
+
+def test_execute_approved_supersede_resolves_selected_plan_creates_one_replacement_and_keeps_publish_blocked(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    _seed_item(
+        ebay_category_id="14056",
+        condition_id="3000",
+        offer_id="156719395011",
+        listing_id=None,
+        status=ItemStatus.EXPORT_READY,
+    )
+    target_plan_id = _seed_blocking_repair_plan()
+    with Session(sqlite_db.engine) as session:
+        session.add(
+            PublishRepairPlanRecord(
+                sku="BK-000008",
+                publish_attempt_id="historical-attempt",
+                status="resolved",
+                affected_field="condition_id",
+                risk_level="high",
+                safe_to_auto_apply=False,
+                requires_review=False,
+                retry_allowed=False,
+                source="ebay_error",
+                repair_layer="category_compatibility",
+                classified_error_code="invalid_category_condition",
+            )
+        )
+        session.commit()
+
+    def fake_diagnostics(_session, _sku, *, allow_live_readonly=False):
+        return _eligible_supersede_diagnostics(target_plan_id)
+
+    def fail_mutation(*_args, **_kwargs):
+        raise AssertionError("approved supersede must not call eBay mutation APIs")
+
+    def fail_executor():
+        raise AssertionError("approved supersede must not construct refresh executors")
+
+    def fail_publish(*_args, **_kwargs):
+        raise AssertionError("publish_item should stay blocked after supersede")
+
+    monkeypatch.setattr("apps.api.src.routes.listings.build_publish_diagnostics", fake_diagnostics)
+    monkeypatch.setattr("apps.api.src.routes.listings.ebay_http.put", fail_mutation)
+    monkeypatch.setattr("apps.api.src.routes.listings.ebay_http.post", fail_mutation)
+    monkeypatch.setattr("apps.api.src.routes.listings.ebay_http.delete", fail_mutation)
+    monkeypatch.setattr("apps.api.src.routes.listings._build_stale_offer_refresh_executor", fail_executor)
+    monkeypatch.setattr("packages.ebay.src.inventory_client.EbayInventoryClient.publish_item", fail_publish)
+
+    with _client() as client:
+        preview = client.get(
+            f"/api/listings/BK-000008/stale-offer-remediation/supersede-preview?repair_plan_id={target_plan_id}&allow_live_readonly=true"
+        )
+        approval = preview.json()["required_approval_fields_template"]
+        approval["typed_confirmation"] = SUPERSEDE_TYPED_CONFIRMATION
+        approval["operator_label"] = "phase-1t-test"
+        resp = client.post(
+            "/api/listings/BK-000008/stale-offer-remediation/execute-approved-supersede",
+            json=approval,
+        )
+        publish = client.post("/api/ebay/publish/BK-000008")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["execution_status"] == "supersede_completed"
+    assert body["no_ebay_mutation_performed"] is True
+    assert body["no_publish_performed"] is True
+    assert body["old_repair_plan_resolved"] is True
+    assert body["replacement_blocker_created"] is True
+    assert body["publish_remains_blocked"] is True
+    assert body["item_marked_listed"] is False
+    assert body["listing_id_after"] == ""
+    assert publish.status_code == 409
+    publish_detail = publish.json()["detail"]
+    assert publish_detail["code"] == "blocked_by_repair_queue"
+    assert publish_detail["retry_allowed"] is False
+    assert publish_detail["classified_error_code"] == "requires_publish_decision_after_refresh"
+
+    plans = _plans_for_sku("BK-000008")
+    target_plan = next(plan for plan in plans if plan.id == target_plan_id)
+    replacement_plans = [plan for plan in plans if plan.classified_error_code == "requires_publish_decision_after_refresh"]
+    assert target_plan.status == "resolved"
+    assert target_plan.retry_allowed is False
+    assert len(replacement_plans) == 1
+    replacement = replacement_plans[0]
+    assert replacement.retry_allowed is False
+    assert replacement.status == "needs_manual_review"
+    assert replacement.requires_review is True
+    assert replacement.source == "stale_offer_refresh"
+    assert replacement.repair_layer == "post_refresh_publish_decision"
+    decisions = _decisions_for_sku("BK-000008")
+    matching_decisions = [decision for decision in decisions if decision.repair_plan_id == target_plan_id and decision.action == "supersede_after_refresh"]
+    assert len(matching_decisions) == 1
+
+
+def test_publish_preview_after_supersede_shows_requires_publish_decision_blocker(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    _seed_item(
+        ebay_category_id="14056",
+        condition_id="3000",
+        offer_id="156719395011",
+        listing_id=None,
+        status=ItemStatus.EXPORT_READY,
+    )
+    target_plan_id = _seed_blocking_repair_plan()
+
+    def fake_diagnostics(_session, _sku, *, allow_live_readonly=False):
+        return _eligible_supersede_diagnostics(target_plan_id)
+
+    monkeypatch.setattr("apps.api.src.routes.listings.build_publish_diagnostics", fake_diagnostics)
+
+    with _client() as client:
+        preview = client.get(
+            f"/api/listings/BK-000008/stale-offer-remediation/supersede-preview?repair_plan_id={target_plan_id}&allow_live_readonly=true"
+        )
+        approval = preview.json()["required_approval_fields_template"]
+        approval["typed_confirmation"] = SUPERSEDE_TYPED_CONFIRMATION
+        resp = client.post(
+            "/api/listings/BK-000008/stale-offer-remediation/execute-approved-supersede",
+            json=approval,
+        )
+        publish_preview = client.get("/api/listings/BK-000008/publish-preview")
+
+    assert resp.status_code == 200
+    assert publish_preview.status_code == 200
+    body = publish_preview.json()
+    assert body["blocked_by_repair_queue"] is True
+    assert body["would_publish"] is False
+    assert body["retry_allowed"] is False
+    assert body["classified_error_code"] == "requires_publish_decision_after_refresh"
+    assert body["repair_status"]["status"] == "needs_manual_review"
 def test_execute_approved_refresh_requires_route_guard_and_allowlist(monkeypatch, tmp_path):
     _configure_temp_db(monkeypatch, tmp_path)
     monkeypatch.setenv("APPROVED_E2E_SKUS", "BK-000008")

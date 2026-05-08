@@ -210,7 +210,7 @@ def get_repair_queue_detail(session: Session, sku: str) -> dict:
     plans = session.exec(
         select(PublishRepairPlanRecord)
         .where(PublishRepairPlanRecord.sku == normalized)
-        .order_by(PublishRepairPlanRecord.updated_at.desc())
+        .order_by(PublishRepairPlanRecord.updated_at.desc(), PublishRepairPlanRecord.created_at.desc())
     ).all()
     decisions = session.exec(
         select(PublishRepairDecisionRecord)
@@ -264,7 +264,7 @@ def summarize_repair_status(session: Session, sku: str) -> dict:
     plans = session.exec(
         select(PublishRepairPlanRecord)
         .where(PublishRepairPlanRecord.sku == normalized)
-        .order_by(PublishRepairPlanRecord.updated_at.desc())
+        .order_by(PublishRepairPlanRecord.updated_at.desc(), PublishRepairPlanRecord.created_at.desc())
     ).all()
     latest_plan = next((plan for plan in plans if str(plan.status or "") in ACTIVE_REPAIR_STATUSES), None)
     if not latest_plan:
@@ -301,11 +301,13 @@ def get_publish_repair_blocker(session: Session, sku: str) -> dict:
         .where(PublishAttemptRecord.sku == normalized)
         .order_by(PublishAttemptRecord.attempted_at.desc())
     ).first()
-    latest_plan = session.exec(
+    plans = session.exec(
         select(PublishRepairPlanRecord)
         .where(PublishRepairPlanRecord.sku == normalized)
-        .order_by(PublishRepairPlanRecord.updated_at.desc())
-    ).first()
+        .order_by(PublishRepairPlanRecord.updated_at.desc(), PublishRepairPlanRecord.created_at.desc())
+    ).all()
+    latest_plan = plans[0] if plans else None
+    latest_active_plan = next((plan for plan in plans if str(plan.status or "") in ACTIVE_REPAIR_STATUSES), None)
 
     empty_status = {
         "has_open_repair": False,
@@ -333,26 +335,27 @@ def get_publish_repair_blocker(session: Session, sku: str) -> dict:
             "condition_diagnostics": {},
         }
 
-    status = str(latest_plan.status or "")
+    evaluation_plan = latest_active_plan or latest_plan
+    status = str(evaluation_plan.status or "")
     is_active = status in ACTIVE_REPAIR_STATUSES
     decisions = session.exec(
         select(PublishRepairDecisionRecord)
-        .where(PublishRepairDecisionRecord.repair_plan_id == latest_plan.id)
+        .where(PublishRepairDecisionRecord.repair_plan_id == evaluation_plan.id)
         .order_by(PublishRepairDecisionRecord.created_at.desc())
     ).all()
     has_approval = bool(decisions)
-    requires_unapproved_review = bool(latest_plan.requires_review) and status not in {"resolved", "ignored"} and not has_approval
+    requires_unapproved_review = bool(evaluation_plan.requires_review) and status not in {"resolved", "ignored"} and not has_approval
     blocked = bool(
         is_active
         and (
             status == "needs_manual_review"
-            or not bool(latest_plan.retry_allowed)
+            or not bool(evaluation_plan.retry_allowed)
             or requires_unapproved_review
         )
     )
 
-    expected_value = _loads(latest_plan.expected_value_json, {})
-    current_value = _loads(latest_plan.current_value_json, {})
+    expected_value = _loads(evaluation_plan.expected_value_json, {})
+    current_value = _loads(evaluation_plan.current_value_json, {})
     raw_error = _loads(latest_attempt.raw_error_json, {}) if latest_attempt else {}
     raw_details = raw_error.get("details") if isinstance(raw_error, dict) else {}
     if not isinstance(raw_details, dict):
@@ -392,19 +395,19 @@ def get_publish_repair_blocker(session: Session, sku: str) -> dict:
         or expected_value.get("policy_conflict")
         or expected_value.get("contradicted_by") == "ebay_error"
         or (
-            str(latest_plan.classified_error_code or "") == "invalid_category_condition"
+            str(evaluation_plan.classified_error_code or "") == "invalid_category_condition"
             and str(latest_attempt.ebay_error_id if latest_attempt else "") == "25021"
             and condition_id
             and condition_id in allowed_condition_ids
         )
     )
 
-    suggested_actions = _loads(latest_plan.suggested_actions_json, [])
+    suggested_actions = _loads(evaluation_plan.suggested_actions_json, [])
     reason = ""
     if blocked:
         if status == "needs_manual_review":
             reason = "Latest repair plan requires manual review before publish can be retried."
-        elif not bool(latest_plan.retry_allowed):
+        elif not bool(evaluation_plan.retry_allowed):
             reason = "Latest repair plan does not allow retry."
         elif requires_unapproved_review:
             reason = "Latest repair plan requires an approved repair decision before publish can be retried."
@@ -414,22 +417,22 @@ def get_publish_repair_blocker(session: Session, sku: str) -> dict:
     repair_status = {
         "has_open_repair": is_active,
         "status": status,
-        "last_error_code": str(latest_plan.classified_error_code or (latest_attempt.classified_error_code if latest_attempt else "")),
-        "repair_layer": str(latest_plan.repair_layer or ""),
-        "risk_level": str(latest_plan.risk_level or ""),
+        "last_error_code": str(evaluation_plan.classified_error_code or (latest_attempt.classified_error_code if latest_attempt else "")),
+        "repair_layer": str(evaluation_plan.repair_layer or ""),
+        "risk_level": str(evaluation_plan.risk_level or ""),
         "suggested_fixes": suggested_actions,
-        "ready_to_retry": bool(latest_plan.retry_allowed) and not blocked,
+        "ready_to_retry": bool(evaluation_plan.retry_allowed) and not blocked,
     }
     return {
         "sku": normalized,
         "blocked_by_repair_queue": blocked,
-        "repair_plan_id": latest_plan.id,
-        "latest_publish_attempt_id": str(latest_plan.publish_attempt_id or (latest_attempt.id if latest_attempt else "")),
+        "repair_plan_id": evaluation_plan.id,
+        "latest_publish_attempt_id": str(evaluation_plan.publish_attempt_id or (latest_attempt.id if latest_attempt else "")),
         "repair_status": repair_status,
         "status": status,
-        "retry_allowed": bool(latest_plan.retry_allowed) and not blocked,
-        "requires_review": bool(latest_plan.requires_review),
-        "classified_error_code": str(latest_plan.classified_error_code or ""),
+        "retry_allowed": bool(evaluation_plan.retry_allowed) and not blocked,
+        "requires_review": bool(evaluation_plan.requires_review),
+        "classified_error_code": str(evaluation_plan.classified_error_code or ""),
         "suggested_actions": suggested_actions,
         "reason": reason,
         "policy_conflict": policy_conflict,
@@ -899,7 +902,7 @@ def draft_fix_for_sku(session: Session, sku: str) -> dict:
         plans = session.exec(
             select(PublishRepairPlanRecord)
             .where(PublishRepairPlanRecord.sku == normalized)
-            .order_by(PublishRepairPlanRecord.updated_at.desc())
+            .order_by(PublishRepairPlanRecord.updated_at.desc(), PublishRepairPlanRecord.created_at.desc())
         ).all()
         for plan in plans:
             suggestion = provider.draft(item, plan)
@@ -1417,7 +1420,7 @@ def _upsert_current_blocker_plans(
     existing_plans = session.exec(
         select(PublishRepairPlanRecord)
         .where(PublishRepairPlanRecord.sku == str(item.sku or "").upper())
-        .order_by(PublishRepairPlanRecord.updated_at.desc())
+        .order_by(PublishRepairPlanRecord.updated_at.desc(), PublishRepairPlanRecord.created_at.desc())
     ).all()
     updated_plans: list[PublishRepairPlanRecord] = []
 
@@ -1989,7 +1992,7 @@ def _has_live_condition_policy_conflict(session: Session, item: Item) -> bool:
     plans = session.exec(
         select(PublishRepairPlanRecord)
         .where(PublishRepairPlanRecord.sku == normalized)
-        .order_by(PublishRepairPlanRecord.updated_at.desc())
+        .order_by(PublishRepairPlanRecord.updated_at.desc(), PublishRepairPlanRecord.created_at.desc())
     ).all()
     for plan in plans:
         if str(plan.classified_error_code or "") != "invalid_category_condition":
