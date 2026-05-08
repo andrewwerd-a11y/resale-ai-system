@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from datetime import datetime, timezone
 import hashlib
 import json
 from collections.abc import Callable
@@ -121,6 +122,114 @@ def build_stale_offer_remediation_approval_preview(diagnostics: dict) -> dict:
             "errors": diagnostics.get("live_readonly_errors") or [],
         },
     }
+
+
+def render_stale_offer_remediation_approval_packet(
+    approval_preview: dict,
+    *,
+    generated_at: str | None = None,
+) -> str:
+    """Render a durable Markdown approval packet from a read-only preview."""
+    sku = str(approval_preview.get("sku") or "").strip().upper()
+    if not sku:
+        raise ValueError("sku is required to render a stale-offer remediation approval packet")
+    generated = generated_at or datetime.now(timezone.utc).isoformat()
+    local = approval_preview.get("local_item_summary") or {}
+    repair = approval_preview.get("repair_queue_summary") or {}
+    draft = approval_preview.get("remediation_draft_summary") or {}
+    live = approval_preview.get("live_readonly_summary") or {}
+    live_policy = draft.get("live_policy_result") or {}
+    approval_template = approval_preview.get("required_approval_fields_template") or {}
+    blockers = approval_preview.get("blockers") or []
+    call_sequence = draft.get("call_sequence_preview") or []
+
+    lines = [
+        f"# Stale Offer Remediation Approval Packet - {sku}",
+        "",
+        f"Generated: {generated}",
+        "",
+        "## Safety Statement",
+        "- Read-only approval packet.",
+        "- No publish performed.",
+        "- No eBay refresh performed.",
+        "- No repair queue clear performed.",
+        "- No category/condition change performed.",
+        "",
+        "## Item Summary",
+        f"- SKU: {sku}",
+        f"- Title: {local.get('title') or ''}",
+        f"- Local status: {local.get('status') or ''}",
+        f"- Category ID/name: {local.get('category_id') or ''} / {local.get('category_name') or ''}",
+        f"- Condition ID/enum: {local.get('condition_id') or ''} / {local.get('inventory_condition_enum') or ''}",
+        f"- Offer ID: {local.get('offer_id') or ''}",
+        f"- Listing ID: {local.get('listing_id') or ''}",
+        f"- Planned action: {local.get('planned_action') or ''}",
+        "",
+        "## Repair Queue Summary",
+        f"- Repair plan ID: {repair.get('repair_plan_id') or ''}",
+        f"- Latest publish attempt ID: {repair.get('latest_publish_attempt_id') or ''}",
+        f"- Classified error: {repair.get('classified_error_code') or ''}",
+        f"- Retry allowed: {_json_bool(repair.get('retry_allowed'))}",
+        f"- Blocked by repair queue: {_json_bool(repair.get('blocked_by_repair_queue'))}",
+        f"- Repair status: `{json.dumps(repair.get('repair_status') or {}, sort_keys=True)}`",
+        "",
+        "## Live Read-Only Diagnostics Summary",
+        f"- Live read-only requested: {_json_bool(live.get('requested'))}",
+        f"- Live read-only performed: {_json_bool(live.get('performed'))}",
+        f"- Methods called: {', '.join(str(value) for value in live.get('methods_called') or [])}",
+        f"- Offer status: {draft.get('offer_status') or ''}",
+        f"- Inventory condition: {draft.get('inventory_condition_enum') or local.get('inventory_condition_enum') or ''}",
+        f"- Category policy source: {live_policy.get('source') or ''}",
+        f"- Live policy allows condition {local.get('condition_id') or draft.get('condition_id') or ''}: {_json_bool(live_policy.get('live_policy_allows_condition'))}",
+        f"- Read-only diagnostic warnings/unavailable: `{json.dumps(live.get('unavailable') or [], sort_keys=True)}`",
+        f"- Read-only diagnostic errors: `{json.dumps(live.get('errors') or [], sort_keys=True)}`",
+        "",
+        "## Remediation Draft Summary",
+        f"- Remediation type: {approval_preview.get('remediation_type') or ''}",
+        f"- Eligible for approval preview: {_json_bool(approval_preview.get('eligible_for_approval_preview'))}",
+        f"- Payload hash: {approval_preview.get('payload_hash') or ''}",
+        f"- Publish after remediation: {_json_bool(approval_preview.get('publish_after_remediation'))}",
+        f"- Live execution enabled: {_json_bool(approval_preview.get('live_execution_enabled'))}",
+        f"- Safe to execute now: {_json_bool(approval_preview.get('safe_to_execute_now'))}",
+        "",
+        "### Call Sequence",
+    ]
+    if call_sequence:
+        for step in call_sequence:
+            endpoint = step.get("endpoint") or "(stop)"
+            note = f" - {step.get('note')}" if step.get("note") else ""
+            lines.append(
+                f"{step.get('order')}. {step.get('method')} {endpoint} "
+                f"(preview_only={_json_bool(step.get('preview_only'))}, mutation_performed={_json_bool(step.get('mutation_performed'))}){note}"
+            )
+    else:
+        lines.append("- No call sequence is available because the draft is not previewable.")
+
+    lines.extend(
+        [
+            "",
+            "## Approval Preview Blockers",
+            *(f"- {reason.get('code')}: {reason.get('message')}" for reason in blockers),
+            *([] if blockers else ["- None"]),
+            "",
+            "## Required Approval Template",
+            "```json",
+            json.dumps(approval_template, indent=2, sort_keys=True),
+            "```",
+            "",
+            "## Explicit Warning",
+            (
+                "This packet does not authorize publish. A future separate live remediation phase would still need "
+                "a final preflight recheck and explicit operator approval. A later separate publish decision would "
+                "still be required after remediation."
+            ),
+            "",
+            approval_preview.get("next_step_warning")
+            or "This preview does not publish, does not refresh eBay, and does not clear the repair queue.",
+            "",
+        ]
+    )
+    return "\n".join(lines)
 
 
 def execute_refresh_existing_unpublished_offer(
@@ -408,6 +517,16 @@ def build_remediation_payload_hash(draft: dict) -> str:
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _json_bool(value) -> str:
+    if value is True:
+        return "true"
+    if value is False:
+        return "false"
+    if value is None:
+        return "null"
+    return str(value)
 
 
 def _approval_template(*, sku: str, diagnostics: dict, draft: dict, payload_hash: str) -> dict:

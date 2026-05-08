@@ -6,6 +6,7 @@ from apps.api.src.services.stale_offer_remediation import (
     REQUIRED_TYPED_CONFIRMATION,
     build_remediation_payload_hash,
     execute_refresh_existing_unpublished_offer,
+    render_stale_offer_remediation_approval_packet,
 )
 
 
@@ -218,6 +219,74 @@ def test_stale_offer_remediation_approval_preview_builds_template_for_eligible_d
     assert template["typed_confirmation"] == REQUIRED_TYPED_CONFIRMATION
     assert template["approved_payload_hash"] == preview["payload_hash"]
     assert preview["next_step_warning"] == "This preview does not publish, does not refresh eBay, and does not clear the repair queue."
+
+
+def test_stale_offer_remediation_approval_packet_contains_required_safety_statement() -> None:
+    from apps.api.src.services.stale_offer_remediation import build_stale_offer_remediation_approval_preview
+
+    preview = build_stale_offer_remediation_approval_preview(_eligible_diagnostics())
+    packet = render_stale_offer_remediation_approval_packet(preview, generated_at="2026-05-07T00:00:00+00:00")
+
+    assert "# Stale Offer Remediation Approval Packet - BK-000008" in packet
+    assert "Read-only approval packet." in packet
+    assert "No publish performed." in packet
+    assert "No eBay refresh performed." in packet
+    assert "No repair queue clear performed." in packet
+    assert "No category/condition change performed." in packet
+
+
+def test_stale_offer_remediation_approval_packet_contains_required_approval_template() -> None:
+    from apps.api.src.services.stale_offer_remediation import build_stale_offer_remediation_approval_preview
+
+    preview = build_stale_offer_remediation_approval_preview(_eligible_diagnostics())
+    packet = render_stale_offer_remediation_approval_packet(preview)
+
+    assert "## Required Approval Template" in packet
+    assert '"sku": "BK-000008"' in packet
+    assert '"remediation_type": "refresh_existing_unpublished_offer"' in packet
+    assert '"typed_confirmation": "REFRESH UNPUBLISHED OFFER ONLY"' in packet
+    assert '"confirm_publish_after_remediation": false' in packet
+
+
+def test_stale_offer_remediation_approval_packet_includes_payload_hash() -> None:
+    from apps.api.src.services.stale_offer_remediation import build_stale_offer_remediation_approval_preview
+
+    diagnostics = _eligible_diagnostics()
+    preview = build_stale_offer_remediation_approval_preview(diagnostics)
+    packet = render_stale_offer_remediation_approval_packet(preview)
+
+    assert build_remediation_payload_hash(diagnostics["stale_offer_remediation_draft"]) in packet
+
+
+def test_stale_offer_remediation_approval_packet_does_not_execute_remediation() -> None:
+    from apps.api.src.services.stale_offer_remediation import build_stale_offer_remediation_approval_preview
+
+    preview = build_stale_offer_remediation_approval_preview(_eligible_diagnostics())
+    packet = render_stale_offer_remediation_approval_packet(preview)
+
+    assert "This packet does not authorize publish" in packet
+    assert "preview_only=true" in packet
+    assert "mutation_performed=false" in packet
+
+
+def test_stale_offer_remediation_approval_packet_does_not_publish() -> None:
+    from apps.api.src.services.stale_offer_remediation import build_stale_offer_remediation_approval_preview
+
+    preview = build_stale_offer_remediation_approval_preview(_eligible_diagnostics())
+    packet = render_stale_offer_remediation_approval_packet(preview)
+
+    assert "Publish after remediation: false" in packet
+    assert "Live execution enabled: false" in packet
+    assert "Safe to execute now: false" in packet
+
+
+def test_stale_offer_remediation_approval_packet_requires_explicit_sku() -> None:
+    try:
+        render_stale_offer_remediation_approval_packet({"sku": ""})
+    except ValueError as exc:
+        assert "sku is required" in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("Expected missing SKU to fail")
 
 
 def test_refresh_existing_unpublished_offer_mock_executes_previewed_payloads_only() -> None:

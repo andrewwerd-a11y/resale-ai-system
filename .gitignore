@@ -54,3 +54,5 @@ desktop.ini
 htmlcov/
 .mypy_cache/
 .ruff_cache/
+
+data/remediation_reports/
