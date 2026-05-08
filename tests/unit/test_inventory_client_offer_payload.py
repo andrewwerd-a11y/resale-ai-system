@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
+from packages.core.src import config as core_config
+from packages.ebay.src.auth import EbayAuth
 from packages.domain.src.entities.item import Item
 from packages.ebay.src.inventory_client import EbayInventoryClient
 
@@ -122,3 +126,75 @@ def test_live_readonly_methods_use_get_only(monkeypatch: pytest.MonkeyPatch) -> 
     assert len(calls) == 3
     assert calls[2][1]["params"] == {"filter": "categoryIds:{14056}"}
     assert client.auth.resolve_calls == [False, False, False]
+
+
+def test_live_readonly_auth_uses_env_fallback_without_refresh(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DRY_RUN", "false")
+    monkeypatch.setenv("EBAY_ENVIRONMENT", "sandbox")
+    monkeypatch.setenv("EBAY_SANDBOX_USER_TOKEN", "env-token-value")
+    core_config.get_settings.cache_clear()
+
+    expired = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    monkeypatch.setattr(
+        "packages.ebay.src.auth._load_tokens",
+        lambda: {
+            "access_token": "expired-oauth-token",
+            "refresh_token": "refresh-token",
+            "expires_at": expired,
+        },
+    )
+
+    def fail_refresh(_self, _refresh_token):  # pragma: no cover
+        raise AssertionError("read-only diagnostics must not refresh OAuth tokens")
+
+    monkeypatch.setattr(EbayAuth, "_refresh_access_token", fail_refresh)
+
+    client = EbayInventoryClient()
+    diagnostics = client.get_readonly_auth_diagnostics()
+    headers = client._readonly_headers()
+
+    assert diagnostics["auth_readonly_available"] is True
+    assert diagnostics["token_source_used"] == "env_fallback"
+    assert diagnostics["refresh_allowed"] is False
+    assert diagnostics["no_token_refresh_performed"] is True
+    assert headers.ok
+    assert headers.details["token_source_used"] == "env_fallback"
+    assert headers.value["Authorization"] == "Bearer env-token-value"
+
+
+def test_live_readonly_auth_expired_oauth_without_env_fails_without_get(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DRY_RUN", "false")
+    monkeypatch.setenv("EBAY_ENVIRONMENT", "sandbox")
+    monkeypatch.setenv("EBAY_SANDBOX_USER_TOKEN", "")
+    core_config.get_settings.cache_clear()
+
+    expired = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    monkeypatch.setattr(
+        "packages.ebay.src.auth._load_tokens",
+        lambda: {
+            "access_token": "expired-oauth-token",
+            "refresh_token": "refresh-token",
+            "expires_at": expired,
+        },
+    )
+
+    def fail_refresh(_self, _refresh_token):  # pragma: no cover
+        raise AssertionError("read-only diagnostics must not refresh OAuth tokens")
+
+    def fail_get(*_args, **_kwargs):  # pragma: no cover
+        raise AssertionError("read-only diagnostics must not call eBay without usable auth")
+
+    monkeypatch.setattr(EbayAuth, "_refresh_access_token", fail_refresh)
+    monkeypatch.setattr("packages.ebay.src.inventory_client.ebay_http.get", fail_get)
+
+    client = EbayInventoryClient()
+    diagnostics = client.get_readonly_auth_diagnostics()
+    result = client.get_inventory_item("BK-000008")
+
+    assert diagnostics["auth_readonly_available"] is False
+    assert diagnostics["reason"] == "oauth_access_token_expired_refresh_not_allowed"
+    assert diagnostics["token_source_used"] == "none"
+    assert diagnostics["refresh_allowed"] is False
+    assert result.ok is False
+    assert result.error_code == "AUTH_NOT_READY"
+    assert result.details["auth_issue_code"] == "oauth_access_token_expired_refresh_not_allowed"

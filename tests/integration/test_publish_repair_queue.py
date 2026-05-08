@@ -675,6 +675,10 @@ def test_publish_diagnostics_live_readonly_reads_offer_inventory_and_policy(monk
     assert body["live_readonly_requested"] is True
     assert body["live_readonly_performed"] is True
     assert body["no_mutation_performed"] is True
+    assert body["auth_readonly_available"] is True
+    assert body["token_source_used"] == "env"
+    assert body["live_readonly_auth"]["refresh_allowed"] is False
+    assert body["live_readonly_auth"]["no_token_refresh_performed"] is True
     assert body["live_readonly_methods_called"] == [
         "get_offer",
         "get_inventory_item",
@@ -749,6 +753,49 @@ def test_publish_diagnostics_live_readonly_surfaces_inventory_diff_and_policy_re
     assert policy["local_policy_status"] == "suspect_or_stale"
     assert policy["rejected_condition_id"] == "3000"
     assert body["category_policy_hypothesis"] is True
+
+
+def test_publish_diagnostics_live_readonly_skips_reads_when_auth_unavailable(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    _seed_item(ebay_category_id="14056", condition_id="3000", offer_id="156719395011")
+    _seed_blocking_repair_plan()
+
+    monkeypatch.setattr(
+        "packages.ebay.src.inventory_client.EbayInventoryClient.get_readonly_auth_diagnostics",
+        lambda _self: {
+            "auth_readonly_available": False,
+            "token_source_used": "none",
+            "token_present": False,
+            "issue_code": "expired_or_invalid_access_token",
+            "reason": "oauth_access_token_expired_refresh_not_allowed",
+            "suggested_action": "Run the explicit eBay OAuth reconnect or refresh flow, then retry diagnostics.",
+            "refresh_allowed": False,
+            "no_token_refresh_performed": True,
+        },
+    )
+
+    def fail_read(*_args, **_kwargs):  # pragma: no cover
+        raise AssertionError("diagnostics must not call live read methods without readonly auth")
+
+    monkeypatch.setattr("packages.ebay.src.inventory_client.EbayInventoryClient.get_offer", fail_read)
+    monkeypatch.setattr("packages.ebay.src.inventory_client.EbayInventoryClient.get_inventory_item", fail_read)
+    monkeypatch.setattr("packages.ebay.src.inventory_client.EbayInventoryClient.get_item_condition_policies", fail_read)
+
+    with _client() as client:
+        resp = client.get("/api/listings/BK-000008/publish-diagnostics?allow_live_readonly=true")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["live_readonly_requested"] is True
+    assert body["live_readonly_performed"] is False
+    assert body["auth_readonly_available"] is False
+    assert body["token_source_used"] == "none"
+    assert body["live_readonly_auth"]["reason"] == "oauth_access_token_expired_refresh_not_allowed"
+    assert body["live_readonly_methods_called"] == []
+    assert body["live_readonly_unavailable"][0]["method"] == "all_live_readonly_methods"
+    assert body["existing_offer_diagnostics"]["read_available"] is False
+    assert body["inventory_item_diagnostics"]["read_available"] is False
+    assert body["category_condition_policy_diagnostics"]["read_available"] is False
 
 
 def test_publish_diagnostics_live_readonly_handles_read_errors(monkeypatch, tmp_path):

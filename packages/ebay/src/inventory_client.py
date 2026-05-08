@@ -374,15 +374,45 @@ class EbayInventoryClient:
         except Exception as exc:
             return Result.failure(f"condition_policy_parse_failed: {exc}", error_code="PARSE_ERROR")
 
+    def get_readonly_auth_diagnostics(self) -> dict:
+        """Resolve read-only auth without refresh, token writes, or token disclosure."""
+        token_state = self.auth.resolve_user_token(allow_refresh=False)
+        token_source = token_state.get("source") or "none"
+        issue_code = token_state.get("issue_code") or ""
+        token_present = bool(token_state.get("token"))
+        auth_available = token_present
+        reason = ""
+        suggested_action = ""
+        if not auth_available:
+            reason = issue_code or "missing_token"
+            if reason == "expired_or_invalid_access_token":
+                reason = "oauth_access_token_expired_refresh_not_allowed"
+            suggested_action = "Run the explicit eBay OAuth reconnect or refresh flow, then retry diagnostics."
+        return {
+            "auth_readonly_available": auth_available,
+            "token_source_used": token_source,
+            "token_present": token_present,
+            "issue_code": issue_code,
+            "reason": reason,
+            "suggested_action": suggested_action,
+            "refresh_allowed": False,
+            "no_token_refresh_performed": True,
+        }
+
     def _readonly_headers(self) -> Result[dict]:
         """Build read-only request headers without OAuth refresh or token writes."""
         token_state = self.auth.resolve_user_token(allow_refresh=False)
         token = token_state.get("token") or ""
         if not token:
+            issue_code = token_state.get("issue_code") or "missing_token"
+            if issue_code == "expired_or_invalid_access_token":
+                issue_code = "oauth_access_token_expired_refresh_not_allowed"
             return Result.failure(
                 "eBay credentials are not ready for read-only diagnostics.",
                 error_code="AUTH_NOT_READY",
-                auth_issue_code=token_state.get("issue_code") or "missing_token",
+                auth_issue_code=issue_code,
+                token_source_used=token_state.get("source") or "none",
+                refresh_allowed=False,
             )
         return Result.success(
             {
@@ -391,7 +421,9 @@ class EbayInventoryClient:
                 "Accept": "application/json",
                 "Content-Language": "en-US",
                 "X-EBAY-C-MARKETPLACE-ID": self.auth.marketplace_id,
-            }
+            },
+            token_source_used=token_state.get("source") or "none",
+            refresh_allowed=False,
         )
 
     def _publish_via_api(self, item: Item, photo_urls: list[str]) -> dict:

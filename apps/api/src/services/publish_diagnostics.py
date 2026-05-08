@@ -130,6 +130,9 @@ def build_publish_diagnostics(
         "live_readonly_methods_called": live["methods_called"],
         "live_readonly_unavailable": live["unavailable"],
         "live_readonly_errors": live["errors"],
+        "live_readonly_auth": live["auth"],
+        "auth_readonly_available": bool(live["auth"].get("auth_readonly_available")),
+        "token_source_used": live["auth"].get("token_source_used") or "",
         "live_readonly_warning": (
             ""
             if allow_live_readonly and live["methods_called"]
@@ -169,6 +172,14 @@ def _build_empty_live_diagnostics() -> dict:
         "methods_called": [],
         "unavailable": [],
         "errors": [],
+        "auth": {
+            "auth_readonly_available": False,
+            "token_source_used": "",
+            "reason": "",
+            "suggested_action": "",
+            "refresh_allowed": False,
+            "no_token_refresh_performed": True,
+        },
         "offer_diagnostics": {},
         "inventory_item_diagnostics": {},
         "category_condition_policy_diagnostics": {},
@@ -185,6 +196,20 @@ def _run_live_readonly_diagnostics(
 ) -> dict:
     client = EbayInventoryClient()
     live = _build_empty_live_diagnostics()
+    live["auth"] = client.get_readonly_auth_diagnostics()
+    if not live["auth"].get("auth_readonly_available"):
+        reason = live["auth"].get("reason") or "read_only_auth_unavailable"
+        live["unavailable"].append(
+            {
+                "method": "all_live_readonly_methods",
+                "reason": reason,
+                "suggested_action": live["auth"].get("suggested_action") or "",
+            }
+        )
+        live["offer_diagnostics"] = _unavailable_offer_diagnostics(str(item.offer_id or ""), reason)
+        live["inventory_item_diagnostics"] = _unavailable_inventory_diagnostics(item.sku or "", reason)
+        live["category_condition_policy_diagnostics"] = _unavailable_policy_diagnostics(category_id, condition_id, reason)
+        return live
 
     offer_id = str(item.offer_id or "").strip()
     if offer_id:
