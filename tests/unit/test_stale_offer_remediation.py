@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import copy
 
-from apps.api.src.services.stale_offer_remediation import execute_refresh_existing_unpublished_offer
+from apps.api.src.services.stale_offer_remediation import (
+    REQUIRED_TYPED_CONFIRMATION,
+    build_remediation_payload_hash,
+    execute_refresh_existing_unpublished_offer,
+)
 
 
 class FakeRemediationExecutor:
@@ -168,6 +172,26 @@ def _execute(diagnostics: dict, **overrides) -> tuple[dict, FakeRemediationExecu
         **overrides,
     )
     return result, executor
+
+
+def _approval(diagnostics: dict) -> dict:
+    draft = diagnostics["stale_offer_remediation_draft"]
+    return {
+        "sku": diagnostics["sku"],
+        "remediation_type": "refresh_existing_unpublished_offer",
+        "repair_plan_id": draft["repair_plan_id"],
+        "latest_publish_attempt_id": draft["latest_publish_attempt_id"],
+        "offer_id": draft["offer_id"],
+        "confirm_offer_status": "UNPUBLISHED",
+        "confirm_listing_id_empty": True,
+        "confirm_category_id": diagnostics["local_category_id"],
+        "confirm_condition_id": diagnostics["local_condition_id"],
+        "confirm_inventory_condition_enum": diagnostics["local_inventory_condition_enum"],
+        "confirm_publish_after_remediation": False,
+        "operator_approved": True,
+        "typed_confirmation": REQUIRED_TYPED_CONFIRMATION,
+        "approved_payload_hash": build_remediation_payload_hash(draft),
+    }
 
 
 def _refusal_codes(result: dict) -> set[str]:
@@ -442,3 +466,224 @@ def test_refresh_existing_unpublished_offer_does_not_mutate_payload_previews() -
     assert diagnostics == original
     assert result["inventory_payload_preview"]["condition"] == "USED_GOOD"
     assert result["offer_payload_preview"]["categoryId"] == "14056"
+
+
+def test_live_offer_refresh_requires_explicit_sku_and_operator_approval() -> None:
+    diagnostics = _eligible_diagnostics()
+
+    result = execute_refresh_existing_unpublished_offer(
+        sku="",
+        diagnostics=diagnostics,
+        operator_approved=False,
+        execute_live=True,
+        approval_request={},
+    )
+
+    codes = _refusal_codes(result)
+    assert result["execution_status"] == "live_execution_disabled"
+    assert "missing_sku" in codes
+    assert "operator_approval_required" in codes
+    assert "missing_approval_request" in codes
+    assert result["real_ebay_mutation_performed"] is False
+
+
+def test_live_offer_refresh_blocks_when_feature_flag_disabled() -> None:
+    diagnostics = _eligible_diagnostics()
+    executor = FakeRemediationExecutor()
+
+    result, executor = _execute(
+        diagnostics,
+        execute_live=True,
+        approval_request=_approval(diagnostics),
+        executor=executor,
+    )
+
+    assert result["execution_status"] == "live_execution_disabled"
+    assert result["code"] == "live_execution_disabled"
+    assert result["live_remediation_feature_enabled"] is False
+    assert "live_execution_disabled" in _refusal_codes(result)
+    assert executor.inventory_calls == []
+    assert executor.offer_calls == []
+
+
+def test_live_offer_refresh_blocks_publish_after_remediation() -> None:
+    diagnostics = _eligible_diagnostics()
+    approval = _approval(diagnostics)
+    approval["confirm_publish_after_remediation"] = True
+
+    result, executor = _execute(
+        diagnostics,
+        publish_after_remediation=True,
+        approval_request=approval,
+    )
+
+    codes = _refusal_codes(result)
+    assert result["execution_status"] == "blocked"
+    assert "publish_after_remediation_not_allowed" in codes
+    assert "approval_publish_after_remediation_not_false" in codes
+    assert "requested_publish_after_remediation_not_allowed" in codes
+    assert executor.inventory_calls == []
+    assert executor.offer_calls == []
+
+
+def test_live_offer_refresh_rechecks_readonly_diagnostics_before_mutation() -> None:
+    diagnostics = _eligible_diagnostics()
+    stale_diagnostics = copy.deepcopy(diagnostics)
+    stale_diagnostics["existing_offer_diagnostics"]["status"] = "PUBLISHED"
+    stale_diagnostics["stale_offer_remediation_draft"]["offer_status"] = "PUBLISHED"
+
+    result, executor = _execute(
+        diagnostics,
+        approval_request=_approval(diagnostics),
+        preflight_diagnostics=stale_diagnostics,
+    )
+
+    assert result["preflight_recheck_performed"] is True
+    assert result["execution_status"] == "blocked"
+    assert "offer_status_not_unpublished" in _refusal_codes(result)
+    assert executor.inventory_calls == []
+    assert executor.offer_calls == []
+
+
+def test_live_offer_refresh_blocks_if_offer_status_changed_from_unpublished() -> None:
+    diagnostics = _eligible_diagnostics()
+    diagnostics["existing_offer_diagnostics"]["status"] = "PUBLISHED"
+    diagnostics["stale_offer_remediation_draft"]["offer_status"] = "PUBLISHED"
+
+    result, executor = _execute(diagnostics, approval_request=_approval(_eligible_diagnostics()))
+
+    assert result["execution_status"] == "blocked"
+    assert "offer_status_not_unpublished" in _refusal_codes(result)
+    assert executor.inventory_calls == []
+    assert executor.offer_calls == []
+
+
+def test_live_offer_refresh_blocks_if_listing_id_appears() -> None:
+    diagnostics = _eligible_diagnostics()
+    diagnostics["listing_id"] = "987654321012"
+    diagnostics["stale_offer_remediation_draft"]["listing_id"] = "987654321012"
+
+    result, executor = _execute(diagnostics, approval_request=_approval(_eligible_diagnostics()))
+
+    assert result["execution_status"] == "blocked"
+    assert "listing_id_present" in _refusal_codes(result)
+    assert executor.inventory_calls == []
+    assert executor.offer_calls == []
+
+
+def test_live_offer_refresh_blocks_if_inventory_condition_differs() -> None:
+    diagnostics = _eligible_diagnostics()
+    diagnostics["inventory_item_diagnostics"]["condition_enum"] = "LIKE_NEW"
+
+    result, executor = _execute(diagnostics, approval_request=_approval(_eligible_diagnostics()))
+
+    assert result["execution_status"] == "blocked"
+    assert "inventory_condition_differs_from_local" in _refusal_codes(result)
+    assert executor.inventory_calls == []
+    assert executor.offer_calls == []
+
+
+def test_live_offer_refresh_blocks_if_live_policy_no_longer_allows_condition() -> None:
+    diagnostics = _eligible_diagnostics()
+    diagnostics["stale_offer_remediation_draft"]["live_policy_result"]["live_policy_allows_condition"] = False
+
+    result, executor = _execute(diagnostics, approval_request=_approval(_eligible_diagnostics()))
+
+    assert result["execution_status"] == "blocked"
+    assert "live_policy_does_not_allow_condition" in _refusal_codes(result)
+    assert executor.inventory_calls == []
+    assert executor.offer_calls == []
+
+
+def test_live_offer_refresh_blocks_if_payload_hash_differs_from_approval() -> None:
+    diagnostics = _eligible_diagnostics()
+    approval = _approval(diagnostics)
+    approval["approved_payload_hash"] = "not-the-current-hash"
+
+    result, executor = _execute(diagnostics, approval_request=approval)
+
+    assert result["execution_status"] == "blocked"
+    assert "approval_payload_hash_mismatch" in _refusal_codes(result)
+    assert executor.inventory_calls == []
+    assert executor.offer_calls == []
+
+
+def test_live_offer_refresh_mock_calls_inventory_put_then_offer_put_only() -> None:
+    diagnostics = _eligible_diagnostics()
+
+    result, executor = _execute(diagnostics, approval_request=_approval(diagnostics))
+
+    assert result["execution_status"] == "mock_executed"
+    assert executor.inventory_calls == [
+        ("BK-000008", diagnostics["stale_offer_remediation_draft"]["intended_inventory_item_payload_preview"])
+    ]
+    assert executor.offer_calls == [
+        ("156719395011", diagnostics["stale_offer_remediation_draft"]["intended_offer_payload_preview"])
+    ]
+    assert executor.publish_calls == 0
+    assert executor.delete_calls == 0
+    assert executor.withdraw_calls == 0
+    assert executor.revise_calls == 0
+    assert executor.create_calls == 0
+
+
+def test_live_offer_refresh_never_calls_publish_offer() -> None:
+    diagnostics = _eligible_diagnostics()
+
+    result, executor = _execute(diagnostics, approval_request=_approval(diagnostics))
+
+    assert result["execution_status"] == "mock_executed"
+    assert executor.publish_calls == 0
+    assert result["publish_after_remediation"] is False
+
+
+def test_live_offer_refresh_never_deletes_or_recreates_offer() -> None:
+    diagnostics = _eligible_diagnostics()
+
+    result, executor = _execute(diagnostics, approval_request=_approval(diagnostics))
+
+    assert result["execution_status"] == "mock_executed"
+    assert executor.delete_calls == 0
+    assert executor.withdraw_calls == 0
+    assert executor.revise_calls == 0
+    assert executor.create_calls == 0
+
+
+def test_live_offer_refresh_runs_post_refresh_readonly_diagnostics_if_mock_executes() -> None:
+    diagnostics = _eligible_diagnostics()
+    post_refresh = {"sku": "BK-000008", "no_mutation_performed": True, "offer_status": "UNPUBLISHED"}
+
+    result, _executor = _execute(
+        diagnostics,
+        approval_request=_approval(diagnostics),
+        post_refresh_diagnostics_provider=lambda: post_refresh,
+    )
+
+    assert result["execution_status"] == "mock_executed"
+    assert result["post_refresh_readonly_diagnostics_performed"] is True
+    assert result["post_refresh_readonly_diagnostics"] == post_refresh
+
+
+def test_live_offer_refresh_does_not_clear_repair_queue_or_mark_listed() -> None:
+    diagnostics = _eligible_diagnostics()
+
+    result, _executor = _execute(diagnostics, approval_request=_approval(diagnostics))
+
+    assert result["execution_status"] == "mock_executed"
+    assert result["audit_log_preview"]["no_publish_performed"] is True
+    assert result["audit_log_preview"]["real_ebay_mutation_performed"] is False
+    assert result["repair_plan_id"] == "repair-plan-1"
+    assert result["next_recommended_action"].startswith("Run publish diagnostics/readiness again")
+
+
+def test_live_offer_refresh_blocks_wrong_typed_confirmation() -> None:
+    diagnostics = _eligible_diagnostics()
+    approval = _approval(diagnostics)
+    approval["typed_confirmation"] = "refresh"
+
+    result, executor = _execute(diagnostics, approval_request=approval)
+
+    assert result["execution_status"] == "blocked"
+    assert "approval_typed_confirmation_mismatch" in _refusal_codes(result)
+    assert executor.inventory_calls == []
+    assert executor.offer_calls == []
