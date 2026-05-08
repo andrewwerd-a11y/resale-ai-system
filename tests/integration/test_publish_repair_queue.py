@@ -711,6 +711,29 @@ def test_publish_diagnostics_live_readonly_reads_offer_inventory_and_policy(monk
     assert policy["local_policy_status"] == "confirmed_by_live_readonly_metadata"
     assert policy["allowed_condition_ids"] == ["1000", "3000"]
 
+    draft = body["stale_offer_remediation_draft"]
+    assert draft["status"] == "draft_preview_available"
+    assert draft["remediation_type"] == "refresh_existing_unpublished_offer"
+    assert draft["live_execution_enabled"] is False
+    assert draft["operator_approval_required"] is True
+    assert draft["publish_after_remediation"] is False
+    assert draft["no_mutation_performed"] is True
+    assert draft["actionable"] is False
+    assert draft["safe_to_execute"] is False
+    assert draft["offer_id"] == "156719395011"
+    assert draft["offer_status"] == "UNPUBLISHED"
+    assert draft["listing_id"] == ""
+    assert draft["category_id"] == "14056"
+    assert draft["condition_id"] == "3000"
+    assert draft["inventory_condition_enum"] == "USED_GOOD"
+    assert draft["repair_plan_id"] == body["repair_plan_id"]
+    assert draft["live_policy_result"]["live_policy_allows_condition"] is True
+    assert draft["intended_inventory_item_payload_preview"]["condition"] == "USED_GOOD"
+    assert draft["intended_offer_payload_preview"]["categoryId"] == "14056"
+    assert draft["intended_call_sequence_preview"][0]["method"] == "PUT"
+    assert draft["intended_call_sequence_preview"][1]["endpoint"].endswith("/offer/156719395011")
+    assert draft["intended_call_sequence_preview"][2]["method"] == "NONE"
+
 
 def test_publish_diagnostics_live_readonly_surfaces_inventory_diff_and_policy_rejection(monkeypatch, tmp_path):
     _configure_temp_db(monkeypatch, tmp_path)
@@ -753,6 +776,123 @@ def test_publish_diagnostics_live_readonly_surfaces_inventory_diff_and_policy_re
     assert policy["local_policy_status"] == "suspect_or_stale"
     assert policy["rejected_condition_id"] == "3000"
     assert body["category_policy_hypothesis"] is True
+    refusal_codes = {reason["code"] for reason in body["stale_offer_remediation_draft"]["refusal_reasons"]}
+    assert "live_policy_does_not_allow_condition" in refusal_codes
+    assert "inventory_condition_differs_from_local" in refusal_codes
+
+
+def test_stale_offer_remediation_refuses_when_offer_status_not_unpublished(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    _seed_item(ebay_category_id="14056", condition_id="3000", offer_id="156719395011")
+    _seed_blocking_repair_plan()
+
+    monkeypatch.setattr(
+        "packages.ebay.src.inventory_client.EbayInventoryClient.get_offer",
+        lambda *_args, **_kwargs: Result.success({"offerId": "156719395011", "status": "PUBLISHED", "categoryId": "14056"}),
+    )
+    monkeypatch.setattr(
+        "packages.ebay.src.inventory_client.EbayInventoryClient.get_inventory_item",
+        lambda *_args, **_kwargs: Result.success({"sku": "BK-000008", "condition": "USED_GOOD", "product": {"imageUrls": []}}),
+    )
+    monkeypatch.setattr(
+        "packages.ebay.src.inventory_client.EbayInventoryClient.get_item_condition_policies",
+        lambda *_args, **_kwargs: Result.success({"itemConditions": [{"conditionId": "3000"}]}),
+    )
+
+    with _client() as client:
+        resp = client.get("/api/listings/BK-000008/publish-diagnostics?allow_live_readonly=true")
+
+    assert resp.status_code == 200
+    draft = resp.json()["stale_offer_remediation_draft"]
+    assert draft["status"] == "refused"
+    assert draft["safe_to_preview"] is False
+    assert "offer_status_not_unpublished" in {reason["code"] for reason in draft["refusal_reasons"]}
+
+
+def test_stale_offer_remediation_refuses_when_listing_id_present(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    _seed_item(ebay_category_id="14056", condition_id="3000", offer_id="156719395011", listing_id="987654321012")
+    _seed_blocking_repair_plan()
+
+    monkeypatch.setattr(
+        "packages.ebay.src.inventory_client.EbayInventoryClient.get_offer",
+        lambda *_args, **_kwargs: Result.success({"offerId": "156719395011", "status": "UNPUBLISHED", "categoryId": "14056"}),
+    )
+    monkeypatch.setattr(
+        "packages.ebay.src.inventory_client.EbayInventoryClient.get_inventory_item",
+        lambda *_args, **_kwargs: Result.success({"sku": "BK-000008", "condition": "USED_GOOD", "product": {"imageUrls": []}}),
+    )
+    monkeypatch.setattr(
+        "packages.ebay.src.inventory_client.EbayInventoryClient.get_item_condition_policies",
+        lambda *_args, **_kwargs: Result.success({"itemConditions": [{"conditionId": "3000"}]}),
+    )
+
+    with _client() as client:
+        resp = client.get("/api/listings/BK-000008/publish-diagnostics?allow_live_readonly=true")
+
+    assert resp.status_code == 200
+    draft = resp.json()["stale_offer_remediation_draft"]
+    refusal_codes = {reason["code"] for reason in draft["refusal_reasons"]}
+    assert draft["status"] == "refused"
+    assert "listing_id_present" in refusal_codes
+    assert "not_existing_offer_publish_flow" in refusal_codes
+
+
+def test_stale_offer_remediation_refuses_when_offer_id_missing(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    _seed_item(ebay_category_id="14056", condition_id="3000", offer_id="")
+    _seed_blocking_repair_plan()
+
+    def fail_offer_read(*_args, **_kwargs):  # pragma: no cover
+        raise AssertionError("offer read should be skipped when no offer_id exists")
+
+    monkeypatch.setattr("packages.ebay.src.inventory_client.EbayInventoryClient.get_offer", fail_offer_read)
+    monkeypatch.setattr(
+        "packages.ebay.src.inventory_client.EbayInventoryClient.get_inventory_item",
+        lambda *_args, **_kwargs: Result.success({"sku": "BK-000008", "condition": "USED_GOOD", "product": {"imageUrls": []}}),
+    )
+    monkeypatch.setattr(
+        "packages.ebay.src.inventory_client.EbayInventoryClient.get_item_condition_policies",
+        lambda *_args, **_kwargs: Result.success({"itemConditions": [{"conditionId": "3000"}]}),
+    )
+
+    with _client() as client:
+        resp = client.get("/api/listings/BK-000008/publish-diagnostics?allow_live_readonly=true")
+
+    assert resp.status_code == 200
+    draft = resp.json()["stale_offer_remediation_draft"]
+    refusal_codes = {reason["code"] for reason in draft["refusal_reasons"]}
+    assert draft["status"] == "refused"
+    assert "missing_offer_id" in refusal_codes
+    assert "not_existing_offer_publish_flow" in refusal_codes
+
+
+def test_stale_offer_remediation_refuses_when_repair_queue_not_blocking(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    _seed_item(ebay_category_id="14056", condition_id="3000", offer_id="156719395011")
+
+    monkeypatch.setattr(
+        "packages.ebay.src.inventory_client.EbayInventoryClient.get_offer",
+        lambda *_args, **_kwargs: Result.success({"offerId": "156719395011", "status": "UNPUBLISHED", "categoryId": "14056"}),
+    )
+    monkeypatch.setattr(
+        "packages.ebay.src.inventory_client.EbayInventoryClient.get_inventory_item",
+        lambda *_args, **_kwargs: Result.success({"sku": "BK-000008", "condition": "USED_GOOD", "product": {"imageUrls": []}}),
+    )
+    monkeypatch.setattr(
+        "packages.ebay.src.inventory_client.EbayInventoryClient.get_item_condition_policies",
+        lambda *_args, **_kwargs: Result.success({"itemConditions": [{"conditionId": "3000"}]}),
+    )
+
+    with _client() as client:
+        resp = client.get("/api/listings/BK-000008/publish-diagnostics?allow_live_readonly=true")
+
+    assert resp.status_code == 200
+    draft = resp.json()["stale_offer_remediation_draft"]
+    refusal_codes = {reason["code"] for reason in draft["refusal_reasons"]}
+    assert draft["status"] == "refused"
+    assert "repair_queue_not_blocking" in refusal_codes
+    assert "missing_latest_repair_plan" in refusal_codes
 
 
 def test_publish_diagnostics_live_readonly_skips_reads_when_auth_unavailable(monkeypatch, tmp_path):

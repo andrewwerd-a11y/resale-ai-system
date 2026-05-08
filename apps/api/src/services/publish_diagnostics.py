@@ -120,6 +120,16 @@ def build_publish_diagnostics(
     else:
         recommended_next_action = "Review diagnostics before any live publish attempt."
 
+    stale_offer_remediation_draft = build_stale_offer_remediation_draft(
+        item=item,
+        repair_blocker=repair_blocker,
+        offer_diagnostics=offer_diagnostics,
+        inventory_diagnostics=inventory_diagnostics,
+        category_policy_diagnostics=category_policy_diagnostics,
+        planned_action=planned_action,
+        inventory_condition_enum=inventory_condition_enum,
+    )
+
     return {
         "sku": normalized,
         "found": True,
@@ -163,7 +173,144 @@ def build_publish_diagnostics(
         "existing_offer_diagnostics": offer_diagnostics,
         "inventory_item_diagnostics": inventory_diagnostics,
         "category_condition_policy_diagnostics": category_policy_diagnostics,
+        "stale_offer_remediation_draft": stale_offer_remediation_draft,
         "repair_queue_blocker": repair_blocker,
+    }
+
+
+def build_stale_offer_remediation_draft(
+    *,
+    item,
+    repair_blocker: dict,
+    offer_diagnostics: dict,
+    inventory_diagnostics: dict,
+    category_policy_diagnostics: dict,
+    planned_action: str,
+    inventory_condition_enum: str,
+) -> dict:
+    """Build a preview-only stale-offer remediation draft. Never calls eBay."""
+    sku = str(item.sku or "").upper()
+    offer_id = str(item.offer_id or "").strip()
+    listing_id = str(item.listing_id or "").strip()
+    category_id = str(item.ebay_category_id or "")
+    condition_id = str(item.condition_id or "")
+    offer_status = str(offer_diagnostics.get("status") or "").upper()
+    policy_allows_condition = category_policy_diagnostics.get("live_policy_allows_condition")
+    inventory_condition = str(inventory_diagnostics.get("condition_enum") or inventory_condition_enum)
+    refusal_reasons: list[dict] = []
+
+    def refuse(code: str, message: str) -> None:
+        refusal_reasons.append({"code": code, "message": message})
+
+    if not sku:
+        refuse("missing_sku", "SKU is missing.")
+    if not offer_id:
+        refuse("missing_offer_id", "No existing offer_id is stored.")
+    if listing_id:
+        refuse("listing_id_present", "Item already has a listing_id; stale unpublished-offer remediation is not appropriate.")
+    if str(item.status or "").lower() == "listed":
+        refuse("item_already_listed", "Item status is listed.")
+    if offer_status != "UNPUBLISHED":
+        refuse("offer_status_not_unpublished", "Live/mock offer status must be UNPUBLISHED.")
+    if planned_action != "publish_existing_offer":
+        refuse("not_existing_offer_publish_flow", "Current planned action is not publish_existing_offer.")
+    if not repair_blocker.get("blocked_by_repair_queue"):
+        refuse("repair_queue_not_blocking", "Latest repair queue state does not currently block publish.")
+    if not repair_blocker.get("repair_plan_id"):
+        refuse("missing_latest_repair_plan", "Latest repair plan is missing.")
+    if condition_id != "3000":
+        refuse("condition_id_not_supported_for_draft", "This mock-only draft is limited to condition_id 3000 / USED_GOOD.")
+    if inventory_condition_enum != "USED_GOOD":
+        refuse("local_inventory_condition_not_used_good", "Local inventory condition enum is not USED_GOOD.")
+    if policy_allows_condition is not True:
+        refuse("live_policy_does_not_allow_condition", "Live/mock category policy does not confirm the current condition.")
+    if inventory_condition and inventory_condition != inventory_condition_enum:
+        refuse("inventory_condition_differs_from_local", "Live/mock inventory condition differs from local inventory condition.")
+    if category_policy_diagnostics.get("live_metadata_supports_changing_condition") is True:
+        refuse("category_condition_change_appears_needed", "Live/mock policy indicates condition change may be needed instead.")
+
+    base = {
+        "sku": sku,
+        "repair_plan_id": repair_blocker.get("repair_plan_id") or "",
+        "latest_publish_attempt_id": repair_blocker.get("latest_publish_attempt_id") or "",
+        "remediation_type": "refresh_existing_unpublished_offer",
+        "live_execution_enabled": False,
+        "operator_approval_required": True,
+        "publish_after_remediation": False,
+        "no_mutation_performed": True,
+        "actionable": False,
+        "safe_to_execute": False,
+        "offer_id": offer_id,
+        "listing_id": listing_id,
+        "offer_status": offer_status,
+        "category_id": category_id,
+        "category_name": str(item.ebay_category_name or ""),
+        "condition_id": condition_id,
+        "inventory_condition_enum": inventory_condition_enum,
+        "live_policy_result": {
+            "source": category_policy_diagnostics.get("source") or "",
+            "read_available": bool(category_policy_diagnostics.get("read_available")),
+            "live_policy_allows_condition": policy_allows_condition,
+            "allowed_condition_ids": category_policy_diagnostics.get("allowed_condition_ids") or [],
+            "local_policy_status": category_policy_diagnostics.get("local_policy_status") or "",
+        },
+        "stale_offer_reasoning": (
+            "Current inventory and live category policy look clean, but the existing unpublished offer is the object being published. "
+            "Preview rewriting that unpublished offer from current local item state before any separately approved publish retry."
+        ),
+    }
+    if refusal_reasons:
+        return base | {
+            "status": "refused",
+            "safe_to_preview": False,
+            "refusal_reasons": refusal_reasons,
+            "intended_inventory_item_payload_preview": {},
+            "intended_offer_payload_preview": {},
+            "intended_call_sequence_preview": [],
+        }
+
+    client = EbayInventoryClient()
+    hosted_photo_urls = client.extract_hosted_photo_urls([str(value) for value in (item.image_paths or [])])
+    inventory_payload = client._build_inventory_payload(item, hosted_photo_urls)
+    offer_payload = client._build_offer_payload(
+        item,
+        {
+            "fulfillment_id": "preview-fulfillment-policy",
+            "payment_id": "preview-payment-policy",
+            "return_id": "preview-return-policy",
+        },
+        merchant_location_key="preview-location",
+    )
+    return base | {
+        "status": "draft_preview_available",
+        "safe_to_preview": True,
+        "refusal_reasons": [],
+        "intended_inventory_item_payload_preview": inventory_payload,
+        "intended_offer_payload_preview": offer_payload,
+        "intended_call_sequence_preview": [
+            {
+                "order": 1,
+                "method": "PUT",
+                "endpoint": f"/sell/inventory/v1/inventory_item/{sku}",
+                "preview_only": True,
+                "mutation_performed": False,
+            },
+            {
+                "order": 2,
+                "method": "PUT",
+                "endpoint": f"/sell/inventory/v1/offer/{offer_id}",
+                "preview_only": True,
+                "mutation_performed": False,
+            },
+            {
+                "order": 3,
+                "method": "NONE",
+                "endpoint": "",
+                "preview_only": True,
+                "mutation_performed": False,
+                "note": "Do not publish in this phase.",
+            },
+        ],
     }
 
 
