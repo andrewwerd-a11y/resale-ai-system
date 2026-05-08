@@ -1375,6 +1375,38 @@ def test_execute_approved_refresh_requires_dedicated_env_flag(monkeypatch, tmp_p
     detail = resp.json()["detail"]
     assert detail["code"] == "live_execution_disabled"
     assert detail["required_env_flag"] == "ALLOW_EBAY_STALE_OFFER_REFRESH=true"
+    assert detail["no_publish_performed"] is True
+    assert detail["repair_queue_cleared"] is False
+
+
+def test_execute_approved_refresh_requires_exact_dedicated_env_flag_value(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    monkeypatch.setenv("ALLOW_LIVE_E2E", "true")
+    monkeypatch.setenv("ALLOW_EBAY_STALE_OFFER_REFRESH", "TRUE")
+    diagnostics = _eligible_refresh_diagnostics()
+    approval = _eligible_refresh_approval(diagnostics)
+
+    def fail_diagnostics(*_args, **_kwargs):
+        raise AssertionError("non-exact dedicated env flag should block before diagnostics")
+
+    def fail_executor():
+        raise AssertionError("non-exact dedicated env flag should block before executor construction")
+
+    monkeypatch.setattr("apps.api.src.routes.listings.build_publish_diagnostics", fail_diagnostics)
+    monkeypatch.setattr("apps.api.src.routes.listings._build_stale_offer_refresh_executor", fail_executor)
+
+    with _client() as client:
+        resp = client.post(
+            "/api/listings/BK-000008/stale-offer-remediation/execute-approved-refresh",
+            json=approval,
+        )
+
+    assert resp.status_code == 403
+    detail = resp.json()["detail"]
+    assert detail["code"] == "live_execution_disabled"
+    assert detail["required_env_flag"] == "ALLOW_EBAY_STALE_OFFER_REFRESH=true"
+    assert detail["no_publish_performed"] is True
+    assert detail["repair_queue_cleared"] is False
 
 
 def test_execute_approved_refresh_blocks_when_live_remediation_disabled(monkeypatch, tmp_path):
@@ -1396,7 +1428,10 @@ def test_execute_approved_refresh_blocks_when_live_remediation_disabled(monkeypa
         )
 
     assert resp.status_code == 403
-    assert resp.json()["detail"]["code"] == "live_execution_disabled"
+    detail = resp.json()["detail"]
+    assert detail["code"] == "live_execution_disabled"
+    assert detail["no_publish_performed"] is True
+    assert detail["repair_queue_cleared"] is False
 
 
 def test_execute_approved_refresh_requires_exact_typed_confirmation(monkeypatch, tmp_path):
@@ -1422,6 +1457,43 @@ def test_execute_approved_refresh_requires_exact_typed_confirmation(monkeypatch,
     detail = resp.json()["detail"]
     assert detail["execution_status"] == "blocked"
     assert detail["refusal_reasons"][0]["code"] == "approval_typed_confirmation_mismatch"
+    assert detail["no_publish_performed"] is True
+    assert detail["repair_queue_cleared"] is False
+
+
+def test_execute_approved_refresh_blocks_payload_hash_mismatch_without_refresh_calls(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    monkeypatch.setenv("ALLOW_LIVE_E2E", "true")
+    monkeypatch.setenv("ALLOW_EBAY_STALE_OFFER_REFRESH", "true")
+    diagnostics = _eligible_refresh_diagnostics()
+    approval = _eligible_refresh_approval(diagnostics)
+    approval["approved_payload_hash"] = "wrong-hash"
+    executor = _FakeApprovedRefreshExecutor()
+
+    def fake_diagnostics(_session, _sku, *, allow_live_readonly=False):
+        assert allow_live_readonly is True
+        return _eligible_refresh_diagnostics()
+
+    monkeypatch.setattr("apps.api.src.routes.listings.build_publish_diagnostics", fake_diagnostics)
+    monkeypatch.setattr("apps.api.src.routes.listings._build_stale_offer_refresh_executor", lambda: executor)
+
+    with _client() as client:
+        resp = client.post(
+            "/api/listings/BK-000008/stale-offer-remediation/execute-approved-refresh",
+            json=approval,
+        )
+
+    assert resp.status_code == 409
+    detail = resp.json()["detail"]
+    assert detail["execution_status"] == "blocked"
+    refusal_codes = {reason["code"] for reason in detail["refusal_reasons"]}
+    assert "approval_payload_hash_mismatch" in refusal_codes
+    assert "preflight_payload_hash_mismatch" in refusal_codes
+    assert detail["no_publish_performed"] is True
+    assert detail["repair_queue_cleared"] is False
+    assert executor.inventory_calls == []
+    assert executor.offer_calls == []
+    assert executor.publish_calls == 0
 
 
 def test_execute_approved_refresh_calls_inventory_put_then_offer_put_only(monkeypatch, tmp_path):
