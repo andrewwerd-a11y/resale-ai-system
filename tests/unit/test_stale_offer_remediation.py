@@ -105,6 +105,13 @@ def _eligible_diagnostics() -> dict:
             "offer_exists": True,
             "status": "UNPUBLISHED",
             "category_id": "14056",
+            "merchant_location_key": "real-location",
+            "listing_policies": {
+                "fulfillmentPolicyId": "287672421015",
+                "paymentPolicyId": "287672342015",
+                "returnPolicyId": "287672344015",
+                "countryCode": "US",
+            },
             "category_differs_from_local": False,
         },
         "inventory_item_diagnostics": {
@@ -236,6 +243,31 @@ def _execute_approved(
 
 def _refusal_codes(result: dict) -> set[str]:
     return {reason["code"] for reason in result["refusal_reasons"]}
+
+
+def _expected_live_offer_payload(diagnostics: dict) -> dict:
+    payload = copy.deepcopy(diagnostics["stale_offer_remediation_draft"]["intended_offer_payload_preview"])
+    payload["merchantLocationKey"] = "real-location"
+    payload["listingPolicies"] = {
+        "fulfillmentPolicyId": "287672421015",
+        "paymentPolicyId": "287672342015",
+        "returnPolicyId": "287672344015",
+    }
+    return payload
+
+
+def _diagnostics_with_placeholder_offer_payload(field: str) -> dict:
+    diagnostics = _eligible_diagnostics()
+    if field == "merchantLocationKey":
+        diagnostics["existing_offer_diagnostics"]["merchant_location_key"] = "preview-location"
+        return diagnostics
+    key_map = {
+        "fulfillmentPolicyId": "preview-fulfillment-policy",
+        "paymentPolicyId": "preview-payment-policy",
+        "returnPolicyId": "preview-return-policy",
+    }
+    diagnostics["existing_offer_diagnostics"]["listing_policies"][field] = key_map[field]
+    return diagnostics
 
 
 def test_stale_offer_remediation_approval_preview_builds_template_for_eligible_diagnostics() -> None:
@@ -847,6 +879,54 @@ def test_execute_approved_refresh_requires_live_readonly_preflight() -> None:
     assert executor.offer_calls == []
 
 
+def test_execute_approved_refresh_blocks_placeholder_fulfillment_policy_before_mutation() -> None:
+    diagnostics = _diagnostics_with_placeholder_offer_payload("fulfillmentPolicyId")
+
+    result, executor = _execute_approved(diagnostics)
+
+    assert result["execution_status"] == "blocked"
+    assert "missing_real_listing_policy_ids" in _refusal_codes(result)
+    assert "placeholder_listing_policy_detected" in _refusal_codes(result)
+    assert executor.inventory_calls == []
+    assert executor.offer_calls == []
+
+
+def test_execute_approved_refresh_blocks_placeholder_payment_policy_before_mutation() -> None:
+    diagnostics = _diagnostics_with_placeholder_offer_payload("paymentPolicyId")
+
+    result, executor = _execute_approved(diagnostics)
+
+    assert result["execution_status"] == "blocked"
+    assert "missing_real_listing_policy_ids" in _refusal_codes(result)
+    assert "placeholder_listing_policy_detected" in _refusal_codes(result)
+    assert executor.inventory_calls == []
+    assert executor.offer_calls == []
+
+
+def test_execute_approved_refresh_blocks_placeholder_return_policy_before_mutation() -> None:
+    diagnostics = _diagnostics_with_placeholder_offer_payload("returnPolicyId")
+
+    result, executor = _execute_approved(diagnostics)
+
+    assert result["execution_status"] == "blocked"
+    assert "missing_real_listing_policy_ids" in _refusal_codes(result)
+    assert "placeholder_listing_policy_detected" in _refusal_codes(result)
+    assert executor.inventory_calls == []
+    assert executor.offer_calls == []
+
+
+def test_execute_approved_refresh_blocks_placeholder_merchant_location_before_mutation() -> None:
+    diagnostics = _diagnostics_with_placeholder_offer_payload("merchantLocationKey")
+
+    result, executor = _execute_approved(diagnostics)
+
+    assert result["execution_status"] == "blocked"
+    assert "merchant_location_key_unresolved" in _refusal_codes(result)
+    assert "placeholder_listing_policy_detected" in _refusal_codes(result)
+    assert executor.inventory_calls == []
+    assert executor.offer_calls == []
+
+
 def test_execute_approved_refresh_blocks_when_live_remediation_disabled() -> None:
     diagnostics = _eligible_diagnostics()
 
@@ -857,6 +937,63 @@ def test_execute_approved_refresh_blocks_when_live_remediation_disabled() -> Non
     assert result["live_execution_enabled"] is False
     assert executor.inventory_calls == []
     assert executor.offer_calls == []
+
+
+def test_execute_approved_refresh_uses_live_existing_offer_policy_ids_when_available() -> None:
+    diagnostics = _eligible_diagnostics()
+
+    result, executor = _execute_approved(diagnostics)
+
+    assert result["execution_status"] == "refresh_completed"
+    assert executor.offer_calls == [("156719395011", _expected_live_offer_payload(diagnostics))]
+    assert result["offer_payload_live_executable"] == _expected_live_offer_payload(diagnostics)
+
+
+def test_execute_approved_refresh_never_puts_offer_with_preview_policy_ids() -> None:
+    diagnostics = _eligible_diagnostics()
+    diagnostics["stale_offer_remediation_draft"]["intended_offer_payload_preview"]["merchantLocationKey"] = "preview-location"
+    diagnostics["stale_offer_remediation_draft"]["intended_offer_payload_preview"]["listingPolicies"] = {
+        "fulfillmentPolicyId": "preview-fulfillment-policy",
+        "paymentPolicyId": "preview-payment-policy",
+        "returnPolicyId": "preview-return-policy",
+        "countryCode": "US",
+    }
+    approval = _approval(diagnostics)
+
+    result, executor = _execute_approved(diagnostics, approval=approval)
+
+    assert result["execution_status"] == "refresh_completed"
+    offer_payload = executor.offer_calls[0][1]
+    assert "preview-location" not in str(offer_payload)
+    assert "preview-fulfillment-policy" not in str(offer_payload)
+    assert "preview-payment-policy" not in str(offer_payload)
+    assert "preview-return-policy" not in str(offer_payload)
+
+
+def test_execute_approved_refresh_inventory_put_not_called_when_policy_ids_are_placeholders() -> None:
+    diagnostics = _diagnostics_with_placeholder_offer_payload("fulfillmentPolicyId")
+
+    result, executor = _execute_approved(diagnostics)
+
+    assert result["execution_status"] == "blocked"
+    assert executor.inventory_calls == []
+    assert executor.offer_calls == []
+
+
+def test_approval_preview_distinguishes_preview_payload_from_live_executable_payload() -> None:
+    from apps.api.src.services.stale_offer_remediation import build_stale_offer_remediation_approval_preview
+
+    diagnostics = _eligible_diagnostics()
+    diagnostics["stale_offer_remediation_draft"]["intended_offer_payload_preview"]["merchantLocationKey"] = "preview-location"
+    preview = build_stale_offer_remediation_approval_preview(diagnostics)
+    result, executor = _execute_approved(diagnostics, approval=preview["required_approval_fields_template"])
+
+    assert preview["no_mutation_performed"] is True
+    assert preview["required_approval_fields_template"]["approved_payload_hash"] == preview["payload_hash"]
+    assert result["execution_status"] == "refresh_completed"
+    assert result["offer_payload_preview"]["merchantLocationKey"] == "preview-location"
+    assert result["offer_payload_live_executable"]["merchantLocationKey"] == "real-location"
+    assert executor.offer_calls[0][1]["merchantLocationKey"] == "real-location"
 
 
 def test_execute_approved_refresh_calls_inventory_put_then_offer_put_only() -> None:
@@ -871,7 +1008,7 @@ def test_execute_approved_refresh_calls_inventory_put_then_offer_put_only() -> N
         ("BK-000008", diagnostics["stale_offer_remediation_draft"]["intended_inventory_item_payload_preview"])
     ]
     assert executor.offer_calls == [
-        ("156719395011", diagnostics["stale_offer_remediation_draft"]["intended_offer_payload_preview"])
+        ("156719395011", _expected_live_offer_payload(diagnostics))
     ]
     assert executor.publish_calls == 0
     assert executor.delete_calls == 0
@@ -914,6 +1051,11 @@ def test_execute_approved_refresh_offer_failure_reports_partial_failure() -> Non
     assert result["post_refresh_diagnostics"] == post_refresh
     assert result["no_publish_performed"] is True
     assert result["repair_queue_cleared"] is False
+    assert result["inventory_refresh_result"]["ok"] is True
+    assert result["offer_refresh_result"]["ok"] is False
+    assert result["no_mutation_performed"] is False
+    assert result["real_ebay_mutation_performed"] is True
+    assert result["no_live_mutation_performed"] is False
 
 
 def test_execute_approved_refresh_blocks_if_offer_not_unpublished() -> None:

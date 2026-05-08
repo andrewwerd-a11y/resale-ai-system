@@ -260,6 +260,13 @@ def _eligible_refresh_diagnostics() -> dict:
             "offer_exists": True,
             "status": "UNPUBLISHED",
             "category_id": "14056",
+            "merchant_location_key": "real-location",
+            "listing_policies": {
+                "fulfillmentPolicyId": "287672421015",
+                "paymentPolicyId": "287672342015",
+                "returnPolicyId": "287672344015",
+                "countryCode": "US",
+            },
             "category_differs_from_local": False,
         },
         "inventory_item_diagnostics": {
@@ -295,6 +302,18 @@ def _eligible_refresh_approval(diagnostics: dict) -> dict:
         "typed_confirmation": REQUIRED_TYPED_CONFIRMATION,
         "approved_payload_hash": build_remediation_payload_hash(draft),
     }
+
+
+def _expected_live_refresh_offer_payload(diagnostics: dict) -> dict:
+    payload = dict(diagnostics["stale_offer_remediation_draft"]["intended_offer_payload_preview"])
+    payload["merchantLocationKey"] = "real-location"
+    payload["listingPolicies"] = {
+        "fulfillmentPolicyId": "287672421015",
+        "paymentPolicyId": "287672342015",
+        "returnPolicyId": "287672344015",
+        "countryCode": "US",
+    }
+    return payload
 
 
 class _FakeApprovedRefreshExecutor:
@@ -1530,7 +1549,7 @@ def test_execute_approved_refresh_calls_inventory_put_then_offer_put_only(monkey
         ("BK-000008", diagnostics["stale_offer_remediation_draft"]["intended_inventory_item_payload_preview"])
     ]
     assert executor.offer_calls == [
-        ("156719395011", diagnostics["stale_offer_remediation_draft"]["intended_offer_payload_preview"])
+        ("156719395011", _expected_live_refresh_offer_payload(diagnostics))
     ]
     assert executor.publish_calls == 0
     assert executor.create_calls == 0

@@ -480,6 +480,7 @@ def _live_offer_diagnostics(payload: dict, *, local_category_id: str, local_cond
         "category_id": category_id,
         "condition_id": condition_id,
         "marketplace_id": str(payload.get("marketplaceId") or ""),
+        "merchant_location_key": str(payload.get("merchantLocationKey") or ""),
         "listing_policies": payload.get("listingPolicies") or {},
         "category_differs_from_local": category_differs,
         "condition_differs_from_local": condition_differs,

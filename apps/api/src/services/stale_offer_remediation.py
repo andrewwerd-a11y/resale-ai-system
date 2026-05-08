@@ -7,8 +7,16 @@ import json
 from collections.abc import Callable
 from typing import Protocol
 
+from packages.core.src.config import get_settings
+
 REMEDIATION_TYPE = "refresh_existing_unpublished_offer"
 REQUIRED_TYPED_CONFIRMATION = "REFRESH UNPUBLISHED OFFER ONLY"
+PREVIEW_PLACEHOLDER_VALUES = {
+    "preview-fulfillment-policy",
+    "preview-payment-policy",
+    "preview-return-policy",
+    "preview-location",
+}
 
 
 class StaleOfferRemediationExecutor(Protocol):
@@ -426,6 +434,7 @@ def execute_approved_refresh_existing_unpublished_offer(
         "offer_refresh_result": {},
         "post_refresh_diagnostics": {},
         "post_refresh_diagnostics_performed": False,
+        "offer_payload_live_executable": {},
     }
 
     if not live_remediation_enabled:
@@ -463,7 +472,17 @@ def execute_approved_refresh_existing_unpublished_offer(
         }
 
     inventory_payload = deepcopy(response_base["inventory_payload_preview"])
-    offer_payload = deepcopy(response_base["offer_payload_preview"])
+    offer_payload, executable_payload_refusals = _build_live_executable_offer_payload(
+        preview_payload=response_base["offer_payload_preview"],
+        diagnostics=diagnostics,
+    )
+    response_base = response_base | {"offer_payload_live_executable": deepcopy(offer_payload)}
+    if executable_payload_refusals:
+        return response_base | {
+            "execution_status": "blocked",
+            "refusal_reasons": executable_payload_refusals,
+            "next_recommended_action": "Resolve live listing policy IDs before retrying stale-offer refresh.",
+        }
     calls_performed: list[str] = []
 
     inventory_result = _call_put_safely(
@@ -498,6 +517,10 @@ def execute_approved_refresh_existing_unpublished_offer(
             "post_refresh_diagnostics": post_refresh_diagnostics,
             "post_refresh_diagnostics_performed": bool(post_refresh_diagnostics),
             "refusal_reasons": [],
+            "no_mutation_performed": False,
+            "no_live_mutation_performed": False,
+            "real_ebay_mutation_performed": True,
+            "mocked_mutation_performed": False,
             "next_recommended_action": "Rerun publish diagnostics. Do not publish until the partial offer refresh failure is reviewed.",
         }
 
@@ -654,6 +677,88 @@ def _live_preflight_refusals(
         refuse("preflight_payload_hash_mismatch", "Fresh preflight payload hash does not match approved payload hash.")
 
     return refusal_reasons
+
+
+def _build_live_executable_offer_payload(
+    *,
+    preview_payload: dict,
+    diagnostics: dict,
+) -> tuple[dict, list[dict]]:
+    """Convert the read-only preview offer payload into a live-safe PUT payload."""
+    payload = deepcopy(preview_payload or {})
+    refusal_reasons: list[dict] = []
+
+    def refuse(code: str, message: str) -> None:
+        if not any(reason["code"] == code for reason in refusal_reasons):
+            refusal_reasons.append({"code": code, "message": message})
+
+    live_offer = diagnostics.get("existing_offer_diagnostics") or {}
+    live_policies = _extract_listing_policy_ids(live_offer.get("listing_policies") or {})
+    configured_policies = _configured_listing_policy_ids()
+    resolved_policies = {
+        "fulfillmentPolicyId": live_policies.get("fulfillmentPolicyId") or configured_policies.get("fulfillmentPolicyId") or "",
+        "paymentPolicyId": live_policies.get("paymentPolicyId") or configured_policies.get("paymentPolicyId") or "",
+        "returnPolicyId": live_policies.get("returnPolicyId") or configured_policies.get("returnPolicyId") or "",
+    }
+    missing_policy_fields = [key for key, value in resolved_policies.items() if not _is_real_value(value)]
+    if missing_policy_fields:
+        refuse(
+            "missing_real_listing_policy_ids",
+            "Real fulfillment, payment, and return policy IDs are required before live offer refresh.",
+        )
+
+    listing_policies = deepcopy(payload.get("listingPolicies") or {})
+    listing_policies.update(resolved_policies)
+    payload["listingPolicies"] = listing_policies
+
+    merchant_location_key = str(live_offer.get("merchant_location_key") or "").strip()
+    if not _is_real_value(merchant_location_key):
+        if merchant_location_key:
+            payload["merchantLocationKey"] = merchant_location_key
+        refuse(
+            "merchant_location_key_unresolved",
+            "A real merchantLocationKey from the existing live offer is required before live offer refresh.",
+        )
+    else:
+        payload["merchantLocationKey"] = merchant_location_key
+
+    if _contains_preview_placeholder(payload):
+        refuse(
+            "placeholder_listing_policy_detected",
+            "Live offer refresh payload contains preview placeholder policy or merchant-location values.",
+        )
+
+    return payload, refusal_reasons
+
+
+def _configured_listing_policy_ids() -> dict[str, str]:
+    settings = get_settings()
+    return {
+        "fulfillmentPolicyId": str(settings.ebay_fulfillment_policy_id or "").strip(),
+        "paymentPolicyId": str(settings.ebay_payment_policy_id or "").strip(),
+        "returnPolicyId": str(settings.ebay_return_policy_id or "").strip(),
+    }
+
+
+def _extract_listing_policy_ids(policies: dict) -> dict[str, str]:
+    return {
+        "fulfillmentPolicyId": str(policies.get("fulfillmentPolicyId") or policies.get("fulfillment_policy_id") or "").strip(),
+        "paymentPolicyId": str(policies.get("paymentPolicyId") or policies.get("payment_policy_id") or "").strip(),
+        "returnPolicyId": str(policies.get("returnPolicyId") or policies.get("return_policy_id") or "").strip(),
+    }
+
+
+def _contains_preview_placeholder(value) -> bool:
+    if isinstance(value, dict):
+        return any(_contains_preview_placeholder(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_contains_preview_placeholder(item) for item in value)
+    return str(value or "").strip() in PREVIEW_PLACEHOLDER_VALUES
+
+
+def _is_real_value(value: str) -> bool:
+    stripped = str(value or "").strip()
+    return bool(stripped) and stripped not in PREVIEW_PLACEHOLDER_VALUES
 
 
 def _call_put_safely(call: Callable[[], object], *, stage: str) -> dict:
