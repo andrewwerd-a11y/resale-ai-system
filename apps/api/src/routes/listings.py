@@ -19,6 +19,7 @@ from apps.api.src.services.ebay_auth_diagnostics import get_ebay_auth_readiness
 from apps.api.src.services.publish_diagnostics import build_publish_diagnostics
 from apps.api.src.services.publish_repair import get_publish_repair_blocker
 from apps.api.src.services.publish_readiness import evaluate_publish_readiness, not_found_publish_readiness
+from apps.api.src.services.stale_offer_remediation import build_stale_offer_remediation_approval_preview
 from packages.core.src.config import get_settings
 from packages.data.src.db.sqlite import get_session
 from packages.data.src.models.item_record import ItemRecord
@@ -248,6 +249,27 @@ def get_publish_diagnostics(
     if not diagnostics.get("found"):
         raise HTTPException(status_code=404, detail=diagnostics)
     return diagnostics
+
+
+@router.get("/{sku}/stale-offer-remediation/approval-preview")
+def get_stale_offer_remediation_approval_preview(
+    sku: str,
+    allow_live_readonly: bool = False,
+    session: Session = Depends(get_session),
+):
+    try:
+        assert_route_sku_allowed(sku, "listings.stale_offer_remediation.approval_preview")
+    except E2ESafetyError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+
+    diagnostics = build_publish_diagnostics(
+        session,
+        sku,
+        allow_live_readonly=allow_live_readonly,
+    )
+    if not diagnostics.get("found"):
+        raise HTTPException(status_code=404, detail=diagnostics)
+    return build_stale_offer_remediation_approval_preview(diagnostics)
 
 
 @router.get("/{sku}/revise-readiness")

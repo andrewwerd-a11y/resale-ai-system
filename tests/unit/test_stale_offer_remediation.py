@@ -198,6 +198,28 @@ def _refusal_codes(result: dict) -> set[str]:
     return {reason["code"] for reason in result["refusal_reasons"]}
 
 
+def test_stale_offer_remediation_approval_preview_builds_template_for_eligible_diagnostics() -> None:
+    from apps.api.src.services.stale_offer_remediation import build_stale_offer_remediation_approval_preview
+
+    diagnostics = _eligible_diagnostics()
+    preview = build_stale_offer_remediation_approval_preview(diagnostics)
+
+    assert preview["eligible_for_approval_preview"] is True
+    assert preview["remediation_type"] == "refresh_existing_unpublished_offer"
+    assert preview["approval_required"] is True
+    assert preview["typed_confirmation_required"] == REQUIRED_TYPED_CONFIRMATION
+    assert preview["live_execution_enabled"] is False
+    assert preview["no_mutation_performed"] is True
+    assert preview["publish_after_remediation"] is False
+    assert preview["safe_to_execute_now"] is False
+    assert preview["payload_hash"] == build_remediation_payload_hash(diagnostics["stale_offer_remediation_draft"])
+    template = preview["required_approval_fields_template"]
+    assert template["sku"] == "BK-000008"
+    assert template["typed_confirmation"] == REQUIRED_TYPED_CONFIRMATION
+    assert template["approved_payload_hash"] == preview["payload_hash"]
+    assert preview["next_step_warning"] == "This preview does not publish, does not refresh eBay, and does not clear the repair queue."
+
+
 def test_refresh_existing_unpublished_offer_mock_executes_previewed_payloads_only() -> None:
     diagnostics = _eligible_diagnostics()
 

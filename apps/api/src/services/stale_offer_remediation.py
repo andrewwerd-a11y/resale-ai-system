@@ -20,6 +20,109 @@ class StaleOfferRemediationExecutor(Protocol):
         ...
 
 
+def build_stale_offer_remediation_approval_preview(diagnostics: dict) -> dict:
+    """Build the read-only approval template for a future stale-offer refresh."""
+    sku = str(diagnostics.get("sku") or "").strip().upper()
+    draft = diagnostics.get("stale_offer_remediation_draft") or {}
+    refusal_reasons = _eligibility_refusals(
+        sku=sku,
+        diagnostics=diagnostics,
+        draft=draft,
+        operator_approved=True,
+        remediation_type=REMEDIATION_TYPE,
+        publish_after_remediation=False,
+    )
+    if not draft:
+        refusal_reasons.append(
+            {
+                "code": "missing_remediation_draft",
+                "message": "Publish diagnostics did not include a stale-offer remediation draft.",
+            }
+        )
+    if not draft.get("intended_inventory_item_payload_preview") or not draft.get("intended_offer_payload_preview"):
+        refusal_reasons.append(
+            {
+                "code": "missing_payload_preview",
+                "message": "Remediation payload previews are required before approval can be prepared.",
+            }
+        )
+    payload_hash = build_remediation_payload_hash(draft) if draft else ""
+    if not payload_hash or payload_hash == build_remediation_payload_hash({}):
+        refusal_reasons.append(
+            {
+                "code": "payload_hash_unavailable",
+                "message": "Remediation payload hash could not be built.",
+            }
+        )
+
+    eligible = not refusal_reasons
+    approval_template = _approval_template(
+        sku=sku,
+        diagnostics=diagnostics,
+        draft=draft,
+        payload_hash=payload_hash,
+    )
+    return {
+        "sku": sku,
+        "eligible_for_approval_preview": eligible,
+        "remediation_type": REMEDIATION_TYPE,
+        "approval_required": True,
+        "typed_confirmation_required": REQUIRED_TYPED_CONFIRMATION,
+        "live_execution_enabled": False,
+        "no_mutation_performed": True,
+        "publish_after_remediation": False,
+        "safe_to_execute_now": False,
+        "reason": "" if eligible else (refusal_reasons[0]["message"] if refusal_reasons else "Not eligible for approval preview."),
+        "blockers": refusal_reasons,
+        "local_item_summary": {
+            "status": diagnostics.get("local_status") or "",
+            "category_id": diagnostics.get("local_category_id") or "",
+            "category_name": diagnostics.get("local_category_name") or "",
+            "condition_id": diagnostics.get("local_condition_id") or "",
+            "inventory_condition_enum": diagnostics.get("local_inventory_condition_enum") or "",
+            "offer_id": diagnostics.get("offer_id") or "",
+            "listing_id": diagnostics.get("listing_id") or "",
+            "planned_action": diagnostics.get("planned_action") or "",
+            "existing_offer_id_detected": bool(diagnostics.get("existing_offer_id_detected")),
+        },
+        "repair_queue_summary": {
+            "blocked_by_repair_queue": bool(diagnostics.get("blocked_by_repair_queue")),
+            "repair_plan_id": diagnostics.get("repair_plan_id") or "",
+            "latest_publish_attempt_id": diagnostics.get("latest_publish_attempt_id") or "",
+            "repair_status": diagnostics.get("repair_status") or {},
+            "retry_allowed": bool(diagnostics.get("retry_allowed")),
+            "classified_error_code": diagnostics.get("classified_error_code") or "",
+        },
+        "remediation_draft_summary": {
+            "status": draft.get("status") or "",
+            "safe_to_preview": bool(draft.get("safe_to_preview")),
+            "actionable": bool(draft.get("actionable")),
+            "safe_to_execute": bool(draft.get("safe_to_execute")),
+            "offer_id": draft.get("offer_id") or "",
+            "listing_id": draft.get("listing_id") or "",
+            "offer_status": draft.get("offer_status") or "",
+            "category_id": draft.get("category_id") or "",
+            "category_name": draft.get("category_name") or "",
+            "condition_id": draft.get("condition_id") or "",
+            "inventory_condition_enum": draft.get("inventory_condition_enum") or "",
+            "live_policy_result": draft.get("live_policy_result") or {},
+            "stale_offer_reasoning": draft.get("stale_offer_reasoning") or "",
+            "refusal_reasons": draft.get("refusal_reasons") or [],
+            "call_sequence_preview": deepcopy(draft.get("intended_call_sequence_preview") or []),
+        },
+        "payload_hash": payload_hash,
+        "required_approval_fields_template": approval_template,
+        "next_step_warning": "This preview does not publish, does not refresh eBay, and does not clear the repair queue.",
+        "live_readonly_summary": {
+            "requested": bool(diagnostics.get("live_readonly_requested")),
+            "performed": bool(diagnostics.get("live_readonly_performed")),
+            "methods_called": diagnostics.get("live_readonly_methods_called") or [],
+            "unavailable": diagnostics.get("live_readonly_unavailable") or [],
+            "errors": diagnostics.get("live_readonly_errors") or [],
+        },
+    }
+
+
 def execute_refresh_existing_unpublished_offer(
     *,
     sku: str,
@@ -305,6 +408,27 @@ def build_remediation_payload_hash(draft: dict) -> str:
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _approval_template(*, sku: str, diagnostics: dict, draft: dict, payload_hash: str) -> dict:
+    return {
+        "sku": sku,
+        "remediation_type": REMEDIATION_TYPE,
+        "repair_plan_id": draft.get("repair_plan_id") or diagnostics.get("repair_plan_id") or "",
+        "latest_publish_attempt_id": draft.get("latest_publish_attempt_id") or diagnostics.get("latest_publish_attempt_id") or "",
+        "offer_id": draft.get("offer_id") or diagnostics.get("offer_id") or "",
+        "confirm_offer_status": "UNPUBLISHED",
+        "confirm_listing_id_empty": True,
+        "confirm_category_id": str(diagnostics.get("local_category_id") or draft.get("category_id") or ""),
+        "confirm_condition_id": str(diagnostics.get("local_condition_id") or draft.get("condition_id") or ""),
+        "confirm_inventory_condition_enum": str(
+            diagnostics.get("local_inventory_condition_enum") or draft.get("inventory_condition_enum") or ""
+        ),
+        "confirm_publish_after_remediation": False,
+        "operator_approved": True,
+        "typed_confirmation": REQUIRED_TYPED_CONFIRMATION,
+        "approved_payload_hash": payload_hash,
+    }
 
 
 def _base_result(

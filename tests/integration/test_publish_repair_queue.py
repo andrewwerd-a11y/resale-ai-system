@@ -17,6 +17,7 @@ from packages.data.src.models.publish_repair_decision_record import PublishRepai
 from packages.data.src.models.publish_repair_plan_record import PublishRepairPlanRecord
 from packages.data.src.repositories.item_repo import ItemRepository
 from packages.domain.src.entities.item import Item
+from apps.api.src.services.stale_offer_remediation import build_remediation_payload_hash
 
 
 def _client() -> TestClient:
@@ -893,6 +894,276 @@ def test_stale_offer_remediation_refuses_when_repair_queue_not_blocking(monkeypa
     assert draft["status"] == "refused"
     assert "repair_queue_not_blocking" in refusal_codes
     assert "missing_latest_repair_plan" in refusal_codes
+
+
+def _eligible_approval_preview_diagnostics() -> dict:
+    inventory_payload = {
+        "condition": "USED_GOOD",
+        "product": {
+            "title": "Rand McNally Atlas",
+            "imageUrls": ["https://res.cloudinary.com/demo/image/upload/v1/BK-000008-01.jpg"],
+        },
+    }
+    offer_payload = {
+        "sku": "BK-000008",
+        "marketplaceId": "EBAY_US",
+        "format": "FIXED_PRICE",
+        "categoryId": "14056",
+    }
+    draft = {
+        "sku": "BK-000008",
+        "repair_plan_id": "repair-plan-1",
+        "latest_publish_attempt_id": "attempt-1",
+        "remediation_type": "refresh_existing_unpublished_offer",
+        "live_execution_enabled": False,
+        "operator_approval_required": True,
+        "publish_after_remediation": False,
+        "no_mutation_performed": True,
+        "actionable": False,
+        "safe_to_execute": False,
+        "status": "draft_preview_available",
+        "safe_to_preview": True,
+        "refusal_reasons": [],
+        "offer_id": "156719395011",
+        "listing_id": "",
+        "offer_status": "UNPUBLISHED",
+        "category_id": "14056",
+        "category_name": "Atlases",
+        "condition_id": "3000",
+        "inventory_condition_enum": "USED_GOOD",
+        "live_policy_result": {
+            "source": "live_readonly_metadata",
+            "read_available": True,
+            "live_policy_allows_condition": True,
+            "allowed_condition_ids": ["1000", "3000"],
+            "local_policy_status": "confirmed_by_live_readonly_metadata",
+        },
+        "stale_offer_reasoning": "Existing unpublished offer may need refresh.",
+        "intended_inventory_item_payload_preview": inventory_payload,
+        "intended_offer_payload_preview": offer_payload,
+        "intended_call_sequence_preview": [
+            {"order": 1, "method": "PUT", "endpoint": "/sell/inventory/v1/inventory_item/BK-000008", "preview_only": True},
+            {"order": 2, "method": "PUT", "endpoint": "/sell/inventory/v1/offer/156719395011", "preview_only": True},
+            {"order": 3, "method": "NONE", "endpoint": "", "preview_only": True},
+        ],
+    }
+    return {
+        "sku": "BK-000008",
+        "found": True,
+        "read_only": True,
+        "no_mutation_performed": True,
+        "live_readonly_requested": False,
+        "live_readonly_performed": False,
+        "live_readonly_methods_called": [],
+        "live_readonly_unavailable": [],
+        "live_readonly_errors": [],
+        "local_status": "export_ready",
+        "local_category_id": "14056",
+        "local_category_name": "Atlases",
+        "local_condition_id": "3000",
+        "local_inventory_condition_enum": "USED_GOOD",
+        "offer_id": "156719395011",
+        "listing_id": "",
+        "planned_action": "publish_existing_offer",
+        "existing_offer_id_detected": True,
+        "repair_plan_id": "repair-plan-1",
+        "latest_publish_attempt_id": "attempt-1",
+        "repair_status": {"status": "needs_manual_review", "blocked_by_repair_queue": True},
+        "retry_allowed": False,
+        "classified_error_code": "invalid_category_condition",
+        "blocked_by_repair_queue": True,
+        "existing_offer_diagnostics": {"status": "UNPUBLISHED", "category_id": "14056"},
+        "inventory_item_diagnostics": {"condition_enum": "USED_GOOD"},
+        "category_condition_policy_diagnostics": {
+            "live_policy_allows_condition": True,
+            "live_metadata_supports_changing_condition": False,
+        },
+        "stale_offer_remediation_draft": draft,
+    }
+
+
+def test_stale_offer_remediation_approval_preview_returns_template_for_eligible_sku(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    _seed_item(sku="BK-000008")
+    diagnostics = _eligible_approval_preview_diagnostics()
+    monkeypatch.setattr("apps.api.src.routes.listings.build_publish_diagnostics", lambda *_args, **_kwargs: diagnostics)
+
+    with _client() as client:
+        resp = client.get("/api/listings/BK-000008/stale-offer-remediation/approval-preview")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["sku"] == "BK-000008"
+    assert body["eligible_for_approval_preview"] is True
+    assert body["approval_required"] is True
+    assert body["typed_confirmation_required"] == "REFRESH UNPUBLISHED OFFER ONLY"
+    template = body["required_approval_fields_template"]
+    assert template["sku"] == "BK-000008"
+    assert template["remediation_type"] == "refresh_existing_unpublished_offer"
+    assert template["repair_plan_id"] == "repair-plan-1"
+    assert template["latest_publish_attempt_id"] == "attempt-1"
+    assert template["offer_id"] == "156719395011"
+    assert template["confirm_offer_status"] == "UNPUBLISHED"
+    assert template["confirm_listing_id_empty"] is True
+    assert template["confirm_category_id"] == "14056"
+    assert template["confirm_condition_id"] == "3000"
+    assert template["confirm_inventory_condition_enum"] == "USED_GOOD"
+    assert template["confirm_publish_after_remediation"] is False
+    assert template["operator_approved"] is True
+    assert template["typed_confirmation"] == "REFRESH UNPUBLISHED OFFER ONLY"
+
+
+def test_stale_offer_remediation_approval_preview_is_read_only(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    _seed_item(sku="BK-000008")
+    diagnostics = _eligible_approval_preview_diagnostics()
+    monkeypatch.setattr("apps.api.src.routes.listings.build_publish_diagnostics", lambda *_args, **_kwargs: diagnostics)
+
+    def fail_mutation(*_args, **_kwargs):  # pragma: no cover
+        raise AssertionError("approval preview must not mutate eBay")
+
+    monkeypatch.setattr("packages.ebay.src.inventory_client.EbayInventoryClient.publish_item", fail_mutation)
+    monkeypatch.setattr("packages.ebay.src.inventory_client.EbayInventoryClient._put", fail_mutation)
+    monkeypatch.setattr("packages.ebay.src.inventory_client.EbayInventoryClient._post", fail_mutation)
+
+    with _client() as client:
+        resp = client.get("/api/listings/BK-000008/stale-offer-remediation/approval-preview")
+
+    assert resp.status_code == 200
+    assert resp.json()["no_mutation_performed"] is True
+
+
+def test_stale_offer_remediation_approval_preview_returns_payload_hash(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    _seed_item(sku="BK-000008")
+    diagnostics = _eligible_approval_preview_diagnostics()
+    expected_hash = build_remediation_payload_hash(diagnostics["stale_offer_remediation_draft"])
+    monkeypatch.setattr("apps.api.src.routes.listings.build_publish_diagnostics", lambda *_args, **_kwargs: diagnostics)
+
+    with _client() as client:
+        resp = client.get("/api/listings/BK-000008/stale-offer-remediation/approval-preview")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["payload_hash"] == expected_hash
+    assert body["required_approval_fields_template"]["approved_payload_hash"] == expected_hash
+
+
+def test_stale_offer_remediation_approval_preview_requires_typed_confirmation_template(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    _seed_item(sku="BK-000008")
+    monkeypatch.setattr("apps.api.src.routes.listings.build_publish_diagnostics", lambda *_args, **_kwargs: _eligible_approval_preview_diagnostics())
+
+    with _client() as client:
+        resp = client.get("/api/listings/BK-000008/stale-offer-remediation/approval-preview")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["typed_confirmation_required"] == "REFRESH UNPUBLISHED OFFER ONLY"
+    assert body["required_approval_fields_template"]["typed_confirmation"] == "REFRESH UNPUBLISHED OFFER ONLY"
+
+
+def test_stale_offer_remediation_approval_preview_does_not_enable_live_execution(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    _seed_item(sku="BK-000008")
+    monkeypatch.setattr("apps.api.src.routes.listings.build_publish_diagnostics", lambda *_args, **_kwargs: _eligible_approval_preview_diagnostics())
+
+    with _client() as client:
+        resp = client.get("/api/listings/BK-000008/stale-offer-remediation/approval-preview")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["live_execution_enabled"] is False
+    assert body["safe_to_execute_now"] is False
+    assert body["publish_after_remediation"] is False
+
+
+def test_stale_offer_remediation_approval_preview_does_not_publish_or_mutate(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    _seed_item(sku="BK-000008")
+    monkeypatch.setattr("apps.api.src.routes.listings.build_publish_diagnostics", lambda *_args, **_kwargs: _eligible_approval_preview_diagnostics())
+
+    with _client() as client:
+        resp = client.get("/api/listings/BK-000008/stale-offer-remediation/approval-preview")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["next_step_warning"] == "This preview does not publish, does not refresh eBay, and does not clear the repair queue."
+    assert body["remediation_draft_summary"]["call_sequence_preview"][2]["method"] == "NONE"
+
+
+def test_stale_offer_remediation_approval_preview_blocks_missing_offer_id(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    _seed_item(sku="BK-000008")
+    diagnostics = _eligible_approval_preview_diagnostics()
+    diagnostics["offer_id"] = ""
+    diagnostics["stale_offer_remediation_draft"]["offer_id"] = ""
+    monkeypatch.setattr("apps.api.src.routes.listings.build_publish_diagnostics", lambda *_args, **_kwargs: diagnostics)
+
+    with _client() as client:
+        resp = client.get("/api/listings/BK-000008/stale-offer-remediation/approval-preview")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["eligible_for_approval_preview"] is False
+    assert "missing_offer_id" in {reason["code"] for reason in body["blockers"]}
+
+
+def test_stale_offer_remediation_approval_preview_blocks_listing_id_present(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    _seed_item(sku="BK-000008")
+    diagnostics = _eligible_approval_preview_diagnostics()
+    diagnostics["listing_id"] = "987654321012"
+    diagnostics["stale_offer_remediation_draft"]["listing_id"] = "987654321012"
+    monkeypatch.setattr("apps.api.src.routes.listings.build_publish_diagnostics", lambda *_args, **_kwargs: diagnostics)
+
+    with _client() as client:
+        resp = client.get("/api/listings/BK-000008/stale-offer-remediation/approval-preview")
+
+    assert resp.status_code == 200
+    assert "listing_id_present" in {reason["code"] for reason in resp.json()["blockers"]}
+
+
+def test_stale_offer_remediation_approval_preview_blocks_when_repair_queue_not_blocking(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    _seed_item(sku="BK-000008")
+    diagnostics = _eligible_approval_preview_diagnostics()
+    diagnostics["blocked_by_repair_queue"] = False
+    monkeypatch.setattr("apps.api.src.routes.listings.build_publish_diagnostics", lambda *_args, **_kwargs: diagnostics)
+
+    with _client() as client:
+        resp = client.get("/api/listings/BK-000008/stale-offer-remediation/approval-preview")
+
+    assert resp.status_code == 200
+    assert "repair_queue_not_blocking" in {reason["code"] for reason in resp.json()["blockers"]}
+
+
+def test_stale_offer_remediation_approval_preview_surfaces_non_previewable_draft(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    _seed_item(sku="BK-000008")
+    diagnostics = _eligible_approval_preview_diagnostics()
+    diagnostics["stale_offer_remediation_draft"]["status"] = "refused"
+    diagnostics["stale_offer_remediation_draft"]["safe_to_preview"] = False
+    monkeypatch.setattr("apps.api.src.routes.listings.build_publish_diagnostics", lambda *_args, **_kwargs: diagnostics)
+
+    with _client() as client:
+        resp = client.get("/api/listings/BK-000008/stale-offer-remediation/approval-preview")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["eligible_for_approval_preview"] is False
+    assert "draft_not_previewable" in {reason["code"] for reason in body["blockers"]}
+
+
+def test_stale_offer_remediation_approval_preview_respects_route_guard(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    monkeypatch.setenv("APPROVED_E2E_SKUS", "BK-000008")
+    _seed_item(sku="BK-000009")
+
+    with _client() as client:
+        resp = client.get("/api/listings/BK-000009/stale-offer-remediation/approval-preview")
+
+    assert resp.status_code == 403
 
 
 def test_publish_diagnostics_live_readonly_skips_reads_when_auth_unavailable(monkeypatch, tmp_path):
