@@ -147,6 +147,7 @@ def record_success(
     ebay_mutation_succeeded: bool = False,
     external_service: str | None = None,
     stage: str | None = None,
+    related_files_services: list[str] | None = None,
     result_context: dict | None = None,
     request_context: dict | None = None,
 ) -> OperationDiagnosticEventRecord:
@@ -165,6 +166,7 @@ def record_success(
         ebay_mutation_succeeded=ebay_mutation_succeeded,
         external_service=external_service,
         stage=stage,
+        related_files_services=related_files_services,
         request_context=request_context,
         result_context=result_context,
     )
@@ -191,6 +193,7 @@ def record_failure(
     raw_error_summary: str | None = None,
     raw_error_payload: Any = None,
     recommended_next_action: str | None = None,
+    related_files_services: list[str] | None = None,
     request_context: dict | None = None,
     result_context: dict | None = None,
 ) -> OperationDiagnosticEventRecord:
@@ -214,6 +217,7 @@ def record_failure(
         raw_error_summary=raw_error_summary,
         raw_error_payload=raw_error_payload,
         recommended_next_action=recommended_next_action,
+        related_files_services=related_files_services,
         request_context=request_context,
         result_context=result_context,
     )
