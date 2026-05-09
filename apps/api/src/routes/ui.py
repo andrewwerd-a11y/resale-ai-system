@@ -50,6 +50,11 @@ async def reports_page():
     return HTMLResponse(_reports_html())
 
 
+@router.get("/diagnostics", response_class=HTMLResponse)
+async def diagnostics_page():
+    return HTMLResponse(_diagnostics_html())
+
+
 @router.get("/sourcing", response_class=HTMLResponse)
 async def sourcing_page():
     return HTMLResponse(_sourcing_html())
@@ -75,6 +80,7 @@ def _nav(active: str) -> str:
         ("Listings", "/listings", "listings"),
         ("Lots", "/lots", "lots"),
         ("Reports", "/reports", "reports"),
+        ("Diagnostics", "/diagnostics", "diagnostics"),
         ("Sourcing", "/sourcing", "sourcing"),
         ("Capture", "/capture", "capture"),
         ("Export", "/export", "export"),
@@ -3567,3 +3573,653 @@ document.addEventListener('keydown', function(e) {{
 init();
 </script>
 </body></html>"""
+
+
+def _diagnostics_html() -> str:
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Diagnostic Cockpit v1 - Resale AI System</title>
+{_base_style()}
+<style>
+.cockpit-grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(320px,1fr)); gap:18px; }}
+.panel {{ background:#181816; border:1px solid #2c2c2a; border-radius:10px; padding:16px; }}
+.panel h2 {{ margin-bottom:10px; }}
+.panel p {{ font-size:13px; color:#b4b0a6; }}
+.banner {{ background:linear-gradient(135deg,#312e08,#1f1b06); border:1px solid #655d19; border-radius:10px; padding:16px; margin-bottom:18px; }}
+.banner h2 {{ margin-bottom:8px; }}
+.banner-grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:10px; margin-top:10px; }}
+.banner-card {{ background:rgba(0,0,0,.18); border:1px solid rgba(250,199,117,.18); border-radius:8px; padding:10px; }}
+.banner-card strong {{ display:block; color:#fac775; font-size:12px; margin-bottom:4px; }}
+.controls {{ display:flex; gap:10px; flex-wrap:wrap; align-items:flex-end; margin-bottom:12px; }}
+.controls > div {{ flex:1 1 180px; min-width:180px; }}
+.controls .btn {{ margin-top:18px; }}
+.meta-row {{ display:flex; flex-wrap:wrap; gap:8px; margin:10px 0; }}
+.tag {{ display:inline-block; padding:3px 8px; border-radius:999px; font-size:11px; background:#2c2c2a; color:#d4d2c8; border:1px solid #3a3a38; }}
+.tag.ok {{ background:#12382f; color:#9fe1cb; border-color:#1b6d55; }}
+.tag.warn {{ background:#412402; color:#fac775; border-color:#6d4308; }}
+.tag.err {{ background:#501313; color:#f09595; border-color:#7f2323; }}
+.tag.info {{ background:#1e2347; color:#b7b6f8; border-color:#3c4191; }}
+.tag.mono {{ font-family:Consolas, monospace; }}
+.summary-grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(110px,1fr)); gap:10px; margin:12px 0; }}
+.summary-card {{ background:#111110; border:1px solid #2c2c2a; border-radius:8px; padding:10px; }}
+.summary-card .label {{ display:block; color:#888780; font-size:11px; margin-bottom:4px; }}
+.summary-card .value {{ display:block; color:#f1efe8; font-size:20px; }}
+.section-note {{ color:#888780; font-size:12px; margin-bottom:12px; }}
+.status-line {{ min-height:20px; font-size:12px; margin-bottom:10px; color:#888780; }}
+.status-line.ok {{ color:#9fe1cb; }}
+.status-line.err {{ color:#f09595; }}
+.text-output {{ width:100%; min-height:120px; font-family:Consolas, monospace; font-size:12px; resize:vertical; }}
+.copy-row {{ display:flex; gap:8px; align-items:center; margin:8px 0 12px; }}
+.copy-row span {{ font-size:12px; color:#888780; }}
+.data-list {{ display:flex; flex-wrap:wrap; gap:6px; }}
+.result-cards {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(320px,1fr)); gap:12px; margin-top:12px; }}
+.result-card {{ background:#111110; border:1px solid #2c2c2a; border-radius:10px; padding:14px; }}
+.result-card h3 {{ font-size:14px; color:#f1efe8; margin-bottom:8px; }}
+.result-grid {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px 12px; margin-bottom:10px; }}
+.kv .k {{ color:#888780; font-size:11px; margin-bottom:2px; }}
+.kv .v {{ color:#f1efe8; font-size:12px; word-break:break-word; }}
+.compact-list {{ display:flex; flex-wrap:wrap; gap:6px; margin:8px 0; }}
+.compact-list.empty {{ color:#888780; font-size:12px; }}
+.safety-box {{ background:#151d18; border:1px solid #235b3d; border-radius:8px; padding:10px; margin-top:10px; }}
+.safety-box.report {{ background:#171926; border-color:#3847a0; }}
+.safety-box.warn {{ background:#231e11; border-color:#7a5f14; }}
+.table-wrap {{ overflow:auto; border:1px solid #2c2c2a; border-radius:8px; }}
+.timeline {{ display:flex; flex-direction:column; gap:10px; }}
+.timeline-item {{ background:#111110; border:1px solid #2c2c2a; border-radius:8px; padding:12px; }}
+.timeline-item .top {{ display:flex; justify-content:space-between; gap:10px; margin-bottom:8px; flex-wrap:wrap; }}
+.timeline-item .when {{ color:#888780; font-size:12px; }}
+.timeline-item .msg {{ margin:0; background:#1c1c1a; }}
+.report-block {{ background:#111110; border:1px solid #2c2c2a; border-radius:10px; padding:14px; margin-top:12px; }}
+.report-grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:12px; margin-top:12px; }}
+.report-box {{ background:#181816; border:1px solid #2c2c2a; border-radius:8px; padding:10px; }}
+.report-box h3 {{ font-size:12px; margin-bottom:8px; color:#f1efe8; }}
+details {{ margin-top:8px; }}
+details summary {{ cursor:pointer; color:#afa9ec; font-size:12px; }}
+pre {{ white-space:pre-wrap; word-break:break-word; background:#0f0f0e; border:1px solid #222220; border-radius:8px; padding:10px; font-size:12px; overflow:auto; }}
+.empty {{ color:#888780; font-size:13px; padding:12px 4px; }}
+@media (max-width: 900px) {{
+  .result-grid {{ grid-template-columns:1fr; }}
+  .controls > div {{ min-width:100%; }}
+}}
+</style>
+</head>
+<body>
+{_nav("diagnostics")}
+<main>
+  <div class="banner">
+    <h2>Diagnostic Cockpit v1</h2>
+    <p>Local-only operator cockpit for current-state publish diagnostics, historical runtime outcomes, and local generated diagnostic reports.</p>
+    <div class="banner-grid">
+      <div class="banner-card"><strong>Local-only</strong><span>Runs in the local app UI and does not send reports externally.</span></div>
+      <div class="banner-card"><strong>No live eBay mutation</strong><span>This cockpit is for read-only diagnostics and local report generation only.</span></div>
+      <div class="banner-card"><strong>Readiness diagnostics</strong><span>Preflight/current-state checks for whether a SKU looks publish-safe.</span></div>
+      <div class="banner-card"><strong>Operation events</strong><span>Historical runtime outcomes recorded by the operation diagnostics ledger.</span></div>
+      <div class="banner-card"><strong>Reports</strong><span>Local generated summaries for weekly trends, sessions, SKUs, and root-cause analysis.</span></div>
+    </div>
+  </div>
+
+  <div class="cockpit-grid">
+    <section class="panel" style="grid-column:1 / -1">
+      <h2>SKU Batch Diagnostics</h2>
+      <div class="section-note">Run read-only publish diagnostics for multiple SKUs. One SKU per line or comma-separated. This does not publish and does not mutate eBay.</div>
+      <div class="controls">
+        <div style="flex:2 1 320px">
+          <label for="batch-skus">SKUs</label>
+          <textarea id="batch-skus" rows="5" placeholder="BK-000008&#10;CL-000019&#10;TO-000016">BK-000008
+CL-000019
+TO-000016</textarea>
+        </div>
+        <div>
+          <label for="allow-live-readonly">Live read-only checks</label>
+          <select id="allow-live-readonly">
+            <option value="true" selected>Allow live read-only GETs</option>
+            <option value="false">Local-only diagnostics</option>
+          </select>
+        </div>
+        <div style="flex:0 0 auto">
+          <button class="btn btn-purple" onclick="runBatchDiagnostics()">Run Read-Only Publish Diagnostics</button>
+        </div>
+      </div>
+      <div id="batch-status" class="status-line">No batch diagnostics run yet.</div>
+      <div id="batch-summary" class="summary-grid"></div>
+      <div id="batch-families" class="data-list"></div>
+      <div id="batch-safety"></div>
+      <div id="batch-results" class="result-cards"><div class="empty">No per-SKU diagnostics loaded.</div></div>
+      <div class="report-grid">
+        <div class="report-box">
+          <h3>Copyable Report Markdown</h3>
+          <div class="copy-row"><button class="btn btn-gray" onclick="copyField('batch-markdown')">Copy</button><span>Shareable local debug summary.</span></div>
+          <textarea id="batch-markdown" class="text-output" readonly placeholder="Batch diagnostics markdown will appear here."></textarea>
+        </div>
+        <div class="report-box">
+          <h3>Copyable Codex Prompt</h3>
+          <div class="copy-row"><button class="btn btn-gray" onclick="copyField('batch-prompt')">Copy</button><span>Paste into Codex/GPT for deeper analysis.</span></div>
+          <textarea id="batch-prompt" class="text-output" readonly placeholder="Batch diagnostics Codex prompt will appear here."></textarea>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Recent Operation Events</h2>
+      <div class="section-note">Historical runtime outcomes recorded by the operation diagnostics event ledger.</div>
+      <div class="controls">
+        <div><label for="events-filter-sku">SKU</label><input id="events-filter-sku" placeholder="BK-000008"></div>
+        <div><label for="events-filter-status">Status</label><input id="events-filter-status" placeholder="failed"></div>
+        <div><label for="events-filter-operation">Operation</label><input id="events-filter-operation" placeholder="ebay_publish"></div>
+        <div><label for="events-filter-family">Error family</label><input id="events-filter-family" placeholder="invalid_category_condition"></div>
+      </div>
+      <div class="controls">
+        <div style="flex:0 0 auto"><button class="btn btn-purple" onclick="loadRecentEvents()">Load Recent Events</button></div>
+      </div>
+      <div id="events-status" class="status-line">Recent events not loaded yet.</div>
+      <div id="events-safety"></div>
+      <div id="events-table" class="table-wrap"><div class="empty">No recent events loaded.</div></div>
+    </section>
+
+    <section class="panel">
+      <h2>Per-SKU Diagnostic History</h2>
+      <div class="section-note">Answer “what has happened to this SKU recently?” with a focused event timeline.</div>
+      <div class="controls">
+        <div><label for="sku-history-input">SKU</label><input id="sku-history-input" placeholder="BK-000008"></div>
+        <div style="flex:0 0 auto"><button class="btn btn-purple" onclick="loadSkuHistory()">Load SKU Events</button></div>
+      </div>
+      <div id="sku-history-status" class="status-line">SKU history not loaded yet.</div>
+      <div id="sku-history-safety"></div>
+      <div id="sku-history-results" class="timeline"><div class="empty">No SKU event history loaded.</div></div>
+    </section>
+
+    <section class="panel" style="grid-column:1 / -1">
+      <h2>Diagnostic Reports</h2>
+      <div class="section-note">Local generated summaries from the diagnostics ledger. Reports are local-only and include redaction notices.</div>
+      <div class="controls">
+        <div><label for="report-type">Report type</label>
+          <select id="report-type">
+            <option value="critical_error_report">critical_error_report</option>
+            <option value="weekly_report" selected>weekly_report</option>
+            <option value="session_report">session_report</option>
+            <option value="sku_report">sku_report</option>
+            <option value="root_cause_analysis_package">root_cause_analysis_package</option>
+          </select>
+        </div>
+        <div><label for="report-session-id">Session ID</label><input id="report-session-id" placeholder="session-1"></div>
+        <div><label for="report-sku">SKU</label><input id="report-sku" placeholder="BK-000008"></div>
+        <div><label for="report-days">Days</label><input id="report-days" type="number" min="1" max="90" value="7"></div>
+      </div>
+      <div class="controls">
+        <div style="flex:0 0 auto"><button class="btn btn-gray" onclick="loadRecentReports()">Load Recent Reports</button></div>
+        <div style="flex:0 0 auto"><button class="btn btn-purple" onclick="loadWeeklyReport()">Load Weekly Report</button></div>
+        <div style="flex:0 0 auto"><button class="btn btn-green" onclick="generateReport()">Generate Report</button></div>
+      </div>
+      <div id="reports-status" class="status-line">No report loaded yet.</div>
+      <div id="reports-safety"></div>
+      <div id="recent-reports-list" class="result-cards"><div class="empty">No recent reports loaded.</div></div>
+      <div id="report-detail" class="report-block"><div class="empty">No report detail loaded.</div></div>
+    </section>
+  </div>
+</main>
+
+<script>
+let recentEventsCache = [];
+
+function esc(value) {{
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}}
+
+function parseSkus(raw) {{
+  return Array.from(new Set(
+    String(raw || '')
+      .split(/[\\n,]+/)
+      .map(value => value.trim().toUpperCase())
+      .filter(Boolean)
+  ));
+}}
+
+function setStatus(id, message, tone) {{
+  const el = document.getElementById(id);
+  el.textContent = message;
+  el.className = 'status-line' + (tone ? ' ' + tone : '');
+}}
+
+function renderSummary(summary) {{
+  const target = document.getElementById('batch-summary');
+  if (!summary) {{
+    target.innerHTML = '';
+    return;
+  }}
+  const keys = ['total', 'found', 'missing', 'ready_for_publish_preview', 'blocked', 'warnings'];
+  target.innerHTML = keys.map(key => `
+    <div class="summary-card">
+      <span class="label">${{esc(key.replaceAll('_', ' '))}}</span>
+      <span class="value">${{esc(summary[key] ?? 0)}}</span>
+    </div>
+  `).join('');
+}}
+
+function renderTagList(values, tone) {{
+  if (!values || !values.length) return '<span class="compact-list empty">none</span>';
+  return values.map(value => `<span class="tag ${{tone || ''}} mono">${{esc(value)}}</span>`).join('');
+}}
+
+function renderFamilies(grouped) {{
+  const target = document.getElementById('batch-families');
+  const entries = Object.entries(grouped || {{}});
+  if (!entries.length) {{
+    target.innerHTML = '<span class="tag ok">No grouped blocker families</span>';
+    return;
+  }}
+  target.innerHTML = entries.map(([family, skus]) => `<span class="tag warn">${{esc(family)}}: ${{esc((skus || []).join(', '))}}</span>`).join('');
+}}
+
+function renderSafetyFlags(targetId, payload, extra = []) {{
+  const flags = [];
+  if (payload && payload.no_mutation_performed !== undefined) {{
+    flags.push(payload.no_mutation_performed ? 'No live eBay mutation performed' : 'Mutation status not confirmed');
+  }}
+  if (payload && payload.no_ebay_mutation_performed !== undefined) {{
+    flags.push(payload.no_ebay_mutation_performed ? 'No eBay mutation performed' : 'eBay mutation status not confirmed');
+  }}
+  if (payload && payload.no_external_send !== undefined) {{
+    flags.push(payload.no_external_send ? 'No external report sending' : 'External send status not confirmed');
+  }}
+  extra.forEach(value => {{ if (value) flags.push(value); }});
+  document.getElementById(targetId).innerHTML = flags.length
+    ? `<div class="safety-box${{payload && payload.no_external_send ? ' report' : ''}}">${{flags.map(value => `<div class="tag ok">${{esc(value)}}</div>`).join(' ')}}</div>`
+    : '';
+}}
+
+function formatReadinessBox(title, data) {{
+  const status = data && data.status ? data.status : 'unknown';
+  const tone = status === 'ready' ? 'ok' : (status === 'missing' || status === 'blocked' ? 'err' : 'warn');
+  const details = [];
+  Object.entries(data || {{}}).forEach(([key, value]) => {{
+    if (key === 'status' || value === '' || value === null || value === undefined) return;
+    if (Array.isArray(value)) details.push(`${{key}}: ${{value.join(', ')}}`);
+    else if (typeof value === 'object') details.push(`${{key}}: ${{JSON.stringify(value)}}`);
+    else details.push(`${{key}}: ${{value}}`);
+  }});
+  return `
+    <div class="kv">
+      <div class="k">${{esc(title)}}</div>
+      <div class="v"><span class="tag ${{tone}}">${{esc(status)}}</span></div>
+      ${{details.length ? `<div class="v" style="margin-top:4px;color:#b4b0a6">${{esc(details.slice(0, 3).join(' | '))}}</div>` : ''}}
+    </div>
+  `;
+}}
+
+function renderBatchResults(results, response) {{
+  const target = document.getElementById('batch-results');
+  if (!results || !results.length) {{
+    target.innerHTML = '<div class="empty">No per-SKU diagnostics loaded.</div>';
+    return;
+  }}
+  target.innerHTML = results.map(result => {{
+    const tone = result.ready_for_publish_preview ? 'ok' : (result.found ? 'warn' : 'err');
+    return `
+      <div class="result-card">
+        <h3>${{esc(result.sku || 'Unknown SKU')}} <span class="tag ${{tone}}">${{result.ready_for_publish_preview ? 'ready_for_publish_preview' : (result.found ? 'blocked' : 'missing')}}</span></h3>
+        <div class="result-grid">
+          <div class="kv"><div class="k">Found</div><div class="v">${{esc(String(result.found))}}</div></div>
+          <div class="kv"><div class="k">Local status</div><div class="v">${{esc(result.local_item_state || '')}}</div></div>
+          <div class="kv"><div class="k">Planned action</div><div class="v">${{esc(result.planned_action || '')}}</div></div>
+          <div class="kv"><div class="k">Category ID</div><div class="v">${{esc(result.local_category_id || '')}}</div></div>
+          <div class="kv"><div class="k">Condition ID</div><div class="v">${{esc(result.local_condition_id || '')}}</div></div>
+          <div class="kv"><div class="k">Expected inventory enum</div><div class="v">${{esc(result.expected_inventory_enum || '')}}</div></div>
+          <div class="kv"><div class="k">Root cause family</div><div class="v">${{esc(result.likely_root_cause_family || '')}}</div></div>
+          <div class="kv"><div class="k">Recommended next action</div><div class="v">${{esc(result.recommended_next_action || '')}}</div></div>
+          ${{formatReadinessBox('Image hosting readiness', result.image_hosting_readiness || {{}})}}
+          ${{formatReadinessBox('Seller policy readiness', result.seller_policy_readiness || {{}})}}
+          ${{formatReadinessBox('Merchant location readiness', result.merchant_location_readiness || {{}})}}
+        </div>
+        <div class="kv"><div class="k">Blocker codes</div><div class="compact-list">${{renderTagList(result.blocker_codes, 'err')}}</div></div>
+        <div class="kv"><div class="k">Warning codes</div><div class="compact-list">${{renderTagList(result.warning_codes, 'warn')}}</div></div>
+        <div class="kv"><div class="k">Success checks</div><div class="compact-list">${{renderTagList(result.success_checks, 'ok')}}</div></div>
+        <div class="kv"><div class="k">Related files/services</div><div class="compact-list">${{renderTagList(result.related_files_services, 'info')}}</div></div>
+        <details>
+          <summary>Safe raw details</summary>
+          <pre>${{esc(JSON.stringify(result.raw_details || {{}}, null, 2))}}</pre>
+        </details>
+        <div class="meta-row" style="margin-top:10px">
+          <span class="tag ok">${{esc(response.no_mutation_performed ? 'no_mutation_performed=true' : 'no_mutation_performed=false')}}</span>
+          <span class="tag ok">${{esc(response.no_ebay_mutation_performed ? 'no_ebay_mutation_performed=true' : 'no_ebay_mutation_performed=false')}}</span>
+        </div>
+      </div>
+    `;
+  }}).join('');
+}}
+
+async function runBatchDiagnostics() {{
+  const skus = parseSkus(document.getElementById('batch-skus').value);
+  const allowLiveReadonly = document.getElementById('allow-live-readonly').value === 'true';
+  if (!skus.length) {{
+    setStatus('batch-status', 'Enter at least one SKU before running diagnostics.', 'err');
+    return;
+  }}
+  setStatus('batch-status', 'Running read-only publish diagnostics...', '');
+  document.getElementById('batch-results').innerHTML = '<div class="empty">Loading batch diagnostics...</div>';
+  try {{
+    const resp = await fetch('/api/listings/publish-diagnostics/batch', {{
+      method: 'POST',
+      headers: {{ 'Content-Type': 'application/json' }},
+      body: JSON.stringify({{ skus, allow_live_readonly: allowLiveReadonly }}),
+    }});
+    const body = await resp.json();
+    if (!resp.ok) throw new Error(body.detail || 'Batch diagnostics failed.');
+    renderSummary(body.summary || {{}});
+    renderFamilies(body.grouped_blocker_families || {{}});
+    renderSafetyFlags('batch-safety', body, [
+      body.persistable ? 'Persistable local diagnostics response' : '',
+      body.report_type ? 'Report type: ' + body.report_type : '',
+      body.diagnostic_version ? 'Diagnostic version: ' + body.diagnostic_version : '',
+    ]);
+    renderBatchResults(body.per_sku_results || [], body);
+    document.getElementById('batch-markdown').value = body.copyable_report_markdown || '';
+    document.getElementById('batch-prompt').value = body.copyable_codex_prompt || '';
+    setStatus('batch-status', `Loaded diagnostics for ${{body.summary?.total ?? skus.length}} SKU(s).`, 'ok');
+  }} catch (error) {{
+    renderSummary(null);
+    document.getElementById('batch-families').innerHTML = '';
+    document.getElementById('batch-safety').innerHTML = '';
+    document.getElementById('batch-results').innerHTML = `<div class="empty">Diagnostics failed: ${{esc(error.message)}}</div>`;
+    setStatus('batch-status', error.message, 'err');
+  }}
+}}
+
+function eventMatchesFilters(event) {{
+  const sku = document.getElementById('events-filter-sku').value.trim().toUpperCase();
+  const status = document.getElementById('events-filter-status').value.trim().toLowerCase();
+  const operation = document.getElementById('events-filter-operation').value.trim().toLowerCase();
+  const family = document.getElementById('events-filter-family').value.trim().toLowerCase();
+  if (sku && String(event.sku || '').toUpperCase() !== sku) return false;
+  if (status && String(event.status || '').toLowerCase() !== status) return false;
+  if (operation && !String(event.operation_name || '').toLowerCase().includes(operation)) return false;
+  if (family && !String(event.error_family || '').toLowerCase().includes(family)) return false;
+  return true;
+}}
+
+function renderEvents(events, targetId) {{
+  const target = document.getElementById(targetId);
+  if (!events.length) {{
+    target.innerHTML = '<div class="empty">No events match the current filters.</div>';
+    return;
+  }}
+  target.innerHTML = `
+    <table>
+      <thead>
+        <tr>
+          <th>Created</th><th>Operation</th><th>Route</th><th>SKU</th><th>Status</th><th>Mutation</th><th>eBay Mutation</th><th>Service</th><th>Stage</th><th>Error Family</th><th>Error Code</th><th>Message</th><th>Recommended Next Action</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${{events.map(event => `
+          <tr>
+            <td>${{esc(event.created_at || '')}}</td>
+            <td>${{esc(event.operation_name || '')}}</td>
+            <td>${{esc(event.route || '')}}</td>
+            <td>${{esc(event.sku || '')}}</td>
+            <td><span class="tag ${{event.status === 'success' ? 'ok' : (event.status === 'failed' ? 'err' : 'warn')}}">${{esc(event.status || '')}}</span></td>
+            <td>${{esc(String(event.mutation_attempted))}} / ${{esc(String(event.mutation_succeeded))}}</td>
+            <td>${{esc(String(event.ebay_mutation_attempted))}} / ${{esc(String(event.ebay_mutation_succeeded))}}</td>
+            <td>${{esc(event.external_service || '')}}</td>
+            <td>${{esc(event.stage || '')}}</td>
+            <td>${{esc(event.error_family || '')}}</td>
+            <td>${{esc(event.error_code || '')}}</td>
+            <td>${{esc(event.safe_message || '')}}</td>
+            <td>${{esc(event.recommended_next_action || '')}}</td>
+          </tr>
+        `).join('')}}
+      </tbody>
+    </table>
+  `;
+}}
+
+async function loadRecentEvents() {{
+  setStatus('events-status', 'Loading recent operation events...', '');
+  document.getElementById('events-table').innerHTML = '<div class="empty">Loading recent events...</div>';
+  try {{
+    const resp = await fetch('/api/diagnostics/events/recent');
+    const body = await resp.json();
+    if (!resp.ok) throw new Error(body.detail || 'Failed to load recent events.');
+    recentEventsCache = body.events || [];
+    const filtered = recentEventsCache.filter(eventMatchesFilters);
+    renderSafetyFlags('events-safety', body);
+    renderEvents(filtered, 'events-table');
+    setStatus('events-status', `Loaded ${{filtered.length}} recent event(s).`, 'ok');
+  }} catch (error) {{
+    document.getElementById('events-safety').innerHTML = '';
+    document.getElementById('events-table').innerHTML = `<div class="empty">Recent events failed: ${{esc(error.message)}}</div>`;
+    setStatus('events-status', error.message, 'err');
+  }}
+}}
+
+async function loadSkuHistory() {{
+  const sku = document.getElementById('sku-history-input').value.trim().toUpperCase();
+  if (!sku) {{
+    setStatus('sku-history-status', 'Enter a SKU to load its event timeline.', 'err');
+    return;
+  }}
+  setStatus('sku-history-status', `Loading event history for ${{sku}}...`, '');
+  document.getElementById('sku-history-results').innerHTML = '<div class="empty">Loading SKU event history...</div>';
+  try {{
+    const resp = await fetch('/api/diagnostics/events/sku/' + encodeURIComponent(sku));
+    const body = await resp.json();
+    if (!resp.ok) throw new Error(body.detail || 'Failed to load SKU event history.');
+    renderSafetyFlags('sku-history-safety', body);
+    const events = body.events || [];
+    if (!events.length) {{
+      document.getElementById('sku-history-results').innerHTML = '<div class="empty">No events recorded for this SKU yet.</div>';
+    }} else {{
+      document.getElementById('sku-history-results').innerHTML = events.map(event => `
+        <div class="timeline-item">
+          <div class="top">
+            <div><strong>${{esc(event.operation_name || '')}}</strong> <span class="tag ${{event.status === 'success' ? 'ok' : (event.status === 'failed' ? 'err' : 'warn')}}">${{esc(event.status || '')}}</span></div>
+            <div class="when">${{esc(event.created_at || '')}}</div>
+          </div>
+          <div class="meta-row">
+            <span class="tag mono">${{esc(event.route || '')}}</span>
+            <span class="tag">${{esc(event.external_service || '')}}</span>
+            <span class="tag">${{esc(event.stage || '')}}</span>
+            <span class="tag">${{esc(event.error_family || '')}}</span>
+            <span class="tag">${{esc(event.error_code || '')}}</span>
+          </div>
+          <div class="msg">${{esc(event.safe_message || '')}}</div>
+          <div class="section-note" style="margin-top:8px">${{esc(event.recommended_next_action || '')}}</div>
+        </div>
+      `).join('');
+    }}
+    setStatus('sku-history-status', `Loaded ${{events.length}} event(s) for ${{sku}}.`, 'ok');
+  }} catch (error) {{
+    document.getElementById('sku-history-safety').innerHTML = '';
+    document.getElementById('sku-history-results').innerHTML = `<div class="empty">SKU history failed: ${{esc(error.message)}}</div>`;
+    setStatus('sku-history-status', error.message, 'err');
+  }}
+}}
+
+function renderRecentReports(reports) {{
+  const target = document.getElementById('recent-reports-list');
+  if (!reports || !reports.length) {{
+    target.innerHTML = '<div class="empty">No recent local reports found.</div>';
+    return;
+  }}
+  target.innerHTML = reports.map(report => `
+    <div class="result-card">
+      <h3>${{esc(report.report_type || report.report_id || 'report')}}</h3>
+      <div class="result-grid">
+        <div class="kv"><div class="k">Report ID</div><div class="v">${{esc(report.report_id || '')}}</div></div>
+        <div class="kv"><div class="k">Generated</div><div class="v">${{esc(report.generated_at || '')}}</div></div>
+        <div class="kv"><div class="k">Title</div><div class="v">${{esc(report.title || '')}}</div></div>
+        <div class="kv"><div class="k">JSON Path</div><div class="v">${{esc(report.json_path || '')}}</div></div>
+      </div>
+      <div class="kv"><div class="k">Severity Breakdown</div><div class="compact-list">${{renderTagList(Object.entries(report.severity_breakdown || {{}}).map(([k,v]) => `${{k}}=${{v}}`), 'info')}}</div></div>
+    </div>
+  `).join('');
+}}
+
+function renderReport(report, responseMeta) {{
+  const target = document.getElementById('report-detail');
+  if (!report) {{
+    target.innerHTML = '<div class="empty">No report detail loaded.</div>';
+    return;
+  }}
+  renderSafetyFlags('reports-safety', responseMeta || {{}}, [
+    report.no_external_send ? 'No external report sending' : '',
+    responseMeta && responseMeta.local_persistence_only ? 'Local-only report generation/persistence' : '',
+    report.redaction_notice || '',
+  ]);
+  const topFamilies = (report.top_error_families || []).map(entry => `${{entry.error_family}}=${{entry.count}}`);
+  const repeated = report.repeated_failures || [];
+  const git = report.git_context || {{}};
+  target.innerHTML = `
+    <div class="meta-row">
+      <span class="tag info">${{esc(report.report_type || '')}}</span>
+      <span class="tag info">${{esc(report.diagnostic_version || '')}}</span>
+      <span class="tag ok">${{esc(report.no_external_send ? 'local_only=true' : 'local_only=false')}}</span>
+    </div>
+    <div class="summary-grid">
+      ${{
+        Object.entries(report.summary_counts || {{}}).map(([key, value]) => `
+          <div class="summary-card">
+            <span class="label">${{esc(key.replaceAll('_', ' '))}}</span>
+            <span class="value">${{esc(value)}}</span>
+          </div>
+        `).join('')
+      }}
+    </div>
+    <div class="report-grid">
+      <div class="report-box">
+        <h3>Severity breakdown</h3>
+        <div class="compact-list">${{renderTagList(Object.entries(report.severity_breakdown || {{}}).map(([k,v]) => `${{k}}=${{v}}`), 'info')}}</div>
+      </div>
+      <div class="report-box">
+        <h3>Top error families</h3>
+        <div class="compact-list">${{renderTagList(topFamilies, 'warn')}}</div>
+      </div>
+      <div class="report-box">
+        <h3>Affected SKUs</h3>
+        <div class="compact-list">${{renderTagList(report.affected_skus || [], 'mono')}}</div>
+      </div>
+      <div class="report-box">
+        <h3>Git / commit context</h3>
+        <div class="kv"><div class="k">Commit</div><div class="v">${{esc(git.current_commit_hash || '')}}</div></div>
+        <div class="kv"><div class="k">Branch</div><div class="v">${{esc(git.branch || '')}}</div></div>
+        <div class="kv"><div class="k">Dirty tree</div><div class="v">${{esc(String(git.dirty_working_tree))}}</div></div>
+        <div class="kv"><div class="k">Latest subject</div><div class="v">${{esc(git.latest_commit_subject || '')}}</div></div>
+      </div>
+    </div>
+    <div class="report-grid">
+      <div class="report-box">
+        <h3>Repeated failures</h3>
+        ${{repeated.length ? repeated.map(entry => `<div class="kv" style="margin-bottom:8px"><div class="k">${{esc(entry.group_key)}}</div><div class="v">count=${{esc(entry.count)}}, sku_count=${{esc(entry.sku_count)}}, severity=${{esc(entry.severity)}}</div></div>`).join('') : '<div class="empty">No repeated failures detected.</div>'}}
+      </div>
+      <div class="report-box">
+        <h3>Suspected root causes</h3>
+        <div class="compact-list">${{renderTagList(report.suspected_root_causes || [], 'warn')}}</div>
+      </div>
+      <div class="report-box">
+        <h3>Recommended next actions</h3>
+        <div class="compact-list">${{renderTagList(report.recommended_next_actions || [], 'ok')}}</div>
+      </div>
+      <div class="report-box">
+        <h3>Related files/services</h3>
+        <div class="compact-list">${{renderTagList(report.related_files_services || [], 'info')}}</div>
+      </div>
+    </div>
+    <details>
+      <summary>Sanitized raw examples</summary>
+      <pre>${{esc(JSON.stringify(report.sanitized_raw_examples || [], null, 2))}}</pre>
+    </details>
+    <details>
+      <summary>Markdown</summary>
+      <div class="copy-row"><button class="btn btn-gray" onclick="copyField('report-markdown')">Copy</button><span>Copyable local report markdown.</span></div>
+      <textarea id="report-markdown" class="text-output" readonly>${{esc(report.report_markdown || '')}}</textarea>
+    </details>
+    <details>
+      <summary>Copyable Codex prompt</summary>
+      <div class="copy-row"><button class="btn btn-gray" onclick="copyField('report-prompt')">Copy</button><span>Paste into Codex for deeper root-cause analysis.</span></div>
+      <textarea id="report-prompt" class="text-output" readonly>${{esc(report.copyable_codex_prompt || '')}}</textarea>
+    </details>
+  `;
+}}
+
+async function loadRecentReports() {{
+  setStatus('reports-status', 'Loading recent local diagnostic reports...', '');
+  try {{
+    const resp = await fetch('/api/diagnostics/reports/recent');
+    const body = await resp.json();
+    if (!resp.ok) throw new Error(body.detail || 'Failed to load recent reports.');
+    renderSafetyFlags('reports-safety', body, ['Recent report index only.']);
+    renderRecentReports(body.reports || []);
+    setStatus('reports-status', `Loaded ${{(body.reports || []).length}} recent report(s).`, 'ok');
+  }} catch (error) {{
+    document.getElementById('recent-reports-list').innerHTML = `<div class="empty">Recent reports failed: ${{esc(error.message)}}</div>`;
+    setStatus('reports-status', error.message, 'err');
+  }}
+}}
+
+async function loadWeeklyReport() {{
+  setStatus('reports-status', 'Loading weekly report...', '');
+  try {{
+    const days = Number(document.getElementById('report-days').value || 7);
+    const resp = await fetch('/api/diagnostics/reports/weekly?days=' + encodeURIComponent(days));
+    const body = await resp.json();
+    if (!resp.ok) throw new Error(body.detail || 'Failed to load weekly report.');
+    renderReport(body.report, body);
+    setStatus('reports-status', `Loaded weekly report for the last ${{days}} day(s).`, 'ok');
+  }} catch (error) {{
+    setStatus('reports-status', error.message, 'err');
+    document.getElementById('report-detail').innerHTML = `<div class="empty">Weekly report failed: ${{esc(error.message)}}</div>`;
+  }}
+}}
+
+async function generateReport() {{
+  setStatus('reports-status', 'Generating local diagnostic report...', '');
+  try {{
+    const payload = {{
+      report_type: document.getElementById('report-type').value,
+      session_id: document.getElementById('report-session-id').value.trim() || null,
+      sku: document.getElementById('report-sku').value.trim().toUpperCase() || null,
+      days: Number(document.getElementById('report-days').value || 7),
+      persist: true,
+    }};
+    const resp = await fetch('/api/diagnostics/reports/generate', {{
+      method: 'POST',
+      headers: {{ 'Content-Type': 'application/json' }},
+      body: JSON.stringify(payload),
+    }});
+    const body = await resp.json();
+    if (!resp.ok) throw new Error(body.detail || 'Failed to generate diagnostic report.');
+    renderReport(body.report, body);
+    setStatus('reports-status', `Generated local ${{payload.report_type}}.`, 'ok');
+  }} catch (error) {{
+    setStatus('reports-status', error.message, 'err');
+    document.getElementById('report-detail').innerHTML = `<div class="empty">Report generation failed: ${{esc(error.message)}}</div>`;
+  }}
+}}
+
+async function copyField(id) {{
+  const el = document.getElementById(id);
+  await copyTextValue(el);
+}}
+
+async function copyTextValue(el) {{
+  if (!el) return;
+  try {{
+    await navigator.clipboard.writeText(el.value || el.textContent || '');
+    const previous = document.title;
+    document.title = 'Copied';
+    setTimeout(() => {{ document.title = previous; }}, 800);
+  }} catch (_error) {{
+    el.focus();
+    el.select();
+  }}
+}}
+</script>
+</body>
+</html>"""
