@@ -3854,6 +3854,18 @@ function formatReadinessBox(title, data) {{
   `;
 }}
 
+function formatLocalItemState(state, fallbackPlannedAction) {{
+  const itemState = state || {{}};
+  const parts = [
+    `status=${{itemState.status || ''}}`,
+    `offer_id=${{itemState.offer_id || ''}}`,
+    `listing_id=${{itemState.listing_id || ''}}`,
+    `planned_action=${{itemState.planned_action || fallbackPlannedAction || ''}}`,
+    `blocked_by_repair_queue=${{String(Boolean(itemState.blocked_by_repair_queue))}}`,
+  ];
+  return parts.map(value => `<span class="tag mono">${{esc(value)}}</span>`).join('');
+}}
+
 function renderBatchResults(results, response) {{
   const target = document.getElementById('batch-results');
   if (!results || !results.length) {{
@@ -3867,8 +3879,8 @@ function renderBatchResults(results, response) {{
         <h3>${{esc(result.sku || 'Unknown SKU')}} <span class="tag ${{tone}}">${{result.ready_for_publish_preview ? 'ready_for_publish_preview' : (result.found ? 'blocked' : 'missing')}}</span></h3>
         <div class="result-grid">
           <div class="kv"><div class="k">Found</div><div class="v">${{esc(String(result.found))}}</div></div>
-          <div class="kv"><div class="k">Local status</div><div class="v">${{esc(result.local_item_state || '')}}</div></div>
-          <div class="kv"><div class="k">Planned action</div><div class="v">${{esc(result.planned_action || '')}}</div></div>
+          <div class="kv"><div class="k">Local item state</div><div class="compact-list">${{formatLocalItemState(result.local_item_state, result.planned_action)}}</div></div>
+          <div class="kv"><div class="k">Planned action</div><div class="v">${{esc((result.local_item_state && result.local_item_state.planned_action) || result.planned_action || '')}}</div></div>
           <div class="kv"><div class="k">Category ID</div><div class="v">${{esc(result.local_category_id || '')}}</div></div>
           <div class="kv"><div class="k">Condition ID</div><div class="v">${{esc(result.local_condition_id || '')}}</div></div>
           <div class="kv"><div class="k">Expected inventory enum</div><div class="v">${{esc(result.expected_inventory_enum || '')}}</div></div>
