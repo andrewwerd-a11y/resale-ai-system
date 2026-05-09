@@ -17,6 +17,10 @@ from pydantic import BaseModel
 from sqlmodel import Session, select
 
 from apps.api.src.services.ebay_auth_diagnostics import get_ebay_auth_readiness
+from apps.api.src.services.publish_debug_diagnostics import (
+    MAX_BATCH_SKUS,
+    build_publish_debug_diagnostics_batch,
+)
 from apps.api.src.services.publish_diagnostics import build_publish_diagnostics
 from apps.api.src.services.publish_repair import get_publish_repair_blocker
 from apps.api.src.services.publish_readiness import evaluate_publish_readiness, not_found_publish_readiness
@@ -122,6 +126,11 @@ class StaleOfferPublishDecisionApprovalPayload(BaseModel):
     operator_label: str | None = None
     typed_confirmation: str
     approved_payload_hash: str
+
+
+class PublishDiagnosticsBatchPayload(BaseModel):
+    skus: list[str]
+    allow_live_readonly: bool = False
 
 
 def _repair_queue_blocked_detail(sku: str, repair_blocker: dict) -> dict:
@@ -308,6 +317,37 @@ def get_publish_preview(sku: str, session: Session = Depends(get_session)):
             "allow_live_e2e": is_live_e2e_enabled(),
         },
     }
+
+
+@router.post("/publish-diagnostics/batch")
+def post_publish_diagnostics_batch(
+    payload: PublishDiagnosticsBatchPayload,
+    session: Session = Depends(get_session),
+):
+    skus: list[str] = []
+    for sku in payload.skus or []:
+        normalized = str(sku or "").strip().upper()
+        if normalized and normalized not in skus:
+            skus.append(normalized)
+    if not skus:
+        raise HTTPException(status_code=400, detail="At least one SKU is required for batch publish diagnostics.")
+    if len(skus) > MAX_BATCH_SKUS:
+        raise HTTPException(status_code=400, detail=f"Batch publish diagnostics is limited to {MAX_BATCH_SKUS} SKUs per request.")
+
+    try:
+        guarded_skus = assert_route_skus_allowed(
+            skus,
+            "listings.publish_diagnostics.batch",
+            require_non_empty=True,
+        )
+    except E2ESafetyError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+
+    return build_publish_debug_diagnostics_batch(
+        session,
+        guarded_skus,
+        allow_live_readonly=payload.allow_live_readonly,
+    )
 
 
 @router.get("/{sku}/publish-diagnostics")
