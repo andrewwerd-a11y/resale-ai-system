@@ -22,6 +22,7 @@ from apps.api.src.services.publish_debug_diagnostics import (
     build_publish_debug_diagnostics_batch,
 )
 from apps.api.src.services.publish_diagnostics import build_publish_diagnostics
+from apps.api.src.services.operation_diagnostics import record_failure, record_success
 from apps.api.src.services.publish_repair import get_publish_repair_blocker
 from apps.api.src.services.publish_readiness import evaluate_publish_readiness, not_found_publish_readiness
 from apps.api.src.services.stale_offer_remediation import (
@@ -457,6 +458,19 @@ def execute_stale_offer_remediation_approved_refresh(
         assert_route_sku_allowed(normalized_sku, "listings.stale_offer_remediation.execute_approved_refresh")
         assert_live_e2e_allowed(normalized_sku)
     except E2ESafetyError as exc:
+        record_failure(
+            session,
+            operation_name="stale_offer_remediation_refresh",
+            route="/api/listings/{sku}/stale-offer-remediation/execute-approved-refresh",
+            sku=normalized_sku,
+            status="blocked",
+            safe_message="Stale-offer refresh blocked by live execution safety gate.",
+            external_service="local",
+            stage="safety_gate",
+            error_family="live_execution_disabled",
+            error_code="live_execution_disabled",
+            recommended_next_action="Enable the required E2E live gates only during an approved remediation window.",
+        )
         raise HTTPException(
             status_code=403,
             detail={
@@ -471,6 +485,19 @@ def execute_stale_offer_remediation_approved_refresh(
         )
 
     if not _is_stale_offer_refresh_live_enabled():
+        record_failure(
+            session,
+            operation_name="stale_offer_remediation_refresh",
+            route="/api/listings/{sku}/stale-offer-remediation/execute-approved-refresh",
+            sku=normalized_sku,
+            status="blocked",
+            safe_message="Stale-offer refresh feature flag is disabled.",
+            external_service="local",
+            stage="feature_flag",
+            error_family="live_execution_disabled",
+            error_code="missing_feature_flag",
+            recommended_next_action="Set ALLOW_EBAY_STALE_OFFER_REFRESH=true only during an approved remediation window.",
+        )
         raise HTTPException(
             status_code=403,
             detail={
@@ -502,6 +529,20 @@ def execute_stale_offer_remediation_approved_refresh(
                 }
             ],
         }
+        record_failure(
+            session,
+            operation_name="stale_offer_remediation_refresh",
+            route="/api/listings/{sku}/stale-offer-remediation/execute-approved-refresh",
+            sku=normalized_sku,
+            status="blocked",
+            safe_message="Approval typed confirmation mismatch.",
+            external_service="local",
+            stage="approval_validation",
+            error_family="approval_validation",
+            error_code="approval_typed_confirmation_mismatch",
+            recommended_next_action="Regenerate the approval packet and resubmit the exact typed confirmation.",
+            result_context=result,
+        )
         raise HTTPException(status_code=409, detail=result)
 
     diagnostics = build_publish_diagnostics(
@@ -527,9 +568,55 @@ def execute_stale_offer_remediation_approved_refresh(
     )
     status = result.get("execution_status")
     if status in {"live_execution_disabled", "blocked"}:
+        record_failure(
+            session,
+            operation_name="stale_offer_remediation_refresh",
+            route="/api/listings/{sku}/stale-offer-remediation/execute-approved-refresh",
+            sku=normalized_sku,
+            status="blocked",
+            safe_message="Approved stale-offer refresh was blocked.",
+            external_service="ebay" if result.get("live_execution_enabled") else "local",
+            stage=str(status or ""),
+            error_family="stale_offer_remediation",
+            error_code=str(result.get("code") or status or ""),
+            recommended_next_action=str(result.get("next_recommended_action") or "Review refusal reasons before retrying remediation."),
+            result_context=result,
+        )
         raise HTTPException(status_code=409, detail=result)
     if status in {"failed_before_offer_refresh", "partial_failure_offer_refresh_failed"}:
+        record_failure(
+            session,
+            operation_name="stale_offer_remediation_refresh",
+            route="/api/listings/{sku}/stale-offer-remediation/execute-approved-refresh",
+            sku=normalized_sku,
+            safe_message="Approved stale-offer refresh failed.",
+            mutation_attempted=True,
+            mutation_succeeded=False,
+            ebay_mutation_attempted=True,
+            ebay_mutation_succeeded=False,
+            external_service="ebay",
+            stage=str(status or ""),
+            error_family="stale_offer_remediation",
+            error_code=str(result.get("code") or status or ""),
+            raw_error_payload=result,
+            recommended_next_action=str(result.get("next_recommended_action") or "Review stale-offer remediation failure before retrying."),
+            result_context=result,
+        )
         raise HTTPException(status_code=502, detail=result)
+    record_success(
+        session,
+        operation_name="stale_offer_remediation_refresh",
+        route="/api/listings/{sku}/stale-offer-remediation/execute-approved-refresh",
+        sku=normalized_sku,
+        safe_message="Approved stale-offer refresh completed.",
+        mutation_attempted=True,
+        mutation_succeeded=True,
+        ebay_mutation_attempted=True,
+        ebay_mutation_succeeded=True,
+        external_service="ebay",
+        stage=str(status or "refresh_completed"),
+        result_context={"execution_status": status, "calls_performed": result.get("calls_performed") or []},
+    )
     return result
 
 
@@ -546,23 +633,38 @@ def execute_stale_offer_remediation_approved_supersede(
         raise HTTPException(status_code=403, detail=str(exc))
 
     if payload.typed_confirmation != SUPERSEDE_TYPED_CONFIRMATION:
+        detail = {
+            "code": "approval_typed_confirmation_mismatch",
+            "sku": normalized_sku,
+            "action_type": payload.action_type,
+            "execution_status": "blocked",
+            "no_publish_performed": True,
+            "no_ebay_mutation_performed": True,
+            "repair_queue_cleared": False,
+            "refusal_reasons": [
+                {
+                    "code": "approval_typed_confirmation_mismatch",
+                    "message": f"typed_confirmation must exactly equal {SUPERSEDE_TYPED_CONFIRMATION}.",
+                }
+            ],
+        }
+        record_failure(
+            session,
+            operation_name="stale_offer_remediation_supersede",
+            route="/api/listings/{sku}/stale-offer-remediation/execute-approved-supersede",
+            sku=normalized_sku,
+            status="blocked",
+            safe_message="Supersede approval typed confirmation mismatch.",
+            external_service="local",
+            stage="approval_validation",
+            error_family="approval_validation",
+            error_code="approval_typed_confirmation_mismatch",
+            recommended_next_action="Regenerate the supersede approval packet and resubmit the exact typed confirmation.",
+            result_context=detail,
+        )
         raise HTTPException(
             status_code=409,
-            detail={
-                "code": "approval_typed_confirmation_mismatch",
-                "sku": normalized_sku,
-                "action_type": payload.action_type,
-                "execution_status": "blocked",
-                "no_publish_performed": True,
-                "no_ebay_mutation_performed": True,
-                "repair_queue_cleared": False,
-                "refusal_reasons": [
-                    {
-                        "code": "approval_typed_confirmation_mismatch",
-                        "message": f"typed_confirmation must exactly equal {SUPERSEDE_TYPED_CONFIRMATION}.",
-                    }
-                ],
-            },
+            detail=detail,
         )
 
     diagnostics = build_publish_diagnostics(
@@ -581,7 +683,33 @@ def execute_stale_offer_remediation_approved_supersede(
         approval_request=payload.model_dump(),
     )
     if result.get("execution_status") == "blocked":
+        record_failure(
+            session,
+            operation_name="stale_offer_remediation_supersede",
+            route="/api/listings/{sku}/stale-offer-remediation/execute-approved-supersede",
+            sku=normalized_sku,
+            status="blocked",
+            safe_message="Stale-offer supersede was blocked.",
+            external_service="local",
+            stage="supersede_validation",
+            error_family="stale_offer_remediation",
+            error_code=str(result.get("code") or "blocked"),
+            recommended_next_action=str(result.get("next_recommended_action") or "Review refusal reasons before retrying supersede."),
+            result_context=result,
+        )
         raise HTTPException(status_code=409, detail=result)
+    record_success(
+        session,
+        operation_name="stale_offer_remediation_supersede",
+        route="/api/listings/{sku}/stale-offer-remediation/execute-approved-supersede",
+        sku=normalized_sku,
+        safe_message="Stale-offer supersede completed.",
+        mutation_attempted=True,
+        mutation_succeeded=True,
+        external_service="database",
+        stage=str(result.get("execution_status") or "supersede_completed"),
+        result_context={"execution_status": result.get("execution_status"), "repair_plan_id": result.get("repair_plan_id")},
+    )
     return result
 
 
@@ -596,6 +724,19 @@ def execute_stale_offer_remediation_approved_publish_decision(
         assert_route_sku_allowed(normalized_sku, "listings.stale_offer_remediation.execute_approved_publish_decision")
         assert_live_e2e_allowed(normalized_sku)
     except E2ESafetyError as exc:
+        record_failure(
+            session,
+            operation_name="stale_offer_publish_decision",
+            route="/api/listings/{sku}/stale-offer-remediation/execute-approved-publish-decision",
+            sku=normalized_sku,
+            status="blocked",
+            safe_message="Publish decision blocked by live execution safety gate.",
+            external_service="local",
+            stage="safety_gate",
+            error_family="live_execution_disabled",
+            error_code="live_execution_disabled",
+            recommended_next_action="Enable the required live E2E gates only during an approved publish decision window.",
+        )
         raise HTTPException(
             status_code=403,
             detail={
@@ -608,21 +749,36 @@ def execute_stale_offer_remediation_approved_publish_decision(
         )
 
     if payload.typed_confirmation != PUBLISH_DECISION_TYPED_CONFIRMATION:
+        detail = {
+            "code": "approval_typed_confirmation_mismatch",
+            "sku": normalized_sku,
+            "action_type": payload.action_type,
+            "execution_status": "blocked",
+            "no_publish_performed": True,
+            "refusal_reasons": [
+                {
+                    "code": "approval_typed_confirmation_mismatch",
+                    "message": f"typed_confirmation must exactly equal {PUBLISH_DECISION_TYPED_CONFIRMATION}.",
+                }
+            ],
+        }
+        record_failure(
+            session,
+            operation_name="stale_offer_publish_decision",
+            route="/api/listings/{sku}/stale-offer-remediation/execute-approved-publish-decision",
+            sku=normalized_sku,
+            status="blocked",
+            safe_message="Publish decision approval typed confirmation mismatch.",
+            external_service="local",
+            stage="approval_validation",
+            error_family="approval_validation",
+            error_code="approval_typed_confirmation_mismatch",
+            recommended_next_action="Regenerate the publish decision packet and resubmit the exact typed confirmation.",
+            result_context=detail,
+        )
         raise HTTPException(
             status_code=409,
-            detail={
-                "code": "approval_typed_confirmation_mismatch",
-                "sku": normalized_sku,
-                "action_type": payload.action_type,
-                "execution_status": "blocked",
-                "no_publish_performed": True,
-                "refusal_reasons": [
-                    {
-                        "code": "approval_typed_confirmation_mismatch",
-                        "message": f"typed_confirmation must exactly equal {PUBLISH_DECISION_TYPED_CONFIRMATION}.",
-                    }
-                ],
-            },
+            detail=detail,
         )
 
     diagnostics = build_publish_diagnostics(
@@ -642,9 +798,55 @@ def execute_stale_offer_remediation_approved_publish_decision(
         publisher=_build_publish_decision_executor(),
     )
     if result.get("execution_status") == "blocked":
+        record_failure(
+            session,
+            operation_name="stale_offer_publish_decision",
+            route="/api/listings/{sku}/stale-offer-remediation/execute-approved-publish-decision",
+            sku=normalized_sku,
+            status="blocked",
+            safe_message="Publish decision was blocked.",
+            external_service="local",
+            stage="publish_decision_validation",
+            error_family="stale_offer_publish_decision",
+            error_code=str(result.get("code") or "blocked"),
+            recommended_next_action=str(result.get("next_recommended_action") or "Review refusal reasons before retrying publish decision."),
+            result_context=result,
+        )
         raise HTTPException(status_code=409, detail=result)
     if result.get("execution_status") == "publish_failed":
+        record_failure(
+            session,
+            operation_name="stale_offer_publish_decision",
+            route="/api/listings/{sku}/stale-offer-remediation/execute-approved-publish-decision",
+            sku=normalized_sku,
+            safe_message="Approved publish decision failed.",
+            mutation_attempted=True,
+            mutation_succeeded=False,
+            ebay_mutation_attempted=True,
+            ebay_mutation_succeeded=False,
+            external_service="ebay",
+            stage="publish_existing_offer",
+            error_family="stale_offer_publish_decision",
+            error_code=str(result.get("code") or "publish_failed"),
+            raw_error_payload=result,
+            recommended_next_action=str(result.get("next_recommended_action") or "Review publish decision failure before retrying."),
+            result_context=result,
+        )
         raise HTTPException(status_code=502, detail=result)
+    record_success(
+        session,
+        operation_name="stale_offer_publish_decision",
+        route="/api/listings/{sku}/stale-offer-remediation/execute-approved-publish-decision",
+        sku=normalized_sku,
+        safe_message="Approved publish decision completed.",
+        mutation_attempted=True,
+        mutation_succeeded=True,
+        ebay_mutation_attempted=True,
+        ebay_mutation_succeeded=True,
+        external_service="ebay",
+        stage=str(result.get("execution_status") or "publish_completed"),
+        result_context={"execution_status": result.get("execution_status"), "offer_id": result.get("offer_id")},
+    )
     return result
 
 

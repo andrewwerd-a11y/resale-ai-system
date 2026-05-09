@@ -10,6 +10,7 @@ from pydantic import BaseModel
 from sqlmodel import Session
 
 from apps.api.src.services.claude_diagnostics import classify_claude_error, get_claude_readiness
+from apps.api.src.services.operation_diagnostics import classify_exception, record_failure, record_success
 from packages.data.src.db.sqlite import get_session
 from packages.data.src.repositories.item_repo import ItemRepository
 from packages.testing.src.e2e_guard import (
@@ -721,6 +722,19 @@ def host_existing_photos(
         repo = ItemRepository(session)
         item = repo.get_by_sku(sku)
         if not item:
+            record_failure(
+                session,
+                operation_name="photo_hosting",
+                route="/api/items/{sku}/photos/host",
+                sku=sku,
+                status="blocked",
+                safe_message=f"Item {sku} not found.",
+                external_service="local",
+                stage="local_lookup",
+                error_family="missing_local_item",
+                error_code="not_found",
+                recommended_next_action="Create or import the item before hosting photos.",
+            )
             raise HTTPException(status_code=404, detail=f"Item {sku} not found")
 
         paths = _image_paths_to_list(item.image_paths)
@@ -728,6 +742,20 @@ def host_existing_photos(
         local_photo_paths = _local_photo_paths(paths)
 
         if not local_photo_paths:
+            record_failure(
+                session,
+                operation_name="photo_hosting",
+                route="/api/items/{sku}/photos/host",
+                sku=sku,
+                status="blocked",
+                safe_message="No local photo paths are available to host.",
+                external_service="local",
+                stage="preflight_photo_paths",
+                error_family="photo_hosting",
+                error_code="no_local_photo_paths",
+                recommended_next_action="Attach local photo files or hosted photo URLs before hosting.",
+                result_context={"already_hosted": len(hosted_urls), "dry_run": dry_run},
+            )
             raise HTTPException(
                 status_code=400,
                 detail={
@@ -745,6 +773,20 @@ def host_existing_photos(
 
         uploader = PhotoUploader()
         if not uploader.is_configured():
+            record_failure(
+                session,
+                operation_name="photo_hosting",
+                route="/api/items/{sku}/photos/host",
+                sku=sku,
+                status="blocked",
+                safe_message="Cloudinary is not configured.",
+                external_service="cloudinary",
+                stage="preflight_cloudinary_config",
+                error_family="photo_hosting",
+                error_code="cloudinary_not_configured",
+                recommended_next_action="Configure Cloudinary credentials before hosting photos.",
+                result_context={"already_hosted": len(hosted_urls), "dry_run": dry_run},
+            )
             raise HTTPException(
                 status_code=503,
                 detail={
@@ -761,6 +803,21 @@ def host_existing_photos(
         local_files = [Path(p) for p in local_photo_paths]
         missing_files = [str(path) for path in local_files if not path.exists()]
         if missing_files:
+            record_failure(
+                session,
+                operation_name="photo_hosting",
+                route="/api/items/{sku}/photos/host",
+                sku=sku,
+                status="blocked",
+                safe_message="Some local photo files do not exist.",
+                external_service="local",
+                stage="preflight_local_files",
+                error_family="photo_hosting",
+                error_code="missing_local_photo_files",
+                raw_error_payload={"missing_photo_files": missing_files},
+                recommended_next_action="Restore or remove missing local photo file paths before hosting.",
+                result_context={"missing_count": len(missing_files), "dry_run": dry_run},
+            )
             raise HTTPException(
                 status_code=400,
                 detail={
@@ -776,6 +833,18 @@ def host_existing_photos(
             )
 
         if dry_run:
+            record_success(
+                session,
+                operation_name="photo_hosting",
+                route="/api/items/{sku}/photos/host",
+                sku=sku,
+                safe_message="Photo hosting dry run completed.",
+                external_service="local",
+                stage="dry_run",
+                mutation_attempted=False,
+                mutation_succeeded=False,
+                result_context={"would_upload": len(local_files) if not hosted_urls else 0, "already_hosted": len(hosted_urls)},
+            )
             return {
                 "sku": sku,
                 "uploaded": 0,
@@ -791,6 +860,18 @@ def host_existing_photos(
             if deduped_urls != hosted_urls:
                 item.image_paths = local_photo_paths + deduped_urls
                 repo.upsert(item)
+            record_success(
+                session,
+                operation_name="photo_hosting",
+                route="/api/items/{sku}/photos/host",
+                sku=sku,
+                safe_message="Photos were already hosted.",
+                external_service="local",
+                stage="already_hosted",
+                mutation_attempted=deduped_urls != hosted_urls,
+                mutation_succeeded=deduped_urls != hosted_urls,
+                result_context={"already_hosted": len(deduped_urls), "deduped": deduped_urls != hosted_urls},
+            )
             return {
                 "sku": sku,
                 "uploaded": 0,
@@ -804,6 +885,23 @@ def host_existing_photos(
         for photo_path in local_files:
             result = uploader.upload(photo_path)
             if not result.ok or not result.value:
+                record_failure(
+                    session,
+                    operation_name="photo_hosting",
+                    route="/api/items/{sku}/photos/host",
+                    sku=sku,
+                    safe_message=result.error or "Photo hosting failed.",
+                    mutation_attempted=True,
+                    mutation_succeeded=False,
+                    external_service="cloudinary",
+                    stage="cloudinary_upload",
+                    error_family="photo_hosting",
+                    error_code=result.error_code or "PHOTO_HOSTING_FAILED",
+                    raw_error_summary=result.error or "Photo hosting failed.",
+                    raw_error_payload={"error": result.error, "error_code": result.error_code},
+                    recommended_next_action="Verify Cloudinary credentials and retry photo hosting.",
+                    result_context={"uploaded_before_failure": len(uploaded_urls)},
+                )
                 raise HTTPException(
                     status_code=502,
                     detail={
@@ -822,6 +920,18 @@ def host_existing_photos(
         merged_paths = _dedupe_preserve_order(local_photo_paths + uploaded_urls)
         item.image_paths = merged_paths
         repo.upsert(item)
+        record_success(
+            session,
+            operation_name="photo_hosting",
+            route="/api/items/{sku}/photos/host",
+            sku=sku,
+            safe_message="Photo hosting succeeded.",
+            mutation_attempted=True,
+            mutation_succeeded=True,
+            external_service="cloudinary",
+            stage="cloudinary_upload",
+            result_context={"uploaded": len(uploaded_urls), "hosted_count": len(_hosted_photo_urls(merged_paths))},
+        )
 
         return {
             "sku": sku,
@@ -836,6 +946,23 @@ def host_existing_photos(
     except HTTPException:
         raise
     except Exception as exc:
+        classification = classify_exception(exc)
+        record_failure(
+            session,
+            operation_name="photo_hosting",
+            route="/api/items/{sku}/photos/host",
+            sku=sku,
+            safe_message=classification["safe_message"],
+            mutation_attempted=True,
+            mutation_succeeded=False,
+            external_service=classification["external_service"],
+            stage="unexpected_exception",
+            error_family=classification["error_family"],
+            error_code=classification["error_code"],
+            raw_error_summary=classification["raw_error_summary"],
+            raw_error_payload=classification,
+            recommended_next_action=classification["recommended_next_action"],
+        )
         return JSONResponse(status_code=500, content={"detail": str(exc)})
 
 

@@ -20,7 +20,7 @@ from packages.core.src.config import get_settings
 from packages.data.src.db.sqlite import init_db, migrate_add_columns
 from apps.api.src.routes import (
     items, review, export, health, ui, ebay,
-    reports, sourcing, capture, sync, settings, lots, listings,
+    reports, sourcing, capture, sync, settings, lots, listings, diagnostics,
 )
 
 logger = logging.getLogger(__name__)
@@ -108,6 +108,7 @@ app.include_router(sync.router, prefix="/api/sync", tags=["sync"])
 app.include_router(settings.router, prefix="/api/settings", tags=["settings"])
 app.include_router(lots.router, prefix="/api/lots", tags=["lots"])
 app.include_router(listings.router, prefix="/api/listings", tags=["listings"])
+app.include_router(diagnostics.router, prefix="/api/diagnostics", tags=["diagnostics"])
 app.include_router(ui.router, tags=["ui"])
 
 

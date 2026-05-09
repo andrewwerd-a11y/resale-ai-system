@@ -12,6 +12,12 @@ from packages.core.src.constants import ItemStatus
 from packages.data.src.db.sqlite import get_session
 from packages.data.src.repositories.item_repo import ItemRepository
 from apps.api.src.services.ebay_auth_diagnostics import classify_ebay_auth_failure, get_ebay_auth_readiness
+from apps.api.src.services.operation_diagnostics import (
+    classify_exception,
+    classify_ebay_error_payload,
+    record_failure,
+    record_success,
+)
 from apps.api.src.services.publish_compatibility import evaluate_publish_compatibility
 from apps.api.src.services.publish_readiness import evaluate_publish_readiness
 from apps.api.src.services.publish_repair import (
@@ -289,7 +295,9 @@ def publish_batch(
 ):
     from packages.ebay.src.inventory_client import EbayInventoryClient
     import datetime
+    import uuid
     selected = parse_sku_list(skus)
+    batch_id = f"publish-batch-{uuid.uuid4().hex[:12]}"
     if is_route_guard_enabled():
         try:
             selected = assert_route_skus_allowed(selected, "ebay.publish_batch", require_non_empty=True)
@@ -304,12 +312,40 @@ def publish_batch(
         allowed = set(selected)
         items = [item for item in items if (item.sku or "").upper() in allowed]
     if not items:
+        record_success(
+            session,
+            operation_name="ebay_publish_batch",
+            route="/api/ebay/publish/batch",
+            batch_id=batch_id,
+            safe_message="No items were ready to publish.",
+            mutation_attempted=False,
+            mutation_succeeded=False,
+            ebay_mutation_attempted=False,
+            ebay_mutation_succeeded=False,
+            external_service="local",
+            result_context={"selected_skus": selected, "count": 0},
+        )
         return {"message": "No items ready to publish", "count": 0}
     client = EbayInventoryClient()
     results = {"published": 0, "failed": 0, "skipped": 0, "errors": [], "skipped_skus": []}
     for item in items:
         repair_blocker = get_publish_repair_blocker(session, item.sku or "")
         if repair_blocker["blocked_by_repair_queue"]:
+            record_failure(
+                session,
+                operation_name="ebay_publish_batch_item",
+                route="/api/ebay/publish/batch",
+                sku=item.sku,
+                batch_id=batch_id,
+                status="blocked",
+                safe_message="Publish skipped because repair queue blocks retry.",
+                external_service="local",
+                stage="preflight_repair_queue",
+                error_family="publish_repair_queue",
+                error_code=repair_blocker["classified_error_code"] or "blocked_by_repair_queue",
+                recommended_next_action="Resolve or supersede the repair queue blocker before publishing.",
+                result_context={"repair_plan_id": repair_blocker["repair_plan_id"], "retry_allowed": repair_blocker["retry_allowed"]},
+            )
             results["skipped"] += 1
             results["skipped_skus"].append(
                 {
@@ -338,10 +374,48 @@ def publish_batch(
                 item.image_paths = data["photo_urls"]
             repo.upsert(item)
             _try_update_category_stats(item, sold=False)
+            record_success(
+                session,
+                operation_name="ebay_publish_batch_item",
+                route="/api/ebay/publish/batch",
+                sku=item.sku,
+                batch_id=batch_id,
+                safe_message="Batch publish item succeeded.",
+                mutation_attempted=True,
+                mutation_succeeded=True,
+                ebay_mutation_attempted=True,
+                ebay_mutation_succeeded=True,
+                external_service="ebay",
+                stage="publish_offer",
+                result_context={"listing_id": data.get("listing_id"), "offer_id": data.get("offer_id"), "photos_uploaded": len(data.get("photo_urls") or [])},
+            )
             results["published"] += 1
         else:
             results["failed"] += 1
             recovered_offer_saved = _persist_partial_publish_state(item, result, repo)
+            ebay_classification = classify_ebay_error_payload(result.details.get("body") or result.error or "")
+            stage = str(result.details.get("stage") or "")
+            ebay_attempted = bool(stage or result.error_code == "API_ERROR")
+            record_failure(
+                session,
+                operation_name="ebay_publish_batch_item",
+                route="/api/ebay/publish/batch",
+                sku=item.sku,
+                batch_id=batch_id,
+                safe_message=result.error or "Batch publish item failed.",
+                mutation_attempted=ebay_attempted,
+                mutation_succeeded=False,
+                ebay_mutation_attempted=ebay_attempted,
+                ebay_mutation_succeeded=False,
+                external_service=ebay_classification["external_service"],
+                stage=stage or "publish_item",
+                error_family=ebay_classification["error_family"],
+                error_code=ebay_classification["error_code"],
+                raw_error_summary=ebay_classification["raw_error_summary"],
+                raw_error_payload=ebay_classification["raw_error_payload"],
+                recommended_next_action=result.details.get("next_action") or ebay_classification["recommended_next_action"],
+                result_context={"recovered_offer_saved": recovered_offer_saved, "error_code": result.error_code},
+            )
             error_detail = result.error or "unknown error"
             if result.details.get("body"):
                 error_detail += f" | eBay: {result.details['body']}"
@@ -361,12 +435,53 @@ def publish_item(sku: str, session: Session = Depends(get_session)):
     repo = ItemRepository(session)
     item = repo.get_by_sku(sku)
     if not item:
+        record_failure(
+            session,
+            operation_name="ebay_publish",
+            route="/api/ebay/publish/{sku}",
+            sku=sku,
+            status="blocked",
+            safe_message=f"Item {sku} not found.",
+            external_service="local",
+            stage="local_lookup",
+            error_family="missing_local_item",
+            error_code="not_found",
+            recommended_next_action="Create or import the item before publishing.",
+        )
         raise HTTPException(status_code=404, detail=f"Item {sku} not found")
     if item.status not in (ItemStatus.APPROVED, ItemStatus.EXPORT_READY):
+        record_failure(
+            session,
+            operation_name="ebay_publish",
+            route="/api/ebay/publish/{sku}",
+            sku=sku,
+            status="blocked",
+            safe_message=f"Item must be approved. Current status: {item.status}",
+            external_service="local",
+            stage="preflight_status",
+            error_family="publish_readiness",
+            error_code="status_not_publishable",
+            recommended_next_action="Move the item to approved or export_ready before publishing.",
+            result_context={"status": item.status},
+        )
         raise HTTPException(status_code=400, detail=f"Item must be approved. Current status: {item.status}")
 
     repair_blocker = get_publish_repair_blocker(session, item.sku or sku)
     if repair_blocker["blocked_by_repair_queue"]:
+        record_failure(
+            session,
+            operation_name="ebay_publish",
+            route="/api/ebay/publish/{sku}",
+            sku=item.sku or sku,
+            status="blocked",
+            safe_message="Publish blocked by repair queue before mutation.",
+            external_service="local",
+            stage="preflight_repair_queue",
+            error_family="publish_repair_queue",
+            error_code=repair_blocker["classified_error_code"] or "blocked_by_repair_queue",
+            recommended_next_action="Resolve or supersede the repair queue blocker before publishing.",
+            result_context={"repair_plan_id": repair_blocker["repair_plan_id"], "retry_allowed": repair_blocker["retry_allowed"]},
+        )
         raise HTTPException(
             status_code=409,
             detail={
@@ -394,6 +509,21 @@ def publish_item(sku: str, session: Session = Depends(get_session)):
             readiness=readiness,
             compatibility=compatibility,
         )
+        record_failure(
+            session,
+            operation_name="ebay_publish",
+            route="/api/ebay/publish/{sku}",
+            sku=sku,
+            status="blocked",
+            safe_message="Publish readiness blocked before mutation.",
+            external_service="local",
+            stage="preflight_readiness",
+            error_family="publish_readiness",
+            error_code="publish_readiness_blocked",
+            raw_error_payload={"blockers": preflight_blockers},
+            recommended_next_action="Resolve publish readiness blockers before publishing.",
+            result_context={"repair_plan_ids": [plan.get("id") for plan in repair_record.get("repair_plan", [])]},
+        )
         raise HTTPException(
             status_code=400,
             detail={
@@ -417,6 +547,32 @@ def publish_item(sku: str, session: Session = Depends(get_session)):
         recovered_offer_saved = _persist_partial_publish_state(item, result, repo)
         auth_issue = result.details.get("auth_issue_code")
         body = str(result.details.get("body") or "")
+        ebay_classification = classify_ebay_error_payload(body or str(result.error or ""))
+        stage = str(result.details.get("stage") or "")
+        ebay_attempted = bool(stage or result.error_code == "API_ERROR")
+        record_failure(
+            session,
+            operation_name="ebay_publish",
+            route="/api/ebay/publish/{sku}",
+            sku=sku,
+            safe_message=result.error or "eBay publish failed.",
+            mutation_attempted=ebay_attempted,
+            mutation_succeeded=False,
+            ebay_mutation_attempted=ebay_attempted,
+            ebay_mutation_succeeded=False,
+            external_service=ebay_classification["external_service"],
+            stage=stage or "publish_item",
+            error_family=ebay_classification["error_family"],
+            error_code=ebay_classification["error_code"],
+            raw_error_summary=ebay_classification["raw_error_summary"],
+            raw_error_payload=ebay_classification["raw_error_payload"],
+            recommended_next_action=result.details.get("next_action") or ebay_classification["recommended_next_action"],
+            result_context={
+                "repair_plan_ids": [plan.get("id") for plan in repair_record.get("repair_plan", [])],
+                "recovered_offer_saved": recovered_offer_saved,
+                "result_error_code": result.error_code,
+            },
+        )
         if result.error_code == "INVALID_IMAGE_URL":
             raise HTTPException(
                 status_code=400,
@@ -506,6 +662,20 @@ def publish_item(sku: str, session: Session = Depends(get_session)):
         item.image_paths = data["photo_urls"]
     repo.upsert(item)
     _try_update_category_stats(item, sold=False)
+    record_success(
+        session,
+        operation_name="ebay_publish",
+        route="/api/ebay/publish/{sku}",
+        sku=sku,
+        safe_message="eBay publish succeeded.",
+        mutation_attempted=True,
+        mutation_succeeded=True,
+        ebay_mutation_attempted=True,
+        ebay_mutation_succeeded=True,
+        external_service="ebay",
+        stage="publish_offer",
+        result_context={"listing_id": data.get("listing_id"), "offer_id": data.get("offer_id"), "photos_uploaded": len(data.get("photo_urls") or [])},
+    )
     return {
         "sku": sku,
         "listing_id": data["listing_id"],
@@ -534,7 +704,44 @@ def sync_sold(
         raise HTTPException(status_code=400, detail="e2e_only requires explicit skus")
 
     sync = SoldSync()
-    stats = sync.reconcile(session, allowed_skus=set(selected) if selected else None)
+    try:
+        stats = sync.reconcile(session, allowed_skus=set(selected) if selected else None)
+    except Exception as exc:
+        classification = classify_exception(exc)
+        record_failure(
+            session,
+            operation_name="ebay_sync_sold",
+            route="/api/ebay/sync-sold",
+            status="failed",
+            safe_message=classification["safe_message"],
+            mutation_attempted=True,
+            mutation_succeeded=False,
+            ebay_mutation_attempted=False,
+            ebay_mutation_succeeded=False,
+            external_service=classification["external_service"],
+            stage="sync_sold",
+            error_family=classification["error_family"],
+            error_code=classification["error_code"],
+            raw_error_summary=classification["raw_error_summary"],
+            raw_error_payload=classification,
+            recommended_next_action=classification["recommended_next_action"],
+            request_context={"selected_skus": selected, "e2e_only": e2e_only},
+        )
+        raise
+    record_success(
+        session,
+        operation_name="ebay_sync_sold",
+        route="/api/ebay/sync-sold",
+        safe_message="Sold sync completed.",
+        mutation_attempted=True,
+        mutation_succeeded=True,
+        ebay_mutation_attempted=False,
+        ebay_mutation_succeeded=False,
+        external_service="database",
+        stage="sync_sold",
+        request_context={"selected_skus": selected, "e2e_only": e2e_only},
+        result_context=stats,
+    )
     return stats
 
 @router.post("/mark-sold/{sku}")
