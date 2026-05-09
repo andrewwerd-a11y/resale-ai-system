@@ -14,6 +14,8 @@ import logging
 import re
 from pathlib import Path
 
+from packages.ebay.src.condition_mapping import CONDITION_ID_TO_ENUM, condition_id_to_inventory_enum
+
 CATEGORY_MAP = {
     "books":        "29223",   # Books > Antiquarian & Collectible
     "clothing":     "11450",   # Clothing, Shoes & Accessories > Women > Clothing
@@ -22,17 +24,7 @@ CATEGORY_MAP = {
     "toys":         "19009",   # Toys & Hobbies > Dolls & Bears
 }
 
-CONDITION_MAP = {
-    "1000": "NEW",
-    "1500": "NEW_OTHER",
-    "2000": "NEW_WITH_DEFECTS",
-    "2500": "NEW_OTHER",
-    "3000": "USED_GOOD",
-    "4000": "VERY_GOOD",
-    "5000": "USED_GOOD",
-    "6000": "USED_ACCEPTABLE",
-    "7000": "FOR_PARTS_OR_NOT_WORKING",
-}
+CONDITION_MAP = CONDITION_ID_TO_ENUM
 
 from packages.core.src.result import Result
 from packages.domain.src.entities.item import Item
@@ -679,7 +671,7 @@ class EbayInventoryClient:
     def _resolve_inventory_condition(item: Item) -> str:
         raw = str(item.condition_id or "5000")
         digits_only = re.sub(r"[^0-9]", "", raw)[:4]
-        return CONDITION_MAP.get(digits_only, "USED_GOOD")
+        return condition_id_to_inventory_enum(digits_only, default="USED_GOOD")
 
     def _collect_item_specifics(self, item: Item, template=None) -> dict[str, list[str]]:
         """

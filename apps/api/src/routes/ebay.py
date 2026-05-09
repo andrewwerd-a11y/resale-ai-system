@@ -26,6 +26,7 @@ from apps.api.src.services.publish_repair import (
     recheck_repair_readiness,
 )
 from packages.ebay.src.auth import EbayAuth
+from packages.ebay.src.condition_mapping import condition_id_to_inventory_enum
 from packages.ebay.src import http_client as ebay_http
 from packages.ebay.src.photo_uploader import PhotoUploader
 from packages.testing.src.e2e_guard import (
@@ -618,15 +619,9 @@ def update_listing(sku: str, updates: dict, session: Session = Depends(get_sessi
 
     # Build minimal inventory item payload with updated fields
     import re
-    CONDITION_MAP = {
-        "1000": "NEW", "1500": "NEW_OTHER", "2000": "NEW_WITH_DEFECTS",
-        "2500": "NEW_OTHER", "3000": "USED_GOOD", "4000": "VERY_GOOD",
-        "5000": "USED_GOOD", "6000": "USED_ACCEPTABLE",
-        "7000": "FOR_PARTS_OR_NOT_WORKING",
-    }
     raw_cond = str(item.condition_id or "5000")
     digits_only = re.sub(r"[^0-9]", "", raw_cond)[:4]
-    condition = CONDITION_MAP.get(digits_only, "USED_GOOD")
+    condition = condition_id_to_inventory_enum(digits_only, default="USED_GOOD")
 
     aspects: dict = {}
     if isinstance(item.item_specifics, dict):

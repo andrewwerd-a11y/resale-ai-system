@@ -7,6 +7,12 @@ from sqlmodel import Session
 from apps.api.src.services.publish_compatibility import get_category_condition_policy
 from apps.api.src.services.publish_repair import get_publish_repair_blocker
 from packages.data.src.repositories.item_repo import ItemRepository
+from packages.ebay.src.condition_mapping import (
+    condition_id_to_inventory_enum,
+    inventory_enum_to_condition_id,
+    normalize_inventory_enum,
+    validate_condition_id_enum_pair,
+)
 from packages.ebay.src.inventory_client import EbayInventoryClient
 
 _READONLY_METHODS = {
@@ -111,6 +117,13 @@ def build_publish_diagnostics(
             or category_policy_diagnostics.get("live_policy_allows_condition") is False
         )
 
+    condition_mapping_diagnostics = _condition_mapping_diagnostics(
+        condition_id=condition_id,
+        local_inventory_condition_enum=inventory_condition_enum,
+        live_inventory_condition_enum=str(inventory_diagnostics.get("condition_enum") or ""),
+        allowed_condition_ids=category_policy_diagnostics.get("allowed_condition_ids") or [],
+    )
+
     if repair_blocker.get("blocked_by_repair_queue"):
         recommended_next_action = (
             "Do not retry publish. Use read-only diagnostics to decide whether the existing offer is stale or category policy is wrong."
@@ -173,6 +186,7 @@ def build_publish_diagnostics(
         "existing_offer_diagnostics": offer_diagnostics,
         "inventory_item_diagnostics": inventory_diagnostics,
         "category_condition_policy_diagnostics": category_policy_diagnostics,
+        "condition_mapping_diagnostics": condition_mapping_diagnostics,
         "stale_offer_remediation_draft": stale_offer_remediation_draft,
         "repair_queue_blocker": repair_blocker,
     }
@@ -218,10 +232,19 @@ def build_stale_offer_remediation_draft(
         refuse("repair_queue_not_blocking", "Latest repair queue state does not currently block publish.")
     if not repair_blocker.get("repair_plan_id"):
         refuse("missing_latest_repair_plan", "Latest repair plan is missing.")
+    expected_inventory_enum = condition_id_to_inventory_enum(condition_id, default="")
     if condition_id != "3000":
-        refuse("condition_id_not_supported_for_draft", "This mock-only draft is limited to condition_id 3000 / USED_GOOD.")
-    if inventory_condition_enum != "USED_GOOD":
-        refuse("local_inventory_condition_not_used_good", "Local inventory condition enum is not USED_GOOD.")
+        refuse("condition_id_not_supported_for_draft", "This mock-only draft is limited to condition_id 3000 / USED_EXCELLENT.")
+    if inventory_condition_enum != expected_inventory_enum:
+        refuse(
+            "condition_id_enum_mapping_mismatch",
+            f"Local inventory condition enum must match condition_id {condition_id} -> {expected_inventory_enum}.",
+        )
+    if inventory_condition and inventory_condition != expected_inventory_enum:
+        refuse(
+            "condition_id_enum_mapping_mismatch",
+            f"Live/mock inventory condition must match condition_id {condition_id} -> {expected_inventory_enum}.",
+        )
     if policy_allows_condition is not True:
         refuse("live_policy_does_not_allow_condition", "Live/mock category policy does not confirm the current condition.")
     if inventory_condition and inventory_condition != inventory_condition_enum:
@@ -612,6 +635,74 @@ def _merge_live_policy_diagnostics(local: dict, live: dict, *, condition_id: str
             merged["local_policy_status"] = "suspect_or_stale"
             merged["rejected_condition_id"] = condition_id
     return merged
+
+
+def _condition_mapping_diagnostics(
+    *,
+    condition_id: str,
+    local_inventory_condition_enum: str,
+    live_inventory_condition_enum: str,
+    allowed_condition_ids: list[str],
+) -> dict:
+    expected_inventory_enum = condition_id_to_inventory_enum(condition_id, default="")
+    normalized_local_inventory_enum = normalize_inventory_enum(local_inventory_condition_enum)
+    normalized_live_inventory_enum = normalize_inventory_enum(live_inventory_condition_enum)
+    live_inventory_condition_id = inventory_enum_to_condition_id(normalized_live_inventory_enum, default="")
+    findings: list[dict] = []
+
+    if expected_inventory_enum and normalized_local_inventory_enum and expected_inventory_enum != normalized_local_inventory_enum:
+        findings.append(
+            {
+                "code": "local_mapping_table_out_of_date",
+                "message": (
+                    f"Local condition_id {condition_id} maps to {expected_inventory_enum}, "
+                    f"but local inventory enum is {normalized_local_inventory_enum}."
+                ),
+            }
+        )
+    if expected_inventory_enum and normalized_live_inventory_enum and not validate_condition_id_enum_pair(condition_id, normalized_live_inventory_enum):
+        findings.append(
+            {
+                "code": "condition_id_enum_mapping_mismatch",
+                "message": (
+                    f"Live inventory enum {normalized_live_inventory_enum} does not match "
+                    f"condition_id {condition_id} -> {expected_inventory_enum}."
+                ),
+            }
+        )
+    if live_inventory_condition_id and allowed_condition_ids and live_inventory_condition_id not in allowed_condition_ids:
+        findings.append(
+            {
+                "code": "live_inventory_condition_not_allowed_by_policy",
+                "message": (
+                    f"Live inventory enum {normalized_live_inventory_enum} maps to condition_id "
+                    f"{live_inventory_condition_id}, which is not allowed by the current category policy."
+                ),
+            }
+        )
+
+    return {
+        "local_condition_id": condition_id,
+        "expected_inventory_enum": expected_inventory_enum,
+        "local_inventory_condition_enum": normalized_local_inventory_enum,
+        "live_inventory_condition_enum": normalized_live_inventory_enum,
+        "live_inventory_condition_id": live_inventory_condition_id,
+        "policy_allowed_condition_ids": [str(value) for value in allowed_condition_ids],
+        "local_condition_id_matches_local_inventory_enum": validate_condition_id_enum_pair(
+            condition_id,
+            normalized_local_inventory_enum,
+        ),
+        "local_condition_id_matches_live_inventory_enum": validate_condition_id_enum_pair(
+            condition_id,
+            normalized_live_inventory_enum,
+        ),
+        "policy_allows_live_inventory_condition_id": (
+            live_inventory_condition_id in allowed_condition_ids
+            if live_inventory_condition_id and allowed_condition_ids
+            else None
+        ),
+        "findings": findings,
+    }
 
 
 def _extract_condition_policy_conditions(payload: dict) -> list[dict]:

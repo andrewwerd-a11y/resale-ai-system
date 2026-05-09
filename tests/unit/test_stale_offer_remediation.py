@@ -129,7 +129,7 @@ class FailingPublishDecisionExecutor(FakePublishDecisionExecutor):
 
 def _eligible_diagnostics() -> dict:
     inventory_payload = {
-        "condition": "USED_GOOD",
+        "condition": "USED_EXCELLENT",
         "conditionDescription": "Cover creasing.",
         "product": {
             "title": "Rand McNally Atlas",
@@ -155,7 +155,7 @@ def _eligible_diagnostics() -> dict:
         "local_category_id": "14056",
         "local_category_name": "Atlases",
         "local_condition_id": "3000",
-        "local_inventory_condition_enum": "USED_GOOD",
+        "local_inventory_condition_enum": "USED_EXCELLENT",
         "offer_id": "156719395011",
         "listing_id": "",
         "planned_action": "publish_existing_offer",
@@ -184,7 +184,7 @@ def _eligible_diagnostics() -> dict:
             "read_available": True,
             "sku": "BK-000008",
             "inventory_item_exists": True,
-            "condition_enum": "USED_GOOD",
+            "condition_enum": "USED_EXCELLENT",
             "condition_differs_from_local": False,
         },
         "category_condition_policy_diagnostics": {
@@ -215,7 +215,7 @@ def _eligible_diagnostics() -> dict:
             "category_id": "14056",
             "category_name": "Atlases",
             "condition_id": "3000",
-            "inventory_condition_enum": "USED_GOOD",
+            "inventory_condition_enum": "USED_EXCELLENT",
             "live_policy_result": {
                 "source": "live_readonly_metadata",
                 "read_available": True,
@@ -570,7 +570,7 @@ def test_refresh_existing_unpublished_offer_mock_executes_previewed_payloads_onl
     assert result["latest_publish_attempt_id"] == "attempt-1"
     assert result["offer_id"] == "156719395011"
     assert result["offer_status"] == "UNPUBLISHED"
-    assert result["inventory_payload_preview"]["condition"] == "USED_GOOD"
+    assert result["inventory_payload_preview"]["condition"] == "USED_EXCELLENT"
     assert result["offer_payload_preview"]["categoryId"] == "14056"
     assert result["call_sequence"][0]["method"] == "PUT"
     assert result["call_sequence"][1]["endpoint"].endswith("/offer/156719395011")
@@ -817,7 +817,7 @@ def test_refresh_existing_unpublished_offer_does_not_mutate_payload_previews() -
 
     assert result["execution_status"] == "mock_executed"
     assert diagnostics == original
-    assert result["inventory_payload_preview"]["condition"] == "USED_GOOD"
+    assert result["inventory_payload_preview"]["condition"] == "USED_EXCELLENT"
     assert result["offer_payload_preview"]["categoryId"] == "14056"
 
 

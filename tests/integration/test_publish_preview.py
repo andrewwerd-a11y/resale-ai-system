@@ -207,7 +207,7 @@ def test_publish_preview_normalizes_escaped_hosted_cloudinary_urls(monkeypatch, 
     ]
 
 
-def test_publish_preview_uses_used_good_for_condition_id_3000(monkeypatch, tmp_path):
+def test_publish_preview_uses_used_excellent_for_condition_id_3000(monkeypatch, tmp_path):
     monkeypatch.delenv("E2E_ROUTE_GUARD_ENABLED", raising=False)
     monkeypatch.delenv("APPROVED_E2E_SKUS", raising=False)
     monkeypatch.setenv("EBAY_FULFILLMENT_POLICY_ID", "fulfillment-1")
@@ -229,4 +229,4 @@ def test_publish_preview_uses_used_good_for_condition_id_3000(monkeypatch, tmp_p
     assert resp.status_code == 200
     body = resp.json()
     assert body["would_publish"] is True
-    assert body["inventory_item_payload_preview"]["condition"] == "USED_GOOD"
+    assert body["inventory_item_payload_preview"]["condition"] == "USED_EXCELLENT"

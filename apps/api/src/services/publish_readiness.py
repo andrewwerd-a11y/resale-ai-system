@@ -11,7 +11,7 @@ from packages.domain.src.entities.item import Item
 from packages.ebay.src.category_intelligence import CategoryIntelligence, CategoryTemplate
 from packages.ebay.src.category_spreadsheet import CategorySpreadsheet
 from packages.ebay.src.aspect_validation import validate_aspects
-from packages.ebay.src.inventory_client import CONDITION_MAP as EBAY_CONDITION_MAP
+from packages.ebay.src.condition_mapping import CONDITION_ID_TO_ENUM, normalize_inventory_enum
 from packages.ebay.src.inventory_client import EbayInventoryClient
 from packages.ebay.src.photo_uploader import PhotoUploader
 from packages.ebay.src.public_image_urls import extract_public_image_urls
@@ -531,12 +531,9 @@ def _normalize_condition_key(value: object) -> str:
     if value is None:
         return ""
     digits = "".join(ch for ch in str(value) if ch.isdigit())[:4]
-    if digits and digits in EBAY_CONDITION_MAP:
+    if digits and digits in CONDITION_ID_TO_ENUM:
         return digits
-    text = str(value).strip().upper()
-    if text in EBAY_CONDITION_MAP:
-        return text
-    return ""
+    return normalize_inventory_enum(value)
 
 
 def _has_value(value: object) -> bool:

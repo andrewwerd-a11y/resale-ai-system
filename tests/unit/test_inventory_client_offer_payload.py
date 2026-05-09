@@ -6,6 +6,7 @@ import pytest
 
 from packages.core.src import config as core_config
 from packages.ebay.src.auth import EbayAuth
+from packages.ebay.src.condition_mapping import inventory_enum_to_condition_id, validate_condition_id_enum_pair
 from packages.domain.src.entities.item import Item
 from packages.ebay.src.inventory_client import EbayInventoryClient
 
@@ -53,20 +54,41 @@ def test_build_offer_payload_falls_back_to_location_lookup(monkeypatch: pytest.M
     assert payload["merchantLocationKey"] == "warehouse-1"
 
 
-def test_condition_id_3000_resolves_to_used_good() -> None:
+@pytest.mark.parametrize(
+    ("condition_id", "expected_enum"),
+    [
+        ("3000", "USED_EXCELLENT"),
+        ("4000", "USED_VERY_GOOD"),
+        ("5000", "USED_GOOD"),
+    ],
+)
+def test_condition_id_maps_to_expected_inventory_enum(condition_id: str, expected_enum: str) -> None:
     client = EbayInventoryClient()
     item = _build_item()
-    item.condition_id = "3000"
+    item.condition_id = condition_id
 
-    assert client._resolve_inventory_condition(item) == "USED_GOOD"
+    assert client._resolve_inventory_condition(item) == expected_enum
 
 
-def test_condition_id_3000_is_not_excellent_or_like_new_fallback() -> None:
+def test_condition_id_3000_is_used_excellent_and_not_used_good_fallback() -> None:
     from apps.api.src.services.publish_repair import CONDITION_LABEL_FALLBACKS
 
-    assert "3000" not in CONDITION_LABEL_FALLBACKS["USED_EXCELLENT"]
+    assert "3000" in CONDITION_LABEL_FALLBACKS["USED_EXCELLENT"]
     assert "3000" not in CONDITION_LABEL_FALLBACKS["LIKE_NEW"]
-    assert "3000" in CONDITION_LABEL_FALLBACKS["USED_GOOD"]
+    assert "3000" not in CONDITION_LABEL_FALLBACKS["USED_GOOD"]
+    assert "5000" in CONDITION_LABEL_FALLBACKS["USED_GOOD"]
+    assert "4000" in CONDITION_LABEL_FALLBACKS["USED_VERY_GOOD"]
+
+
+def test_inventory_enum_maps_back_to_expected_condition_id() -> None:
+    assert inventory_enum_to_condition_id("USED_EXCELLENT") == "3000"
+    assert inventory_enum_to_condition_id("USED_VERY_GOOD") == "4000"
+    assert inventory_enum_to_condition_id("USED_GOOD") == "5000"
+
+
+def test_condition_id_enum_pair_validation_accepts_used_excellent_and_rejects_used_good() -> None:
+    assert validate_condition_id_enum_pair("3000", "USED_EXCELLENT") is True
+    assert validate_condition_id_enum_pair("3000", "USED_GOOD") is False
 
 
 def test_live_readonly_methods_use_get_only(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -98,7 +120,7 @@ def test_live_readonly_methods_use_get_only(monkeypatch: pytest.MonkeyPatch) -> 
     def fake_get(url, **kwargs):
         calls.append((url, kwargs))
         if url.endswith("/inventory_item/BK-000008"):
-            return _Resp({"sku": "BK-000008", "condition": "USED_GOOD"})
+            return _Resp({"sku": "BK-000008", "condition": "USED_EXCELLENT"})
         if url.endswith("/offer/156719395011"):
             return _Resp({"offerId": "156719395011", "categoryId": "14056"})
         if "get_item_condition_policies" in url:
@@ -118,7 +140,7 @@ def test_live_readonly_methods_use_get_only(monkeypatch: pytest.MonkeyPatch) -> 
     policy = client.get_item_condition_policies("14056")
 
     assert inventory.ok
-    assert inventory.value["condition"] == "USED_GOOD"
+    assert inventory.value["condition"] == "USED_EXCELLENT"
     assert offer.ok
     assert offer.value["offerId"] == "156719395011"
     assert policy.ok

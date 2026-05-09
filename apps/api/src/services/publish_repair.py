@@ -19,7 +19,8 @@ from packages.data.src.models.publish_repair_decision_record import PublishRepai
 from packages.data.src.models.publish_repair_plan_record import PublishRepairPlanRecord
 from packages.data.src.repositories.item_repo import ItemRepository
 from packages.domain.src.entities.item import Item
-from packages.ebay.src.inventory_client import CATEGORY_MAP, CONDITION_MAP as EBAY_CONDITION_MAP
+from packages.ebay.src.condition_mapping import CONDITION_ID_TO_ENUM, normalize_inventory_enum
+from packages.ebay.src.inventory_client import CATEGORY_MAP
 from packages.ebay.src.public_image_urls import (
     extract_public_image_urls,
     looks_like_public_image_url_candidate,
@@ -39,11 +40,18 @@ ACTIVE_REPAIR_STATUSES = {
 CONDITION_ID_LABELS = {
     "1000": "New",
     "1500": "New other",
-    "2000": "New with defects",
-    "2500": "New other",
+    "1750": "New with defects",
+    "2000": "Certified Refurbished",
+    "2010": "Excellent - Refurbished",
+    "2020": "Very Good - Refurbished",
+    "2030": "Good - Refurbished",
+    "2500": "Seller Refurbished",
+    "2750": "Like New",
+    "2990": "Pre-owned - Excellent",
     "3000": "Used",
+    "3010": "Pre-owned - Fair",
     "4000": "Very Good",
-    "5000": "Used Good",
+    "5000": "Good",
     "6000": "Acceptable",
     "7000": "For parts or not working",
 }
@@ -51,13 +59,20 @@ CONDITION_ID_LABELS = {
 CONDITION_LABEL_FALLBACKS = {
     "NEW": ["1000", "1500"],
     "NEW_OTHER": ["1500", "1000"],
-    "NEW_WITH_DEFECTS": ["2000", "1500"],
-    "USED_EXCELLENT": ["4000"],
+    "NEW_WITH_DEFECTS": ["1750", "1500"],
+    "CERTIFIED_REFURBISHED": ["2000"],
+    "EXCELLENT_REFURBISHED": ["2010"],
+    "VERY_GOOD_REFURBISHED": ["2020"],
+    "GOOD_REFURBISHED": ["2030"],
+    "SELLER_REFURBISHED": ["2500"],
+    "USED_EXCELLENT": ["3000"],
     "USED_VERY_GOOD": ["4000", "3000"],
-    "LIKE_NEW": ["4000"],
+    "LIKE_NEW": ["2750"],
+    "PRE_OWNED_EXCELLENT": ["2990", "3000"],
+    "PRE_OWNED_FAIR": ["3010"],
     "VERY_GOOD": ["4000", "3000"],
-    "USED_GOOD": ["3000", "4000"],
-    "USED_ACCEPTABLE": ["6000", "5000", "3000"],
+    "USED_GOOD": ["5000", "4000"],
+    "USED_ACCEPTABLE": ["6000", "5000"],
     "FOR_PARTS_OR_NOT_WORKING": ["7000"],
 }
 
@@ -1791,10 +1806,13 @@ def _plan_for_missing_required_field(item: Item, field_name: str) -> dict | None
 
 def _infer_internal_condition_key(item: Item) -> str:
     condition_id = str(item.condition_id or "").strip()
-    if condition_id in EBAY_CONDITION_MAP:
-        return str(EBAY_CONDITION_MAP[condition_id] or "").strip().upper()
+    if condition_id in CONDITION_ID_TO_ENUM:
+        return str(CONDITION_ID_TO_ENUM[condition_id] or "").strip().upper()
 
     condition_label = str(item.condition_label or "").strip().lower()
+    normalized_label = normalize_inventory_enum(condition_label)
+    if normalized_label:
+        return normalized_label
     if "very good" in condition_label:
         return "USED_VERY_GOOD"
     if "like new" in condition_label or "excellent" in condition_label:
@@ -1867,8 +1885,8 @@ def _condition_suggested_actions(item: Item, policy_context: dict, suggestion_pa
         "If the item does not fit any allowed condition, review whether the category is wrong.",
     ]
     likely_ids = [option["id"] for option in suggestion_payload.get("likely_options") or []]
-    if _infer_internal_condition_key(item) == "USED_GOOD" and "3000" in likely_ids:
-        actions.append("Use 3000 as the safer generic Used fallback when the item does not clearly qualify for a stronger condition.")
+    if _infer_internal_condition_key(item) == "USED_GOOD" and "5000" in likely_ids:
+        actions.append("Use 5000 when the item clearly fits Good and the live category policy allows it.")
     if _infer_internal_condition_key(item) == "USED_GOOD" and "4000" in likely_ids:
         actions.append("Choose 4000 only if the item truly qualifies as Very Good.")
     if not policy_context.get("source"):

@@ -36,6 +36,7 @@ from packages.data.src.db.sqlite import get_session
 from packages.data.src.models.item_record import ItemRecord
 from packages.data.src.repositories.item_repo import ItemRepository
 from packages.ebay.src.auth import EbayAuth
+from packages.ebay.src.condition_mapping import condition_id_to_inventory_enum, normalize_inventory_enum
 from packages.ebay.src import http_client as ebay_http
 from packages.testing.src.e2e_guard import (
     E2ESafetyError,
@@ -52,15 +53,6 @@ router = APIRouter()
 _LOCATION_KEY_CACHE: dict[str, str] = {}
 _LISTINGS_SYNC_MAX_PAGES = 20
 _LISTINGS_SYNC_MAX_SECONDS = 20.0
-
-CONDITION_MAP = {
-    "NEW": "NEW", "NEW_OTHER": "NEW_OTHER", "NEW_WITH_DEFECTS": "NEW_WITH_DEFECTS",
-    "LIKE_NEW": "LIKE_NEW", "VERY_GOOD": "VERY_GOOD", "USED_GOOD": "USED_GOOD",
-    "USED_ACCEPTABLE": "USED_ACCEPTABLE", "FOR_PARTS_OR_NOT_WORKING": "FOR_PARTS_OR_NOT_WORKING",
-    "1000": "NEW", "1500": "NEW_OTHER", "2000": "NEW_WITH_DEFECTS",
-    "2500": "NEW_OTHER", "3000": "USED_GOOD", "4000": "VERY_GOOD",
-    "5000": "USED_GOOD", "6000": "USED_ACCEPTABLE", "7000": "FOR_PARTS_OR_NOT_WORKING",
-}
 
 EBAY_ERROR_HINTS = {
     25002: "Offer already exists for this SKU — the existing offer was reused automatically.",
@@ -1145,10 +1137,11 @@ def _compute_days_listed(r: ItemRecord) -> Optional[int]:
 
 def _resolve_condition(condition_id, condition_label) -> str:
     raw = str(condition_id or condition_label or "USED_GOOD")
-    if raw in CONDITION_MAP:
-        return CONDITION_MAP[raw]
+    normalized_enum = normalize_inventory_enum(raw)
+    if normalized_enum:
+        return normalized_enum
     digits = re.sub(r"[^0-9]", "", raw)[:4]
-    return CONDITION_MAP.get(digits, "USED_GOOD")
+    return condition_id_to_inventory_enum(digits, default="USED_GOOD")
 
 
 def _build_aspects(item) -> dict:

@@ -167,7 +167,7 @@ def _fail_publish_if_called(*_args, **_kwargs):
 
 def _eligible_refresh_diagnostics() -> dict:
     inventory_payload = {
-        "condition": "USED_GOOD",
+        "condition": "USED_EXCELLENT",
         "product": {
             "title": "Repair title",
             "description": "Repair description",
@@ -212,7 +212,7 @@ def _eligible_refresh_diagnostics() -> dict:
         "category_id": "14056",
         "category_name": "Atlases",
         "condition_id": "3000",
-        "inventory_condition_enum": "USED_GOOD",
+        "inventory_condition_enum": "USED_EXCELLENT",
         "live_policy_result": {
             "source": "live_readonly_metadata",
             "read_available": True,
@@ -254,7 +254,7 @@ def _eligible_refresh_diagnostics() -> dict:
         "local_category_id": "14056",
         "local_category_name": "Atlases",
         "local_condition_id": "3000",
-        "local_inventory_condition_enum": "USED_GOOD",
+        "local_inventory_condition_enum": "USED_EXCELLENT",
         "offer_id": "156719395011",
         "listing_id": "",
         "planned_action": "publish_existing_offer",
@@ -280,7 +280,7 @@ def _eligible_refresh_diagnostics() -> dict:
         "inventory_item_diagnostics": {
             "read_available": True,
             "inventory_item_exists": True,
-            "condition_enum": "USED_GOOD",
+            "condition_enum": "USED_EXCELLENT",
             "condition_differs_from_local": False,
         },
         "category_condition_policy_diagnostics": {
@@ -308,7 +308,7 @@ def _eligible_refresh_approval(diagnostics: dict) -> dict:
         "confirm_listing_id_empty": True,
         "confirm_category_id": "14056",
         "confirm_condition_id": "3000",
-        "confirm_inventory_condition_enum": "USED_GOOD",
+        "confirm_inventory_condition_enum": "USED_EXCELLENT",
         "confirm_publish_after_remediation": False,
         "operator_approved": True,
         "typed_confirmation": REQUIRED_TYPED_CONFIRMATION,
@@ -810,7 +810,7 @@ def test_publish_preview_marks_would_publish_false_when_repair_queue_blocks_retr
     assert body["retry_allowed"] is False
     assert body["classified_error_code"] == "invalid_category_condition"
     assert body["condition_id"] == "3000"
-    assert body["inventory_condition_enum"] == "USED_GOOD"
+    assert body["inventory_condition_enum"] == "USED_EXCELLENT"
     assert body["category_id"] == "14056"
     assert body["offer_id"] == "156719395011"
     assert body["existing_offer_id_detected"] is True
@@ -859,7 +859,7 @@ def test_publish_diagnostics_for_blocked_existing_offer_is_local_only(monkeypatc
     assert body["local_category_id"] == "14056"
     assert body["local_category_name"] == "Atlases"
     assert body["local_condition_id"] == "3000"
-    assert body["local_inventory_condition_enum"] == "USED_GOOD"
+    assert body["local_inventory_condition_enum"] == "USED_EXCELLENT"
     assert body["offer_id"] == "156719395011"
     assert body["listing_id"] == ""
     assert body["planned_action"] == "publish_existing_offer"
@@ -995,8 +995,16 @@ def test_publish_diagnostics_live_readonly_reads_offer_inventory_and_policy(monk
     assert inventory["source"] == "live_readonly"
     assert inventory["read_available"] is True
     assert inventory["condition_enum"] == "USED_GOOD"
-    assert inventory["condition_differs_from_local"] is False
+    assert inventory["condition_differs_from_local"] is True
     assert inventory["image_urls_are_public_hosted"] is True
+
+    mapping = body["condition_mapping_diagnostics"]
+    assert mapping["expected_inventory_enum"] == "USED_EXCELLENT"
+    assert mapping["live_inventory_condition_enum"] == "USED_GOOD"
+    assert mapping["live_inventory_condition_id"] == "5000"
+    finding_codes = {finding["code"] for finding in mapping["findings"]}
+    assert "condition_id_enum_mapping_mismatch" in finding_codes
+    assert "live_inventory_condition_not_allowed_by_policy" in finding_codes
 
     policy = body["category_condition_policy_diagnostics"]
     assert policy["source"] == "live_readonly_metadata"
@@ -1006,7 +1014,6 @@ def test_publish_diagnostics_live_readonly_reads_offer_inventory_and_policy(monk
     assert policy["allowed_condition_ids"] == ["1000", "3000"]
 
     draft = body["stale_offer_remediation_draft"]
-    assert draft["status"] == "draft_preview_available"
     assert draft["remediation_type"] == "refresh_existing_unpublished_offer"
     assert draft["live_execution_enabled"] is False
     assert draft["operator_approval_required"] is True
@@ -1019,14 +1026,15 @@ def test_publish_diagnostics_live_readonly_reads_offer_inventory_and_policy(monk
     assert draft["listing_id"] == ""
     assert draft["category_id"] == "14056"
     assert draft["condition_id"] == "3000"
-    assert draft["inventory_condition_enum"] == "USED_GOOD"
+    assert draft["inventory_condition_enum"] == "USED_EXCELLENT"
     assert draft["repair_plan_id"] == body["repair_plan_id"]
     assert draft["live_policy_result"]["live_policy_allows_condition"] is True
-    assert draft["intended_inventory_item_payload_preview"]["condition"] == "USED_GOOD"
-    assert draft["intended_offer_payload_preview"]["categoryId"] == "14056"
-    assert draft["intended_call_sequence_preview"][0]["method"] == "PUT"
-    assert draft["intended_call_sequence_preview"][1]["endpoint"].endswith("/offer/156719395011")
-    assert draft["intended_call_sequence_preview"][2]["method"] == "NONE"
+    refusal_codes = {reason["code"] for reason in draft["refusal_reasons"]}
+    assert draft["status"] == "refused"
+    assert "condition_id_enum_mapping_mismatch" in refusal_codes
+    assert "inventory_condition_differs_from_local" in refusal_codes
+    assert "intended_inventory_item_payload_preview" in draft
+    assert draft["intended_inventory_item_payload_preview"] == {}
 
 
 def test_publish_diagnostics_live_readonly_surfaces_inventory_diff_and_policy_rejection(monkeypatch, tmp_path):
@@ -1086,7 +1094,7 @@ def test_stale_offer_remediation_refuses_when_offer_status_not_unpublished(monke
     )
     monkeypatch.setattr(
         "packages.ebay.src.inventory_client.EbayInventoryClient.get_inventory_item",
-        lambda *_args, **_kwargs: Result.success({"sku": "BK-000008", "condition": "USED_GOOD", "product": {"imageUrls": []}}),
+        lambda *_args, **_kwargs: Result.success({"sku": "BK-000008", "condition": "USED_EXCELLENT", "product": {"imageUrls": []}}),
     )
     monkeypatch.setattr(
         "packages.ebay.src.inventory_client.EbayInventoryClient.get_item_condition_policies",
@@ -1114,7 +1122,7 @@ def test_stale_offer_remediation_refuses_when_listing_id_present(monkeypatch, tm
     )
     monkeypatch.setattr(
         "packages.ebay.src.inventory_client.EbayInventoryClient.get_inventory_item",
-        lambda *_args, **_kwargs: Result.success({"sku": "BK-000008", "condition": "USED_GOOD", "product": {"imageUrls": []}}),
+        lambda *_args, **_kwargs: Result.success({"sku": "BK-000008", "condition": "USED_EXCELLENT", "product": {"imageUrls": []}}),
     )
     monkeypatch.setattr(
         "packages.ebay.src.inventory_client.EbayInventoryClient.get_item_condition_policies",
@@ -1143,7 +1151,7 @@ def test_stale_offer_remediation_refuses_when_offer_id_missing(monkeypatch, tmp_
     monkeypatch.setattr("packages.ebay.src.inventory_client.EbayInventoryClient.get_offer", fail_offer_read)
     monkeypatch.setattr(
         "packages.ebay.src.inventory_client.EbayInventoryClient.get_inventory_item",
-        lambda *_args, **_kwargs: Result.success({"sku": "BK-000008", "condition": "USED_GOOD", "product": {"imageUrls": []}}),
+        lambda *_args, **_kwargs: Result.success({"sku": "BK-000008", "condition": "USED_EXCELLENT", "product": {"imageUrls": []}}),
     )
     monkeypatch.setattr(
         "packages.ebay.src.inventory_client.EbayInventoryClient.get_item_condition_policies",
@@ -1171,7 +1179,7 @@ def test_stale_offer_remediation_refuses_when_repair_queue_not_blocking(monkeypa
     )
     monkeypatch.setattr(
         "packages.ebay.src.inventory_client.EbayInventoryClient.get_inventory_item",
-        lambda *_args, **_kwargs: Result.success({"sku": "BK-000008", "condition": "USED_GOOD", "product": {"imageUrls": []}}),
+        lambda *_args, **_kwargs: Result.success({"sku": "BK-000008", "condition": "USED_EXCELLENT", "product": {"imageUrls": []}}),
     )
     monkeypatch.setattr(
         "packages.ebay.src.inventory_client.EbayInventoryClient.get_item_condition_policies",
@@ -1191,7 +1199,7 @@ def test_stale_offer_remediation_refuses_when_repair_queue_not_blocking(monkeypa
 
 def _eligible_approval_preview_diagnostics() -> dict:
     inventory_payload = {
-        "condition": "USED_GOOD",
+        "condition": "USED_EXCELLENT",
         "product": {
             "title": "Rand McNally Atlas",
             "imageUrls": ["https://res.cloudinary.com/demo/image/upload/v1/BK-000008-01.jpg"],
@@ -1223,7 +1231,7 @@ def _eligible_approval_preview_diagnostics() -> dict:
         "category_id": "14056",
         "category_name": "Atlases",
         "condition_id": "3000",
-        "inventory_condition_enum": "USED_GOOD",
+        "inventory_condition_enum": "USED_EXCELLENT",
         "live_policy_result": {
             "source": "live_readonly_metadata",
             "read_available": True,
@@ -1254,7 +1262,7 @@ def _eligible_approval_preview_diagnostics() -> dict:
         "local_category_id": "14056",
         "local_category_name": "Atlases",
         "local_condition_id": "3000",
-        "local_inventory_condition_enum": "USED_GOOD",
+        "local_inventory_condition_enum": "USED_EXCELLENT",
         "offer_id": "156719395011",
         "listing_id": "",
         "planned_action": "publish_existing_offer",
@@ -1266,7 +1274,7 @@ def _eligible_approval_preview_diagnostics() -> dict:
         "classified_error_code": "invalid_category_condition",
         "blocked_by_repair_queue": True,
         "existing_offer_diagnostics": {"status": "UNPUBLISHED", "category_id": "14056"},
-        "inventory_item_diagnostics": {"condition_enum": "USED_GOOD"},
+        "inventory_item_diagnostics": {"condition_enum": "USED_EXCELLENT"},
         "category_condition_policy_diagnostics": {
             "live_policy_allows_condition": True,
             "live_metadata_supports_changing_condition": False,
@@ -1300,7 +1308,7 @@ def test_stale_offer_remediation_approval_preview_returns_template_for_eligible_
     assert template["confirm_listing_id_empty"] is True
     assert template["confirm_category_id"] == "14056"
     assert template["confirm_condition_id"] == "3000"
-    assert template["confirm_inventory_condition_enum"] == "USED_GOOD"
+    assert template["confirm_inventory_condition_enum"] == "USED_EXCELLENT"
     assert template["confirm_publish_after_remediation"] is False
     assert template["operator_approved"] is True
     assert template["typed_confirmation"] == "REFRESH UNPUBLISHED OFFER ONLY"
@@ -1678,7 +1686,7 @@ def test_publish_decision_preview_refuses_dirty_category_condition(monkeypatch, 
     codes = {reason["code"] for reason in resp.json()["blockers"]}
     assert "condition_id_not_confirmed" in codes
     assert "inventory_condition_not_confirmed" in codes
-    assert "live_inventory_condition_not_used_good" in codes
+    assert "condition_id_enum_mapping_mismatch" in codes
     assert "live_policy_does_not_allow_condition" in codes
 
 
@@ -2338,7 +2346,7 @@ def test_execute_approved_supersede_refuses_if_category_condition_are_not_clean(
     refusal_codes = {r["code"] for r in resp.json()["detail"]["refusal_reasons"]}
     assert "condition_id_not_confirmed" in refusal_codes
     assert "inventory_condition_not_confirmed" in refusal_codes
-    assert "live_inventory_condition_not_used_good" in refusal_codes
+    assert "condition_id_enum_mapping_mismatch" in refusal_codes
     assert "live_policy_does_not_allow_condition" in refusal_codes
 
 

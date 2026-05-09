@@ -12,7 +12,7 @@ This runbook describes the future operator sequence for refreshing the existing 
 - Category ID: `14056`
 - Category name: `Atlases`
 - Condition ID: `3000`
-- Inventory condition enum: `USED_GOOD`
+- Inventory condition enum: `USED_EXCELLENT`
 - Offer ID: `156719395011`
 - Listing ID: empty
 - Planned action: `publish_existing_offer`
@@ -40,7 +40,7 @@ This runbook describes the future operator sequence for refreshing the existing 
 - Confirm the offer status is still `UNPUBLISHED`.
 - Confirm the listing ID is still empty.
 - Confirm category ID is still `14056`.
-- Confirm condition remains `3000` / `USED_GOOD`.
+- Confirm condition remains `3000` / `USED_EXCELLENT`.
 - Confirm the repair queue is still blocking.
 - Confirm `retry_allowed` is still `false`.
 - Confirm the payload hash matches the current live-read-only approval preview.
@@ -71,7 +71,7 @@ Replace `<FRESH_PAYLOAD_HASH_FROM_LOCAL_PACKET>` with the hash copied from the l
   "confirm_listing_id_empty": true,
   "confirm_category_id": "14056",
   "confirm_condition_id": "3000",
-  "confirm_inventory_condition_enum": "USED_GOOD",
+  "confirm_inventory_condition_enum": "USED_EXCELLENT",
   "confirm_publish_after_remediation": false,
   "operator_approved": true,
   "typed_confirmation": "REFRESH UNPUBLISHED OFFER ONLY",

@@ -18,6 +18,7 @@ from packages.data.src.models.item_record import ItemRecord
 from packages.data.src.models.publish_repair_decision_record import PublishRepairDecisionRecord
 from packages.data.src.models.publish_repair_plan_record import PublishRepairPlanRecord
 from packages.data.src.repositories.item_repo import ItemRepository
+from packages.ebay.src.condition_mapping import condition_id_to_inventory_enum
 
 REMEDIATION_TYPE = "refresh_existing_unpublished_offer"
 REQUIRED_TYPED_CONFIRMATION = "REFRESH UNPUBLISHED OFFER ONLY"
@@ -1199,17 +1200,27 @@ def _publish_decision_refusals(
         refuse("existing_offer_condition_differs_from_local", "Existing offer condition differs from local condition.")
 
     inventory = diagnostics.get("inventory_item_diagnostics") or {}
+    expected_inventory_enum = condition_id_to_inventory_enum(
+        diagnostics.get("local_condition_id") or "",
+        default="",
+    )
     if inventory.get("read_available") is not True:
         refuse("inventory_read_unavailable", "Live inventory item read must be available.")
     if inventory.get("inventory_item_exists") is not True:
         refuse("inventory_item_not_found", "Live inventory item must still exist.")
-    if str(inventory.get("condition_enum") or "") != "USED_GOOD":
-        refuse("live_inventory_condition_not_used_good", "Live inventory condition must remain USED_GOOD.")
+    if str(inventory.get("condition_enum") or "") != expected_inventory_enum:
+        refuse(
+            "condition_id_enum_mapping_mismatch",
+            f"Live inventory condition must match condition_id 3000 -> {expected_inventory_enum}.",
+        )
 
     if str(diagnostics.get("local_condition_id") or "") != "3000":
         refuse("condition_id_not_confirmed", "Current condition_id must remain 3000.")
-    if str(diagnostics.get("local_inventory_condition_enum") or "") != "USED_GOOD":
-        refuse("inventory_condition_not_confirmed", "Current inventory condition enum must remain USED_GOOD.")
+    if str(diagnostics.get("local_inventory_condition_enum") or "") != expected_inventory_enum:
+        refuse(
+            "inventory_condition_not_confirmed",
+            f"Current inventory condition enum must remain {expected_inventory_enum}.",
+        )
     if str(diagnostics.get("local_category_id") or "") != "14056":
         refuse("category_id_not_confirmed", "Current category_id must remain 14056.")
 
@@ -1220,6 +1231,8 @@ def _publish_decision_refusals(
         refuse("live_policy_does_not_allow_condition", "Live category policy must still allow condition 3000.")
     if policy.get("live_metadata_supports_changing_condition") is True:
         refuse("category_condition_change_appears_needed", "Live policy indicates a category or condition change may still be required.")
+    for finding in (diagnostics.get("condition_mapping_diagnostics") or {}).get("findings") or []:
+        refuse(str(finding.get("code") or "condition_mapping_issue"), str(finding.get("message") or "Condition mapping mismatch detected."))
 
     if not hosted_photo_urls:
         refuse("missing_hosted_public_image_urls", "Hosted public image URLs are required before publish-decision preview.")
@@ -1328,8 +1341,9 @@ def _eligibility_refusals(
 
     if str(draft.get("condition_id") or "") != "3000":
         refuse("condition_id_not_supported_for_draft", "This mock remediation is limited to condition_id 3000.")
-    if str(draft.get("inventory_condition_enum") or "") != "USED_GOOD":
-        refuse("inventory_condition_not_used_good", "Inventory condition enum must be USED_GOOD.")
+    expected_inventory_enum = condition_id_to_inventory_enum(str(draft.get("condition_id") or ""), default="")
+    if str(draft.get("inventory_condition_enum") or "") != expected_inventory_enum:
+        refuse("condition_id_enum_mapping_mismatch", f"Inventory condition enum must be {expected_inventory_enum}.")
 
     live_policy = draft.get("live_policy_result") or {}
     if live_policy.get("live_policy_allows_condition") is not True:
@@ -1561,12 +1575,16 @@ def _supersede_refusals(
         refuse("offer_status_not_unpublished", "Existing offer must still be UNPUBLISHED.")
     if (diagnostics.get("inventory_item_diagnostics") or {}).get("inventory_item_exists") is not True:
         refuse("inventory_item_not_found", "Live inventory item must still exist.")
+    expected_inventory_enum = condition_id_to_inventory_enum(
+        diagnostics.get("local_condition_id") or "",
+        default="",
+    )
     if str(diagnostics.get("local_condition_id") or "") != "3000":
         refuse("condition_id_not_confirmed", "Current condition_id must remain 3000.")
-    if str(diagnostics.get("local_inventory_condition_enum") or "") != "USED_GOOD":
-        refuse("inventory_condition_not_confirmed", "Current inventory condition enum must remain USED_GOOD.")
-    if str((diagnostics.get("inventory_item_diagnostics") or {}).get("condition_enum") or "") != "USED_GOOD":
-        refuse("live_inventory_condition_not_used_good", "Live inventory condition must remain USED_GOOD.")
+    if str(diagnostics.get("local_inventory_condition_enum") or "") != expected_inventory_enum:
+        refuse("inventory_condition_not_confirmed", f"Current inventory condition enum must remain {expected_inventory_enum}.")
+    if str((diagnostics.get("inventory_item_diagnostics") or {}).get("condition_enum") or "") != expected_inventory_enum:
+        refuse("condition_id_enum_mapping_mismatch", f"Live inventory condition must remain {expected_inventory_enum}.")
     if str(diagnostics.get("local_category_id") or "") != "14056":
         refuse("category_id_not_confirmed", "Current category_id must remain 14056.")
     if (diagnostics.get("category_condition_policy_diagnostics") or {}).get("live_policy_allows_condition") is not True:
@@ -1575,6 +1593,8 @@ def _supersede_refusals(
         refuse("offer_not_found", "Existing offer must still exist.")
     if str(diagnostics.get("local_status") or "").lower() == "listed":
         refuse("item_already_listed", "Item must not be listed.")
+    for finding in (diagnostics.get("condition_mapping_diagnostics") or {}).get("findings") or []:
+        refuse(str(finding.get("code") or "condition_mapping_issue"), str(finding.get("message") or "Condition mapping mismatch detected."))
 
     if refresh_success_evidence["available"] and refresh_success_evidence["confirmed"] is not True:
         refuse("stale_offer_refresh_not_confirmed", "Current context does not confirm a successful stale-offer refresh.")
