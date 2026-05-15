@@ -186,10 +186,13 @@ class IntakeQualityResult:
         }
 
 
-def evaluate_intake_quality(item: Item) -> IntakeQualityResult:
+def evaluate_intake_quality(
+    item: Item,
+    photo_meta: list | None = None,
+) -> IntakeQualityResult:
     family = category_family_for_item(item)
     required = PHOTO_REQUIREMENTS.get(family, [])
-    present = infer_present_photo_types(item)
+    present = infer_present_photo_types(item, photo_meta=photo_meta)
     missing = [photo_type for photo_type in required if photo_type not in present and not _optional_photo_satisfied(item, photo_type)]
     missing_labels = [_label(photo_type) for photo_type in missing]
     has_enough_photos = bool(required) and not missing
@@ -268,9 +271,45 @@ def category_family_for_item(item: Item) -> str:
     return "unknown"
 
 
-def infer_present_photo_types(item: Item) -> set[str]:
-    haystacks = [_photo_text(path) for path in item.image_paths or []]
+def infer_present_photo_types(
+    item: Item,
+    photo_meta: list | None = None,
+) -> set[str]:
+    """Infer which quality-gate photo-type tokens are present.
+
+    When ``photo_meta`` is supplied (list of PhotoMeta from photo_types.py),
+    user-labeled and model-labeled entries are consulted first via the
+    QUALITY_GATE_TO_PHOTO_TYPE inverse map — they outrank filename inference.
+    Filename inference runs for any path not covered by explicit metadata.
+    """
     present: set[str] = set()
+
+    if photo_meta:
+        # Import here to avoid circular import at module load time.
+        from packages.intake.src.photo_types import (
+            QUALITY_GATE_TO_PHOTO_TYPE,
+            PhotoType,
+        )
+        # Build inverse map: PhotoType value → quality_gate token(s).
+        _inverse: dict[str, list[str]] = {}
+        for qt_token, pt_value in QUALITY_GATE_TO_PHOTO_TYPE.items():
+            _inverse.setdefault(pt_value, []).append(qt_token)
+
+        covered_paths: set[str] = set()
+        for meta in photo_meta:
+            if meta.photo_type and meta.photo_type != PhotoType.UNKNOWN:
+                for qt_token in _inverse.get(meta.photo_type, []):
+                    present.add(qt_token)
+                covered_paths.add(meta.path)
+
+        # Filename inference for paths not covered by explicit meta.
+        uncovered = [
+            p for p in (item.image_paths or []) if str(p) not in covered_paths
+        ]
+        haystacks = [_photo_text(p) for p in uncovered]
+    else:
+        haystacks = [_photo_text(path) for path in item.image_paths or []]
+
     for photo_type, keywords in PHOTO_TYPE_KEYWORDS.items():
         if any(_matches_keywords(text, keywords) for text in haystacks):
             present.add(photo_type)

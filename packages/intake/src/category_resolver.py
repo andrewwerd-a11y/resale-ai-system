@@ -12,6 +12,11 @@ from typing import Protocol
 from packages.core.src.constants import Platform
 from packages.domain.src.entities.item import Item
 from packages.intake.src.identity_scan import IdentityScanResult
+from packages.intake.src.pipeline_types import (
+    DETERMINISTIC_FALLBACK_WARNING,
+    ConfidenceSource,
+    ProviderKind,
+)
 from packages.intake.src.quality_gate import category_family_for_item
 
 
@@ -41,6 +46,10 @@ class CategoryResolution:
     marketplace_candidates: list[CategoryCandidate] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     provider: str = "deterministic-fallback"
+    provider_kind: str = ProviderKind.DETERMINISTIC_FALLBACK
+    confidence_source: str = ConfidenceSource.HEURISTIC
+    is_deterministic_fallback: bool = True
+    fallback_warning: str = DETERMINISTIC_FALLBACK_WARNING
 
     def to_dict(self) -> dict:
         return {
@@ -49,6 +58,10 @@ class CategoryResolution:
             "marketplace_candidates": [c.to_dict() for c in self.marketplace_candidates],
             "notes": self.notes,
             "provider": self.provider,
+            "provider_kind": self.provider_kind,
+            "confidence_source": self.confidence_source,
+            "is_deterministic_fallback": self.is_deterministic_fallback,
+            "fallback_warning": self.fallback_warning,
         }
 
 
@@ -149,6 +162,10 @@ class DeterministicCategoryResolver:
             marketplace_candidates=candidates,
             notes=notes,
             provider=self.name,
+            provider_kind=ProviderKind.DETERMINISTIC_FALLBACK,
+            confidence_source=ConfidenceSource.HEURISTIC,
+            is_deterministic_fallback=True,
+            fallback_warning=DETERMINISTIC_FALLBACK_WARNING,
         )
 
 

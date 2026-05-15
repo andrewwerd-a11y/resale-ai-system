@@ -164,6 +164,12 @@ def translate_item_for_platforms(
 
 # ── Marketplace recommendations (slice 4 / phase 13) ─────────────────────────
 
+_OPERATOR_RECOMMENDATION_WARNING = (
+    "Recommended marketplace fit does not mean this item is approved to publish. "
+    "Human review and explicit publish approval are always required."
+)
+
+
 @dataclass
 class MarketplaceRecommendation:
     platform: str
@@ -174,6 +180,12 @@ class MarketplaceRecommendation:
     readiness: str = "blocked"
     missing_fields: list[str] = field(default_factory=list)
     manual_review_required: bool = True
+    # Safety / clarity fields (Focus 3 hardening)
+    marketplace_fit_recommended: bool = False
+    publish_recommended: bool = False
+    publish_approval_required: bool = True
+    publish_allowed: bool = False
+    operator_warning: str = _OPERATOR_RECOMMENDATION_WARNING
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -225,13 +237,22 @@ def recommend_marketplaces(
         if (item.estimated_price or 0) >= 75:
             risk_flags.append(RiskFlag.HIGH_VALUE_ESTIMATE)
 
+        marketplace_fit_recommended = (
+            draft.platform_supported and fit >= 0.6
+        )
         recommended = False
         if selection_mode in {"auto", "hybrid"}:
             recommended = (
-                draft.platform_supported
-                and fit >= 0.6
+                marketplace_fit_recommended
                 and draft.readiness_status != "blocked"
             )
+        # publish_recommended is only True when ALL gates are clean AND the
+        # draft explicitly allows publish. Even then it is informational only.
+        publish_recommended = bool(
+            draft.publish_allowed
+            and not risk_flags
+            and draft.readiness_status == "ready"
+        )
 
         recs.append(
             MarketplaceRecommendation(
@@ -247,6 +268,11 @@ def recommend_marketplaces(
                 readiness=draft.readiness_status,
                 missing_fields=draft.missing_platform_fields,
                 manual_review_required=True,
+                marketplace_fit_recommended=marketplace_fit_recommended,
+                publish_recommended=publish_recommended,
+                publish_approval_required=True,
+                publish_allowed=draft.publish_allowed,
+                operator_warning=_OPERATOR_RECOMMENDATION_WARNING,
             )
         )
 
@@ -258,4 +284,8 @@ def recommend_marketplaces(
         "drafts": [d.to_dict() for d in drafts],
         "no_ebay_mutation_performed": True,
         "no_external_provider_called": True,
+        "no_publish_performed": True,
+        "read_only": True,
+        "draft_only": True,
+        "manual_approval_required": True,
     }

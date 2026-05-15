@@ -311,7 +311,13 @@ def post_identity_scan(
     if not item:
         raise HTTPException(status_code=404, detail=f"Item {sku} not found")
     result = run_first_pass_identity(item, user_context=(body.user_context if body else None))
-    return result.to_dict() | {"no_ebay_mutation_performed": True}
+    return result.to_dict() | {
+        "no_ebay_mutation_performed": True,
+        "no_publish_performed": True,
+        "read_only": True,
+        "draft_only": True,
+        "manual_approval_required": True,
+    }
 
 
 @router.post("/{sku}/category-candidates")
@@ -326,7 +332,13 @@ def post_category_candidates(sku: str, session: Session = Depends(get_session)):
         raise HTTPException(status_code=404, detail=f"Item {sku} not found")
     identity = run_first_pass_identity(item)
     resolution = resolve_categories(item, identity=identity)
-    return resolution.to_dict() | {"no_ebay_mutation_performed": True}
+    return resolution.to_dict() | {
+        "no_ebay_mutation_performed": True,
+        "no_publish_performed": True,
+        "read_only": True,
+        "draft_only": True,
+        "manual_approval_required": True,
+    }
 
 
 @router.get("/{sku}/marketplace-requirements")
@@ -344,7 +356,13 @@ def get_marketplace_requirements_endpoint(
     if not item:
         raise HTTPException(status_code=404, detail=f"Item {sku} not found")
     requirements = get_marketplace_requirements(item, platform=platform, category_id=category_id)
-    return requirements.to_dict() | {"no_ebay_mutation_performed": True}
+    return requirements.to_dict() | {
+        "no_ebay_mutation_performed": True,
+        "no_publish_performed": True,
+        "read_only": True,
+        "draft_only": True,
+        "manual_approval_required": True,
+    }
 
 
 class _DeepAnalysisRequest(BaseModel):
@@ -395,6 +413,10 @@ def post_deep_analysis_preview(
     return result.to_dict() | {
         "no_ebay_mutation_performed": True,
         "no_external_provider_called": True,
+        "no_publish_performed": True,
+        "read_only": True,
+        "draft_only": True,
+        "manual_approval_required": True,
     }
 
 
@@ -465,6 +487,10 @@ def post_platform_drafts(
         "drafts": [d.to_dict() for d in drafts],
         "no_ebay_mutation_performed": True,
         "no_external_provider_called": True,
+        "no_publish_performed": True,
+        "read_only": True,
+        "draft_only": True,
+        "manual_approval_required": True,
     }
 
 

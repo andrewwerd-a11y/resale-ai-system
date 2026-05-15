@@ -112,4 +112,8 @@ def build_pipeline_snapshot(
         "stages": stages,
         "no_ebay_mutation_performed": True,
         "no_external_provider_called": True,
+        "no_publish_performed": True,
+        "read_only": True,
+        "draft_only": True,
+        "manual_approval_required": True,
     }

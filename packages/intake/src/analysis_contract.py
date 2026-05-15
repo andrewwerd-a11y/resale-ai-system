@@ -16,7 +16,12 @@ from packages.intake.src.category_resolver import CategoryCandidate
 from packages.intake.src.identity_scan import IdentityScanResult
 from packages.intake.src.marketplace_requirements import MarketplaceRequirements
 from packages.intake.src.photo_types import PhotoMeta, parse_photo_inputs
-from packages.intake.src.pipeline_types import RiskFlag
+from packages.intake.src.pipeline_types import (
+    DETERMINISTIC_FALLBACK_WARNING,
+    ConfidenceSource,
+    ProviderKind,
+    RiskFlag,
+)
 
 
 @dataclass
@@ -63,6 +68,10 @@ class DeepAnalysisResult:
     should_require_manual_review: bool = True
     should_block_publish_approval: bool = True
     provider: str = "deterministic-fallback"
+    provider_kind: str = ProviderKind.DETERMINISTIC_FALLBACK
+    confidence_source: str = ConfidenceSource.HEURISTIC
+    is_deterministic_fallback: bool = True
+    fallback_warning: str = DETERMINISTIC_FALLBACK_WARNING
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -179,6 +188,10 @@ class DeterministicDeepAnalysisProvider:
             should_require_manual_review=True,
             should_block_publish_approval=should_block,
             provider=self.name,
+            provider_kind=ProviderKind.DETERMINISTIC_FALLBACK,
+            confidence_source=ConfidenceSource.HEURISTIC,
+            is_deterministic_fallback=True,
+            fallback_warning=DETERMINISTIC_FALLBACK_WARNING,
         )
 
 

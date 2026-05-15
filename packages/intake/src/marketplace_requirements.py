@@ -13,6 +13,11 @@ from typing import Protocol
 from packages.core.src.constants import Platform
 from packages.domain.src.entities.item import Item
 from packages.ebay.src.condition_mapping import CONDITION_ID_TO_ENUM
+from packages.intake.src.pipeline_types import (
+    DETERMINISTIC_FALLBACK_WARNING,
+    ConfidenceSource,
+    ProviderKind,
+)
 
 
 @dataclass
@@ -29,6 +34,10 @@ class MarketplaceRequirements:
     requires_live_read_only_fetch: bool = False
     missing_requirements_for_item: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    provider_kind: str = ProviderKind.DETERMINISTIC_FALLBACK
+    confidence_source: str = ConfidenceSource.HEURISTIC
+    is_deterministic_fallback: bool = True
+    fallback_warning: str = DETERMINISTIC_FALLBACK_WARNING
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -70,6 +79,10 @@ class DeterministicMarketplaceRequirementProvider:
                 data_freshness="unknown",
                 requires_live_read_only_fetch=False,
                 notes=[f"Platform '{platform}' is not yet implemented; returning empty requirements."],
+                provider_kind=ProviderKind.DETERMINISTIC_FALLBACK,
+                confidence_source=ConfidenceSource.HEURISTIC,
+                is_deterministic_fallback=True,
+                fallback_warning=DETERMINISTIC_FALLBACK_WARNING,
             )
 
         required = list(item.missing_required_fields or [])
@@ -79,6 +92,11 @@ class DeterministicMarketplaceRequirementProvider:
         freshness = "cached" if item.category_template_fetched else "unknown"
         if not item.category_template_fetched:
             notes.append("Category template has not been fetched; values reflect item-known gaps only.")
+        confidence_source = (
+            ConfidenceSource.CACHED_METADATA
+            if item.category_template_fetched
+            else ConfidenceSource.HEURISTIC
+        )
         return MarketplaceRequirements(
             platform=Platform.EBAY,
             category_id=str(category_id or item.ebay_category_id or ""),
@@ -92,6 +110,10 @@ class DeterministicMarketplaceRequirementProvider:
             requires_live_read_only_fetch=not item.category_template_fetched,
             missing_requirements_for_item=required,
             notes=notes,
+            provider_kind=ProviderKind.DETERMINISTIC_FALLBACK,
+            confidence_source=confidence_source,
+            is_deterministic_fallback=True,
+            fallback_warning=DETERMINISTIC_FALLBACK_WARNING,
         )
 
 

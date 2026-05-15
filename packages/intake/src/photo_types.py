@@ -241,9 +241,8 @@ def summarize_photo_coverage(
     )
 
     required_tokens = PHOTO_REQUIREMENTS.get(category_family, [])
-    present_tokens = infer_present_photo_types(item)
-
     metas = list(photo_meta) if photo_meta is not None else parse_photo_inputs(item)
+    present_tokens = infer_present_photo_types(item, photo_meta=metas)
 
     # Required = required and not optional, Recommended = optional set members.
     missing_required: list[str] = []

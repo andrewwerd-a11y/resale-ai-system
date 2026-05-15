@@ -153,3 +153,31 @@ class PhotoSource:
     GENERATED = "generated"
 
     ALL = [LOCAL, HOSTED, UPLOADED, GENERATED]
+
+
+class ProviderKind:
+    """How a result was produced."""
+    DETERMINISTIC_FALLBACK = "deterministic_fallback"
+    EXTERNAL_MODEL = "external_model"
+    LOCAL_MODEL = "local_model"
+    MOCK = "mock"
+
+    ALL = [DETERMINISTIC_FALLBACK, EXTERNAL_MODEL, LOCAL_MODEL, MOCK]
+
+
+class ConfidenceSource:
+    """What evidence backs the confidence score."""
+    HEURISTIC = "heuristic"
+    VISUAL_MODEL = "visual_model"
+    USER_LABELED = "user_labeled"
+    CACHED_METADATA = "cached_metadata"
+    MIXED = "mixed"
+
+    ALL = [HEURISTIC, VISUAL_MODEL, USER_LABELED, CACHED_METADATA, MIXED]
+
+
+DETERMINISTIC_FALLBACK_WARNING = (
+    "This result was produced by a deterministic heuristic fallback, not a real "
+    "vision or language model. All confidence values are conservative estimates. "
+    "Human review is required before any publish action."
+)

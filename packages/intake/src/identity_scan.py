@@ -12,7 +12,13 @@ from typing import Protocol
 
 from packages.domain.src.entities.item import Item
 from packages.intake.src.photo_types import PhotoMeta, parse_photo_inputs
-from packages.intake.src.pipeline_types import IntakeDecision, RiskFlag
+from packages.intake.src.pipeline_types import (
+    DETERMINISTIC_FALLBACK_WARNING,
+    ConfidenceSource,
+    IntakeDecision,
+    ProviderKind,
+    RiskFlag,
+)
 
 
 @dataclass
@@ -43,6 +49,10 @@ class IdentityScanResult:
     decision: str = IntakeDecision.LOW_CONFIDENCE_HOLD
     reason: str = ""
     provider: str = "deterministic-fallback"
+    provider_kind: str = ProviderKind.DETERMINISTIC_FALLBACK
+    confidence_source: str = ConfidenceSource.HEURISTIC
+    is_deterministic_fallback: bool = True
+    fallback_warning: str = DETERMINISTIC_FALLBACK_WARNING
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -132,6 +142,10 @@ class DeterministicIdentityProvider:
             decision=decision,
             reason=reason,
             provider=self.name,
+            provider_kind=ProviderKind.DETERMINISTIC_FALLBACK,
+            confidence_source=ConfidenceSource.HEURISTIC,
+            is_deterministic_fallback=True,
+            fallback_warning=DETERMINISTIC_FALLBACK_WARNING,
         )
 
 
