@@ -112,8 +112,60 @@ def _intake_pipeline_cockpit_html(sku: str) -> str:
   </div>
   <pre id='out'>(click a button above)</pre>
 </section>
+<section id='evidence-panel' style='display:none'>
+  <h2>Operator photo evidence</h2>
+  <div id='evidence-summary' style='font-size:12px;line-height:1.45'></div>
+</section>
 <script>
 const SKU = {sku!r};
+function escapeHtml(value) {{
+  return String(value ?? '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
+}}
+function formatList(items, emptyText) {{
+  return items && items.length
+    ? `<ul style="margin:6px 0 0 18px;padding:0">${{items.map(item => `<li>${{escapeHtml(item)}}</li>`).join('')}}</ul>`
+    : `<div style="color:#666;margin-top:6px">${{escapeHtml(emptyText)}}</div>`;
+}}
+function renderCorrectionReportSummary(sku, report) {{
+  const evidence = report.operator_photo_evidence || {{}};
+  const nextPhotos = evidence.missing_photo_types || [];
+  const selectedTypes = evidence.selected_photo_types || [];
+  const skippedReasons = evidence.skipped_image_reasons || [];
+  const selectionAvailable = evidence.deep_analysis_image_selection_available;
+  const selectedCount = evidence.selected_image_count;
+  const skippedCount = evidence.skipped_image_count;
+  const qualityStatus = evidence.intake_quality_status || (report.intake_quality || {{}}).intake_quality_status || '-';
+  const needsMorePhotos = evidence.needs_more_photos_for_analysis;
+  const qualityReason = (report.intake_quality || {{}}).reason || '';
+  const selectionSummary = selectionAvailable
+    ? `<div style="margin-top:8px"><strong>Analysis image selection:</strong> selected ${{selectedCount ?? 0}} image(s), skipped ${{skippedCount ?? 0}}.</div>`
+    : '<div style="margin-top:8px;color:#666">Deep analysis image-selection metadata is not available yet. Intake-quality evidence below is still current.</div>';
+  return `
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap">
+      <h3 style="margin:0;font-size:15px">Operator evidence for ${{escapeHtml(sku)}}</h3>
+      <span class="badge ${{needsMorePhotos ? 'warn' : 'ok'}}">${{escapeHtml(qualityStatus)}}</span>
+    </div>
+    <div style="margin-top:8px;color:#333">${{escapeHtml(qualityReason || 'No additional intake-quality note.')}}</div>
+    <div style="margin-top:12px">
+      <strong>Next photos needed</strong>
+      ${{formatList(nextPhotos, needsMorePhotos ? 'No specific photo types listed yet.' : 'No additional photos requested by intake quality.')}}
+    </div>
+    <div style="margin-top:12px">
+      <strong>Evidence needed</strong>
+      <div style="margin-top:6px">Intake quality asks for more photos: <strong>${{needsMorePhotos ? 'yes' : 'no'}}</strong></div>
+      ${{selectionSummary}}
+      <div style="margin-top:8px"><strong>Selected photo types:</strong></div>
+      ${{formatList(selectedTypes, selectionAvailable ? 'No selected photo types were reported.' : 'Selection details will appear after deep analysis runs.')}}
+      <div style="margin-top:8px"><strong>Skipped image reasons:</strong></div>
+      ${{formatList(skippedReasons, selectionAvailable ? 'No skipped-image reasons were reported.' : 'No skipped-image data is available before deep analysis runs.')}}
+    </div>
+  `;
+}}
 async function show(promise) {{
   const out = document.getElementById('out');
   out.textContent = 'loading...';
@@ -121,12 +173,21 @@ async function show(promise) {{
     const resp = await promise;
     const body = await resp.json();
     out.textContent = JSON.stringify(body, null, 2);
+    return body;
   }} catch (e) {{ out.textContent = String(e); }}
+  return null;
 }}
 document.getElementById('btn-status').onclick = () =>
   show(fetch(`/api/items/${{SKU}}/intake-pipeline-status?run_deep_analysis=true`));
-document.getElementById('btn-report').onclick = () =>
-  show(fetch(`/api/items/${{SKU}}/correction-report-v2`));
+document.getElementById('btn-report').onclick = async () => {{
+  const body = await show(fetch(`/api/items/${{SKU}}/correction-report-v2`));
+  if (!body) {{
+    document.getElementById('evidence-panel').style.display = 'none';
+    return;
+  }}
+  document.getElementById('evidence-panel').style.display = 'block';
+  document.getElementById('evidence-summary').innerHTML = renderCorrectionReportSummary(SKU, body);
+}};
 document.getElementById('btn-readiness').onclick = () =>
   show(fetch(`/api/items/${{SKU}}/correction-report`));
 document.getElementById('btn-drafts').onclick = () =>
