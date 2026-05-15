@@ -83,6 +83,14 @@ class Settings(BaseSettings):
     enrichment_model: str = "claude-sonnet-4-20250514"
     enrichment_enabled: bool = True
 
+    # Intake provider (disabled by default — requires explicit opt-in)
+    # Set INTAKE_EXTERNAL_PROVIDER_ENABLED=true to enable real provider calls.
+    # Set INTAKE_PROVIDER=claude to select Claude (requires anthropic_api_key).
+    # When disabled, all intake analysis uses the deterministic fallback.
+    intake_external_provider_enabled: bool = False
+    intake_provider: str = "deterministic"   # "deterministic" | "claude"
+    intake_model: str = ""                   # blank → inherits enrichment_model
+
     # Notifications (Phase 5)
     smtp_host: str = ""
     smtp_port: int = 587

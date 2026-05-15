@@ -402,6 +402,11 @@ def post_deep_analysis_preview(
         platform=platform,
         category_id=(selected.category_id if selected else None),
     )
+    from packages.core.src.config import get_settings as _get_settings
+    _cfg = _get_settings()
+    _ext_enabled = bool(getattr(_cfg, "intake_external_provider_enabled", False))
+    _ext_provider = getattr(_cfg, "intake_provider", "deterministic")
+
     result = run_deep_analysis_preview(
         item,
         identity=identity,
@@ -412,11 +417,13 @@ def post_deep_analysis_preview(
     )
     return result.to_dict() | {
         "no_ebay_mutation_performed": True,
-        "no_external_provider_called": True,
+        "no_external_provider_called": not result.external_call_made,
         "no_publish_performed": True,
         "read_only": True,
         "draft_only": True,
         "manual_approval_required": True,
+        "external_provider_disabled": not _ext_enabled,
+        "configured_provider": _ext_provider,
     }
 
 

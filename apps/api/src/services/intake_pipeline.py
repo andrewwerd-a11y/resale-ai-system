@@ -103,6 +103,7 @@ def build_pipeline_snapshot(
         IntakePipelineStage.MARKETPLACE_REQUIREMENTS: requirements.to_dict(),
         IntakePipelineStage.DEEP_ANALYSIS: deep_result.to_dict() if deep_result else None,
     }
+    external_call_made = bool(deep_result and not deep_result.is_deterministic_fallback)
     return {
         "sku": item.sku,
         "platform": platform,
@@ -111,7 +112,7 @@ def build_pipeline_snapshot(
         "photo_coverage": coverage.to_dict(),
         "stages": stages,
         "no_ebay_mutation_performed": True,
-        "no_external_provider_called": True,
+        "no_external_provider_called": not external_call_made,
         "no_publish_performed": True,
         "read_only": True,
         "draft_only": True,

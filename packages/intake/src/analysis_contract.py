@@ -72,6 +72,8 @@ class DeepAnalysisResult:
     confidence_source: str = ConfidenceSource.HEURISTIC
     is_deterministic_fallback: bool = True
     fallback_warning: str = DETERMINISTIC_FALLBACK_WARNING
+    # True when a real external API call was made during this analysis.
+    external_call_made: bool = False
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -195,6 +197,31 @@ class DeterministicDeepAnalysisProvider:
         )
 
 
+def _select_provider(explicit_provider: DeepAnalysisProvider | None) -> DeepAnalysisProvider:
+    """Return the provider to use.
+
+    Priority: explicit argument > config-selected > deterministic fallback.
+    Never crashes: if the configured external provider is unavailable, silently
+    falls back to DeterministicDeepAnalysisProvider.
+    """
+    if explicit_provider is not None:
+        return explicit_provider
+    try:
+        from packages.core.src.config import get_settings
+        settings = get_settings()
+        if (
+            getattr(settings, "intake_external_provider_enabled", False)
+            and getattr(settings, "intake_provider", "deterministic") == "claude"
+        ):
+            from packages.intake.src.providers.claude_deep_analysis import ClaudeDeepAnalysisProvider
+            p = ClaudeDeepAnalysisProvider(settings)
+            if p.is_available():
+                return p
+    except Exception:
+        pass
+    return DeterministicDeepAnalysisProvider()
+
+
 def run_deep_analysis_preview(
     item: Item,
     identity: IdentityScanResult | None = None,
@@ -204,7 +231,7 @@ def run_deep_analysis_preview(
     current_publish_blockers: list[str] | None = None,
     provider: DeepAnalysisProvider | None = None,
 ) -> DeepAnalysisResult:
-    provider = provider or DeterministicDeepAnalysisProvider()
+    chosen = _select_provider(provider)
     request = DeepAnalysisRequest(
         sku=item.sku,
         canonical_schema_version=EXTRACTION_SCHEMA_VERSION,
@@ -221,4 +248,9 @@ def run_deep_analysis_preview(
         current_intake_quality_status=item.intake_quality_status,
         do_not_guess_policy=True,
     )
-    return provider.analyze(request)
+    result = chosen.analyze(request)
+    # Tag whether a real external call was made so endpoints can set
+    # no_external_provider_called correctly.
+    if not result.is_deterministic_fallback:
+        result.external_call_made = True
+    return result
