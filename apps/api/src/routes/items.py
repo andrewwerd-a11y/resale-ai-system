@@ -363,6 +363,7 @@ def post_deep_analysis_preview(
     from packages.intake.src.category_resolver import resolve_categories
     from packages.intake.src.identity_scan import run_first_pass_identity
     from packages.intake.src.marketplace_requirements import get_marketplace_requirements
+    from apps.api.src.services.publish_readiness import evaluate_publish_readiness
 
     repo = ItemRepository(session)
     item = repo.get_by_sku(sku)
@@ -389,6 +390,7 @@ def post_deep_analysis_preview(
         selected_category=selected,
         marketplace_requirements=requirements,
         user_context=user_context,
+        current_publish_blockers=evaluate_publish_readiness(item).as_dict().get("blockers") or [],
     )
     return result.to_dict() | {
         "no_ebay_mutation_performed": True,

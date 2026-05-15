@@ -65,6 +65,9 @@ def build_correction_report_v2(
         platform=platform,
         category_id=(selected.category_id if selected else None),
     )
+    readiness = evaluate_publish_readiness(item).as_dict()
+    compatibility = evaluate_publish_compatibility(item, strict_condition_policy=True)
+
     deep: DeepAnalysisResult | None = None
     if quality.should_run_deep_analysis:
         deep = run_deep_analysis_preview(
@@ -73,10 +76,8 @@ def build_correction_report_v2(
             selected_category=selected,
             marketplace_requirements=requirements,
             user_context=user_context,
+            current_publish_blockers=readiness.get("blockers") or [],
         )
-
-    readiness = evaluate_publish_readiness(item).as_dict()
-    compatibility = evaluate_publish_compatibility(item, strict_condition_policy=True)
 
     proposal = None
     if deep:
@@ -105,11 +106,13 @@ def build_correction_report_v2(
     platform_translation_allowed = bool(
         quality.should_run_deep_analysis
         and readiness.get("ready") is True
+        and compatibility.get("ready") is True
         and not (deep and deep.should_block_publish_approval)
     )
     publish_approval_blocked = bool(
         quality.should_block_publish_approval
         or not readiness.get("ready")
+        or not compatibility.get("ready")
         or (deep and deep.should_block_publish_approval)
     )
 

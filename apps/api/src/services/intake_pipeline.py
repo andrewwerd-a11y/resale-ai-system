@@ -37,6 +37,7 @@ from packages.intake.src.quality_gate import (
     category_family_for_item,
     evaluate_intake_quality,
 )
+from apps.api.src.services.publish_readiness import evaluate_publish_readiness
 
 
 def _select_top_candidate(resolution: CategoryResolution) -> CategoryCandidate | None:
@@ -72,6 +73,7 @@ def build_pipeline_snapshot(
         platform=platform,
         category_id=(top_candidate.category_id if top_candidate else None),
     )
+    readiness = evaluate_publish_readiness(item).as_dict()
     deep_result: DeepAnalysisResult | None = None
     if run_deep_analysis and quality.should_run_deep_analysis:
         deep_result = run_deep_analysis_preview(
@@ -80,6 +82,7 @@ def build_pipeline_snapshot(
             selected_category=top_candidate,
             marketplace_requirements=requirements,
             user_context=user_context,
+            current_publish_blockers=readiness.get("blockers") or [],
         )
 
     stages = {

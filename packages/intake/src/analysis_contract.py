@@ -188,6 +188,7 @@ def run_deep_analysis_preview(
     selected_category: CategoryCandidate | None = None,
     marketplace_requirements: MarketplaceRequirements | None = None,
     user_context: str | None = None,
+    current_publish_blockers: list[str] | None = None,
     provider: DeepAnalysisProvider | None = None,
 ) -> DeepAnalysisResult:
     provider = provider or DeterministicDeepAnalysisProvider()
@@ -203,7 +204,7 @@ def run_deep_analysis_preview(
         required_aspects=list(marketplace_requirements.required_aspects) if marketplace_requirements else [],
         recommended_aspects=list(marketplace_requirements.recommended_aspects) if marketplace_requirements else [],
         allowed_condition_ids=list(marketplace_requirements.allowed_condition_ids) if marketplace_requirements else [],
-        current_publish_blockers=[],
+        current_publish_blockers=list(current_publish_blockers or []),
         current_intake_quality_status=item.intake_quality_status,
         do_not_guess_policy=True,
     )

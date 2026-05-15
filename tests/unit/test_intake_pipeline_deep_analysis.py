@@ -78,6 +78,16 @@ def test_deep_analysis_flags_malformed_condition_id_against_allowed_list():
     assert RiskFlag.MALFORMED_CONDITION_ID in result.publish_risk_flags
 
 
+def test_deep_analysis_carries_current_publish_blockers():
+    item = _ready_item()
+    result = run_deep_analysis_preview(
+        item,
+        current_publish_blockers=["blocked_by_repair_queue"],
+    )
+    assert "blocked_by_repair_queue" in result.publish_risk_flags
+    assert result.should_block_publish_approval is True
+
+
 def test_provider_is_conservative_by_default():
     provider = DeterministicDeepAnalysisProvider()
     item = _ready_item()

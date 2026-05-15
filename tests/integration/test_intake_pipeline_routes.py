@@ -135,6 +135,8 @@ def test_deep_analysis_preview_endpoint_never_publishes(monkeypatch, tmp_path):
     assert body["no_ebay_mutation_performed"] is True
     assert body["no_external_provider_called"] is True
     assert body["provider"] == "deterministic-fallback"
+    assert body["should_block_publish_approval"] is True
+    assert body["publish_risk_flags"]
 
 
 def test_404_for_unknown_sku(monkeypatch, tmp_path):

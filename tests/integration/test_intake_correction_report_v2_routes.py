@@ -98,6 +98,39 @@ def test_correction_report_v2_flags_malformed_condition_id(monkeypatch, tmp_path
     assert any("malformed" in entry.lower() for entry in body["malformed_data"])
 
 
+def test_correction_report_v2_compatibility_blocker_blocks_top_level_gates(monkeypatch, tmp_path):
+    _configure_db(monkeypatch, tmp_path)
+    _seed(_ready_book())
+
+    from apps.api.src.services import intake_correction_report_v2 as report_v2
+
+    class _Ready:
+        def as_dict(self):
+            return {"ready": True, "blockers": [], "required_actions": []}
+
+    monkeypatch.setattr(report_v2, "evaluate_publish_readiness", lambda item: _Ready())
+    monkeypatch.setattr(
+        report_v2,
+        "evaluate_publish_compatibility",
+        lambda item, strict_condition_policy=True: {
+            "ready": False,
+            "blockers": ["Condition policy for the selected category is not cached locally."],
+            "required_actions": [
+                "Fetch or confirm category-specific condition compatibility before retrying publish."
+            ],
+        },
+    )
+
+    with _client() as client:
+        resp = client.get("/api/items/BK-V2/correction-report-v2")
+
+    body = resp.json()
+    assert body["publish_readiness"]["ready"] is True
+    assert body["publish_compatibility"]["ready"] is False
+    assert body["platform_translation_allowed"] is False
+    assert body["publish_approval_blocked"] is True
+
+
 def test_reanalysis_preview_brand_change_triggers_rerun(monkeypatch, tmp_path):
     _configure_db(monkeypatch, tmp_path)
     _seed(_ready_book())
