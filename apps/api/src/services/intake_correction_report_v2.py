@@ -117,6 +117,10 @@ def build_correction_report_v2(
     )
 
     v1 = build_intake_correction_report(item)
+    operator_photo_evidence = _build_operator_photo_evidence(
+        quality=quality.as_dict(),
+        deep=deep.to_dict() if deep else None,
+    )
 
     return {
         "sku": item.sku,
@@ -128,6 +132,7 @@ def build_correction_report_v2(
         "category_candidates": resolution.to_dict(),
         "marketplace_requirements": requirements.to_dict(),
         "missing_photo_checklist": quality.missing_photo_types,
+        "operator_photo_evidence": operator_photo_evidence,
         "missing_user_context": _missing_user_context(item, identity.to_dict()),
         "malformed_data": _malformed_data(item),
         "publish_readiness": {
@@ -160,6 +165,19 @@ def build_correction_report_v2(
         "read_only": True,
         "draft_only": True,
         "manual_approval_required": True,
+    }
+
+
+def _build_operator_photo_evidence(*, quality: dict, deep: dict | None) -> dict:
+    return {
+        "intake_quality_status": quality.get("intake_quality_status"),
+        "needs_more_photos_for_analysis": bool(quality.get("needs_more_photos_for_analysis")),
+        "missing_photo_types": list(quality.get("missing_photo_types") or []),
+        "selected_photo_types": list((deep or {}).get("selected_photo_types") or []),
+        "selected_image_count": (deep or {}).get("selected_image_count"),
+        "skipped_image_count": (deep or {}).get("skipped_image_count"),
+        "skipped_image_reasons": list((deep or {}).get("skipped_image_reasons") or []),
+        "deep_analysis_image_selection_available": deep is not None,
     }
 
 
