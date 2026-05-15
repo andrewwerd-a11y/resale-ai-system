@@ -29,6 +29,10 @@ def test_diagnostic_cockpit_page_renders_expected_sections() -> None:
     assert "/api/ebay/publish/batch-preview" in html
     assert "/api/diagnostics/events/recent" in html
     assert "/api/diagnostics/reports/weekly" in html
+    assert "Current local status" in html
+    assert "Workflow lane" in html
+    assert "Primary blocker family" in html
+    assert "Next safest action" in html
     assert "No live eBay mutation" in html
     assert "No external report sending" in html
 

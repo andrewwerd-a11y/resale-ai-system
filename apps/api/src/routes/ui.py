@@ -3900,6 +3900,7 @@ TO-000016</textarea>
       <div id="batch-status" class="status-line">No batch diagnostics run yet.</div>
       <div id="batch-summary" class="summary-grid"></div>
       <div id="batch-families" class="data-list"></div>
+      <div id="batch-lanes" class="data-list"></div>
       <div id="batch-safety"></div>
       <div id="batch-results" class="result-cards"><div class="empty">No per-SKU diagnostics loaded.</div></div>
       <div class="report-grid">
@@ -4062,6 +4063,16 @@ function renderFamilies(grouped) {{
   target.innerHTML = entries.map(([family, skus]) => `<span class="tag warn">${{esc(family)}}: ${{esc((skus || []).join(', '))}}</span>`).join('');
 }}
 
+function renderLanes(grouped) {{
+  const target = document.getElementById('batch-lanes');
+  const entries = Object.entries(grouped || {{}});
+  if (!entries.length) {{
+    target.innerHTML = '<span class="tag ok">No grouped workflow lanes</span>';
+    return;
+  }}
+  target.innerHTML = entries.map(([lane, skus]) => `<span class="tag info">${{esc(lane)}}: ${{esc((skus || []).join(', '))}}</span>`).join('');
+}}
+
 function renderSafetyFlags(targetId, payload, extra = []) {{
   const flags = [];
   if (payload && payload.no_mutation_performed !== undefined) {{
@@ -4123,18 +4134,22 @@ function renderBatchResults(results, response) {{
         <h3>${{esc(result.sku || 'Unknown SKU')}} <span class="tag ${{tone}}">${{result.ready_for_publish_preview ? 'ready_for_publish_preview' : (result.found ? 'blocked' : 'missing')}}</span></h3>
         <div class="result-grid">
           <div class="kv"><div class="k">Found</div><div class="v">${{esc(String(result.found))}}</div></div>
+          <div class="kv"><div class="k">Current local status</div><div class="v">${{esc((result.local_item_state && result.local_item_state.status) || '')}}</div></div>
+          <div class="kv"><div class="k">Workflow lane</div><div class="v">${{esc(result.workflow_lane || '')}}</div></div>
+          <div class="kv"><div class="k">Workflow hint</div><div class="v">${{esc(result.workflow_hint || '')}}</div></div>
+          <div class="kv"><div class="k">Primary blocker family</div><div class="v">${{esc(result.primary_blocker_family || result.likely_root_cause_family || '')}}</div></div>
           <div class="kv"><div class="k">Local item state</div><div class="compact-list">${{formatLocalItemState(result.local_item_state, result.planned_action)}}</div></div>
           <div class="kv"><div class="k">Planned action</div><div class="v">${{esc((result.local_item_state && result.local_item_state.planned_action) || result.planned_action || '')}}</div></div>
           <div class="kv"><div class="k">Category ID</div><div class="v">${{esc(result.local_category_id || '')}}</div></div>
           <div class="kv"><div class="k">Condition ID</div><div class="v">${{esc(result.local_condition_id || '')}}</div></div>
           <div class="kv"><div class="k">Expected inventory enum</div><div class="v">${{esc(result.expected_inventory_enum || '')}}</div></div>
           <div class="kv"><div class="k">Root cause family</div><div class="v">${{esc(result.likely_root_cause_family || '')}}</div></div>
-          <div class="kv"><div class="k">Recommended next action</div><div class="v">${{esc(result.recommended_next_action || '')}}</div></div>
+          <div class="kv"><div class="k">Next safest action</div><div class="v">${{esc(result.recommended_next_action || '')}}</div></div>
           ${{formatReadinessBox('Image hosting readiness', result.image_hosting_readiness || {{}})}}
           ${{formatReadinessBox('Seller policy readiness', result.seller_policy_readiness || {{}})}}
           ${{formatReadinessBox('Merchant location readiness', result.merchant_location_readiness || {{}})}}
         </div>
-        <div class="kv"><div class="k">Blocker codes</div><div class="compact-list">${{renderTagList(result.blocker_codes, 'err')}}</div></div>
+        <div class="kv"><div class="k">Blockers</div><div class="compact-list">${{renderTagList(result.blocker_codes, 'err')}}</div></div>
         <div class="kv"><div class="k">Warning codes</div><div class="compact-list">${{renderTagList(result.warning_codes, 'warn')}}</div></div>
         <div class="kv"><div class="k">Success checks</div><div class="compact-list">${{renderTagList(result.success_checks, 'ok')}}</div></div>
         <div class="kv"><div class="k">Related files/services</div><div class="compact-list">${{renderTagList(result.related_files_services, 'info')}}</div></div>
@@ -4170,6 +4185,7 @@ async function runBatchDiagnostics() {{
     if (!resp.ok) throw new Error(body.detail || 'Batch diagnostics failed.');
     renderSummary(body.summary || {{}});
     renderFamilies(body.grouped_blocker_families || {{}});
+    renderLanes(body.grouped_workflow_lanes || {{}});
     renderSafetyFlags('batch-safety', body, [
       body.persistable ? 'Persistable local diagnostics response' : '',
       body.report_type ? 'Report type: ' + body.report_type : '',
@@ -4182,6 +4198,7 @@ async function runBatchDiagnostics() {{
   }} catch (error) {{
     renderSummary(null);
     document.getElementById('batch-families').innerHTML = '';
+    document.getElementById('batch-lanes').innerHTML = '';
     document.getElementById('batch-safety').innerHTML = '';
     document.getElementById('batch-results').innerHTML = `<div class="empty">Diagnostics failed: ${{esc(error.message)}}</div>`;
     setStatus('batch-status', error.message, 'err');

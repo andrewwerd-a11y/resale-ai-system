@@ -12,6 +12,7 @@ from sqlmodel import Session
 from apps.api.src.services.publish_diagnostics import build_publish_diagnostics
 from apps.api.src.services.publish_readiness import evaluate_publish_readiness
 from packages.core.src.config import get_settings
+from packages.core.src.constants import ItemStatus
 from packages.data.src.repositories.item_repo import ItemRepository
 from packages.ebay.src.condition_mapping import (
     condition_id_to_inventory_enum,
@@ -82,6 +83,46 @@ BLOCKER_FAMILY_BY_CODE = {
     "unknown_needs_manual_review": "readiness",
 }
 
+HIGH_RISK_LIVE_STATE_CODES = [
+    "stale_unpublished_offer_state_suspected",
+    "stale_live_inventory_condition_suspected",
+    "local_live_condition_mismatch",
+    "local_live_category_mismatch",
+    "offer_inventory_category_mismatch",
+    "condition_id_enum_mapping_mismatch",
+    "live_inventory_condition_not_allowed_by_policy",
+    "missing_merchant_location",
+    "offer_inventory_condition_mismatch",
+]
+
+CONDITION_POLICY_REVIEW_CODES = {
+    "condition_id_enum_mapping_mismatch",
+    "live_inventory_condition_not_allowed_by_policy",
+    "missing_listing_policies",
+}
+
+IMAGE_HOSTING_CODES = {
+    "missing_hosted_images",
+    "local_image_path_only",
+}
+
+STANDARD_PUBLISH_PREP_CODES = {
+    "required_aspects_missing",
+    "missing_offer_id",
+    "missing_live_offer",
+    "missing_live_inventory_item",
+    "marketplace_mismatch",
+}
+
+WORKFLOW_LANE_PRIORITY = [
+    "already_listed_or_sync_review",
+    "live_state_remediation_required",
+    "condition_policy_review",
+    "image_hosting_candidate",
+    "publish_prep_needed",
+    "unknown_manual_review",
+]
+
 
 def build_publish_debug_diagnostics_batch(
     session: Session,
@@ -107,6 +148,7 @@ def build_publish_debug_diagnostics_batch(
     ]
     summary = _summary(per_sku_results)
     grouped = _grouped_blocker_families(per_sku_results)
+    grouped_lanes = _grouped_workflow_lanes(per_sku_results)
 
     response = {
         "diagnostic_version": DIAGNOSTIC_VERSION,
@@ -122,6 +164,7 @@ def build_publish_debug_diagnostics_batch(
         "no_ebay_mutation_performed": True,
         "summary": summary,
         "grouped_blocker_families": grouped,
+        "grouped_workflow_lanes": grouped_lanes,
         "per_sku_results": per_sku_results,
     }
     response["copyable_report_markdown"] = _render_report_markdown(response)
@@ -144,6 +187,9 @@ def _build_one_sku_result(
             "sku": sku,
             "found": False,
             "ready_for_publish_preview": False,
+            "workflow_lane": "unknown_manual_review",
+            "workflow_hint": "missing local item",
+            "primary_blocker_family": "missing_local_item",
             "local_item_state": {"status": "", "offer_id": "", "listing_id": ""},
             "local_category_id": "",
             "local_condition_id": "",
@@ -185,20 +231,53 @@ def _build_one_sku_result(
         live_inventory_condition_enum=live_inventory_condition_enum,
         live_inventory_condition_id=live_inventory_condition_id,
     )
+    blocker_codes = _prioritize_blocker_codes(blocker_codes)
     warning_codes = _classify_warnings(item=item, readiness=readiness, diagnostics=diagnostics)
-    ready = not blocker_codes and bool(readiness.get("ready")) and not bool(diagnostics.get("blocked_by_repair_queue"))
+    listed_or_sync_review = _is_already_listed_or_sync_review(item, diagnostics)
+    ready = (
+        not blocker_codes
+        and bool(readiness.get("ready"))
+        and not bool(diagnostics.get("blocked_by_repair_queue"))
+        and not listed_or_sync_review
+    )
     status_codes = ["ready_for_publish_preview"] if ready else []
     success_checks = _success_checks(readiness=readiness, diagnostics=diagnostics, ready=ready)
+    workflow_lane = _workflow_lane(
+        item=item,
+        diagnostics=diagnostics,
+        blocker_codes=blocker_codes,
+        ready=ready,
+    )
+    workflow_hint = _workflow_hint(
+        item=item,
+        diagnostics=diagnostics,
+        blocker_codes=blocker_codes,
+        workflow_lane=workflow_lane,
+        ready=ready,
+    )
+    primary_blocker_family = _primary_blocker_family(
+        blocker_codes=blocker_codes,
+        workflow_lane=workflow_lane,
+        ready=ready,
+    )
     next_action = (
         "Open publish preview and review payloads before any separately approved publish flow."
         if ready
-        else _recommended_next_action(blocker_codes, diagnostics)
+        else _recommended_next_action(
+            blocker_codes,
+            diagnostics,
+            workflow_lane=workflow_lane,
+            workflow_hint=workflow_hint,
+        )
     )
 
     return {
         "sku": sku,
         "found": True,
         "ready_for_publish_preview": ready,
+        "workflow_lane": workflow_lane,
+        "workflow_hint": workflow_hint,
+        "primary_blocker_family": primary_blocker_family,
         "local_item_state": {
             "status": str(item.status or ""),
             "offer_id": str(item.offer_id or ""),
@@ -312,7 +391,11 @@ def _classify_blockers(
         add("stale_live_inventory_condition_suspected")
     if diagnostics.get("stale_existing_offer_hypothesis") is True:
         add("stale_unpublished_offer_state_suspected")
-    if (readiness.get("ready") is False or diagnostics.get("blocked_by_repair_queue")) and not codes:
+    if (
+        (readiness.get("ready") is False or diagnostics.get("blocked_by_repair_queue"))
+        and not codes
+        and not _is_already_listed_or_sync_review(item, diagnostics)
+    ):
         add("unknown_needs_manual_review")
     return codes
 
@@ -399,19 +482,132 @@ def _readiness_check(readiness: dict, name: str) -> dict:
     return next((check for check in readiness.get("checks") or [] if check.get("name") == name), {})
 
 
-def _recommended_next_action(blocker_codes: list[str], diagnostics: dict) -> str:
+def _prioritize_blocker_codes(blocker_codes: list[str]) -> list[str]:
+    return sorted(
+        list(dict.fromkeys(blocker_codes)),
+        key=lambda code: (_blocker_priority(code), code),
+    )
+
+
+def _blocker_priority(code: str) -> int:
+    order = [
+        "missing_local_item",
+        *HIGH_RISK_LIVE_STATE_CODES,
+        "missing_live_offer",
+        "missing_live_inventory_item",
+        "missing_listing_policies",
+        "required_aspects_missing",
+        "missing_offer_id",
+        "marketplace_mismatch",
+        "missing_hosted_images",
+        "local_image_path_only",
+        "unknown_needs_manual_review",
+    ]
+    try:
+        return order.index(code)
+    except ValueError:
+        return len(order) + 1
+
+
+def _is_already_listed_or_sync_review(item, diagnostics: dict) -> bool:
+    local_status = str(item.status or "").lower()
+    listing_id = str(item.listing_id or "").strip()
+    live_offer = diagnostics.get("existing_offer_diagnostics") or {}
+    live_status = str(live_offer.get("status") or "").upper()
+    return bool(listing_id) or local_status == ItemStatus.LISTED or live_status in {"PUBLISHED", "ACTIVE"}
+
+
+def _workflow_lane(*, item, diagnostics: dict, blocker_codes: list[str], ready: bool) -> str:
+    local_status = str(item.status or "").lower()
+    if _is_already_listed_or_sync_review(item, diagnostics):
+        return "already_listed_or_sync_review"
+    if diagnostics.get("blocked_by_repair_queue") or any(code in HIGH_RISK_LIVE_STATE_CODES for code in blocker_codes):
+        return "live_state_remediation_required"
+    if any(code in CONDITION_POLICY_REVIEW_CODES for code in blocker_codes):
+        return "condition_policy_review"
+    if local_status and local_status not in {ItemStatus.EXPORT_READY, ItemStatus.EXPORTED, ItemStatus.LISTED}:
+        return "unknown_manual_review"
+    if blocker_codes and set(blocker_codes).issubset(IMAGE_HOSTING_CODES):
+        return "image_hosting_candidate"
+    if ready or blocker_codes or str(diagnostics.get("planned_action") or ""):
+        return "publish_prep_needed"
+    return "unknown_manual_review"
+
+
+def _workflow_hint(*, item, diagnostics: dict, blocker_codes: list[str], workflow_lane: str, ready: bool) -> str:
+    local_status = str(item.status or "").lower()
+    if workflow_lane == "already_listed_or_sync_review":
+        return "already listed / sync review"
+    if local_status and workflow_lane == "unknown_manual_review" and local_status not in {ItemStatus.EXPORT_READY, ItemStatus.EXPORTED, ItemStatus.LISTED}:
+        return "status not publish candidate"
+    if workflow_lane == "condition_policy_review":
+        return "category-condition policy review"
+    if workflow_lane == "live_state_remediation_required":
+        return "live state remediation required"
+    if workflow_lane == "image_hosting_candidate":
+        return "image hosting needed before publish preview"
+    if workflow_lane == "publish_prep_needed" and ready:
+        return "fresh publish candidate"
+    if workflow_lane == "publish_prep_needed":
+        return "local publish prep still needed"
+    return "unclear readiness reason"
+
+
+def _primary_blocker_family(*, blocker_codes: list[str], workflow_lane: str, ready: bool) -> str:
+    if ready:
+        return "ready_for_publish_preview"
+    for code in blocker_codes:
+        family = BLOCKER_FAMILY_BY_CODE.get(code)
+        if family:
+            return family
+    lane_family = {
+        "already_listed_or_sync_review": "sync_review",
+        "publish_prep_needed": "publish_prep",
+        "condition_policy_review": "condition",
+        "live_state_remediation_required": "offer_policy",
+        "image_hosting_candidate": "images",
+        "unknown_manual_review": "unknown_needs_manual_review",
+    }
+    return lane_family.get(workflow_lane, "unknown_needs_manual_review")
+
+
+def _recommended_next_action(
+    blocker_codes: list[str],
+    diagnostics: dict,
+    *,
+    workflow_lane: str,
+    workflow_hint: str,
+) -> str:
     if "missing_local_item" in blocker_codes:
         return "Create or import the local item record before diagnosing publish readiness."
+    if workflow_lane == "already_listed_or_sync_review":
+        return "Treat this as a listed/sync-review item. Review sync, revise readiness, or live listing state before any new publish attempt."
+    if "stale_unpublished_offer_state_suspected" in blocker_codes:
+        return "Do not publish. Review the stale unpublished offer state and use a separately approved remediation flow before retrying."
     if "stale_live_inventory_condition_suspected" in blocker_codes:
         return "Do not publish. Refresh the stale live inventory item in a separately approved remediation flow, then rerun diagnostics."
-    if "condition_id_enum_mapping_mismatch" in blocker_codes or "local_live_condition_mismatch" in blocker_codes:
-        return "Resolve the condition mapping/live inventory mismatch before any publish retry."
+    if any(code in blocker_codes for code in {
+        "local_live_condition_mismatch",
+        "local_live_category_mismatch",
+        "offer_inventory_category_mismatch",
+        "condition_id_enum_mapping_mismatch",
+        "live_inventory_condition_not_allowed_by_policy",
+        "missing_merchant_location",
+        "offer_inventory_condition_mismatch",
+    }):
+        return "Resolve the live/category/condition mismatch before image hosting or any publish retry."
     if "missing_hosted_images" in blocker_codes or "local_image_path_only" in blocker_codes:
         return "Host item images to public URLs before publish preview or publish."
     if "missing_listing_policies" in blocker_codes:
         return "Configure or verify seller listing policies before publish preview."
     if "missing_live_offer" in blocker_codes or "missing_live_inventory_item" in blocker_codes:
         return "Review missing live read-only eBay objects before any publish retry."
+    if "required_aspects_missing" in blocker_codes:
+        return "Fill the required category aspects and rerun publish diagnostics before publish preview."
+    if "missing_offer_id" in blocker_codes:
+        return "Review the local offer state and create or recover the expected offer before any publish retry."
+    if workflow_lane == "unknown_manual_review" and workflow_hint == "status not publish candidate":
+        return "Move the item into a publish-candidate lifecycle state before using publish diagnostics as a fresh publish signal."
     return str(diagnostics.get("recommended_next_action") or "Review diagnostics manually before any publish attempt.")
 
 
@@ -512,6 +708,20 @@ def _grouped_blocker_families(results: list[dict]) -> dict:
     return dict(sorted(grouped.items()))
 
 
+def _grouped_workflow_lanes(results: list[dict]) -> dict:
+    grouped: dict[str, list[str]] = defaultdict(list)
+    for result in results:
+        sku = str(result.get("sku") or "")
+        lane = str(result.get("workflow_lane") or "")
+        if sku and lane and sku not in grouped[lane]:
+            grouped[lane].append(sku)
+    return {
+        lane: grouped[lane]
+        for lane in WORKFLOW_LANE_PRIORITY
+        if grouped.get(lane)
+    }
+
+
 def _render_report_markdown(response: dict) -> str:
     lines = [
         "# Publish Diagnostics Batch",
@@ -531,10 +741,22 @@ def _render_report_markdown(response: dict) -> str:
             lines.append(f"- {family}: {', '.join(skus)}")
     else:
         lines.append("- none")
+    lines.extend(["", "## Grouped Workflow Lanes"])
+    grouped_lanes = response.get("grouped_workflow_lanes") or {}
+    if grouped_lanes:
+        for lane, skus in grouped_lanes.items():
+            lines.append(f"- {lane}: {', '.join(skus)}")
+    else:
+        lines.append("- none")
     lines.extend(["", "## Per-SKU Results"])
     for result in response.get("per_sku_results") or []:
         blockers = ", ".join(result.get("blocker_codes") or []) or "none"
-        lines.append(f"- {result.get('sku')}: blockers={blockers}; next={result.get('recommended_next_action') or ''}")
+        lines.append(
+            f"- {result.get('sku')}: status={((result.get('local_item_state') or {}).get('status') or '')}; "
+            f"lane={result.get('workflow_lane') or ''}; "
+            f"primary_blocker_family={result.get('primary_blocker_family') or ''}; "
+            f"blockers={blockers}; next={result.get('recommended_next_action') or ''}"
+        )
     return "\n".join(lines)
 
 

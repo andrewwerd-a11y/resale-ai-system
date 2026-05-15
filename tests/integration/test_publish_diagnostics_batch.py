@@ -177,11 +177,14 @@ def test_batch_diagnostics_blocks_stale_live_used_good_without_mutation(monkeypa
     assert stale["live_inventory_condition_enum"] == "USED_GOOD"
     assert stale["live_inventory_condition_id"] == "5000"
     assert stale["ready_for_publish_preview"] is False
+    assert stale["workflow_lane"] == "live_state_remediation_required"
+    assert stale["primary_blocker_family"] == "condition"
     assert "ready_for_publish_preview" not in stale["blocker_codes"]
     assert "local_live_condition_mismatch" in stale["blocker_codes"]
     assert "condition_id_enum_mapping_mismatch" in stale["blocker_codes"]
     assert "live_inventory_condition_not_allowed_by_policy" in stale["blocker_codes"]
     assert "stale_live_inventory_condition_suspected" in stale["blocker_codes"]
+    assert stale["recommended_next_action"].startswith("Do not publish.")
     assert stale["related_files_services"]
 
     missing = body["per_sku_results"][1]
@@ -195,6 +198,7 @@ def test_batch_diagnostics_blocks_stale_live_used_good_without_mutation(monkeypa
     assert body["summary"]["blocked"] == 2
     assert "condition" in body["grouped_blocker_families"]
     assert "missing_local_item" in body["grouped_blocker_families"]
+    assert "live_state_remediation_required" in body["grouped_workflow_lanes"]
     assert "ready_for_publish_preview" not in body["grouped_blocker_families"]
 
 
@@ -225,14 +229,57 @@ def test_batch_diagnostics_classifies_image_hosting_failures(monkeypatch, tmp_pa
 
     assert resp.status_code == 200
     result = resp.json()["per_sku_results"][0]
+    assert result["workflow_lane"] == "image_hosting_candidate"
+    assert result["workflow_hint"] == "image hosting needed before publish preview"
+    assert result["primary_blocker_family"] == "images"
     assert "missing_hosted_images" in result["blocker_codes"]
     assert result["image_hosting_readiness"]["status"] == "missing"
+    assert result["recommended_next_action"] == "Host item images to public URLs before publish preview or publish."
     assert result["raw_details"]
     serialized = str(result["raw_details"]).lower()
     assert "authorization" not in serialized
     assert "bearer" not in serialized
     assert "secret" not in serialized
     assert len(serialized) < 12000
+
+
+def test_batch_diagnostics_classifies_already_listed_items_separately(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    _block_mutations(monkeypatch)
+    _seed_item(status=ItemStatus.LISTED, listing_id="1234567890")
+
+    resp = _post_batch(["BK-000008"], allow_live_readonly=False)
+
+    assert resp.status_code == 200
+    result = resp.json()["per_sku_results"][0]
+    assert result["ready_for_publish_preview"] is False
+    assert result["workflow_lane"] == "already_listed_or_sync_review"
+    assert result["workflow_hint"] == "already listed / sync review"
+    assert result["primary_blocker_family"] == "sync_review"
+    assert result["blocker_codes"] == []
+    assert "listed/sync-review item" in result["recommended_next_action"]
+    assert resp.json()["summary"]["ready_for_publish_preview"] == 0
+
+
+def test_batch_diagnostics_live_state_blockers_outrank_image_hosting(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    _block_mutations(monkeypatch)
+    _allow_readonly_auth(monkeypatch)
+    _stub_live_reads(monkeypatch, inventory_condition="USED_GOOD", policy_ids=["1000", "3000"])
+    local_only = tmp_path / "local-only.jpg"
+    local_only.write_bytes(b"fake-image")
+    _seed_item(image_paths=[str(local_only)])
+
+    resp = _post_batch(["BK-000008"], allow_live_readonly=True)
+
+    assert resp.status_code == 200
+    result = resp.json()["per_sku_results"][0]
+    assert result["workflow_lane"] == "live_state_remediation_required"
+    assert result["primary_blocker_family"] == "condition"
+    assert "local_image_path_only" in result["blocker_codes"]
+    assert result["blocker_codes"].index("stale_live_inventory_condition_suspected") < result["blocker_codes"].index("local_image_path_only")
+    assert result["recommended_next_action"].startswith("Do not publish.")
+    assert "Host item images" not in result["recommended_next_action"]
 
 
 def test_batch_diagnostics_honors_route_guard(monkeypatch, tmp_path):
