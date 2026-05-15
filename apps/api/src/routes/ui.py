@@ -70,6 +70,73 @@ async def settings_page():
     return HTMLResponse(_settings_html())
 
 
+@router.get("/intake-pipeline/{sku}", response_class=HTMLResponse)
+async def intake_pipeline_cockpit(sku: str):
+    """Operator cockpit for a single item's staged intake pipeline.
+
+    Reads /api/items/{sku}/intake-pipeline-status,
+    /api/items/{sku}/correction-report-v2, and exposes buttons for
+    platform-drafts and marketplace-recommendations. Read-only / draft-only —
+    publish controls remain on the existing review and listings pages.
+    """
+    return HTMLResponse(_intake_pipeline_cockpit_html(sku))
+
+
+def _intake_pipeline_cockpit_html(sku: str) -> str:
+    safe_sku = sku.replace("<", "&lt;").replace(">", "&gt;")
+    return f"""<!doctype html>
+<html><head><meta charset='utf-8'>
+<title>Intake Pipeline — {safe_sku}</title>
+<style>
+  body {{ font-family: -apple-system, system-ui, sans-serif; margin: 16px; }}
+  h1 {{ margin-top: 0; }}
+  section {{ border: 1px solid #ddd; border-radius: 6px; padding: 12px; margin: 12px 0; }}
+  section h2 {{ margin: 0 0 8px 0; font-size: 15px; color: #333; }}
+  pre {{ background: #f7f7f8; padding: 8px; border-radius: 4px; overflow: auto; max-height: 360px; font-size: 12px; }}
+  .row {{ display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }}
+  button {{ padding: 6px 10px; cursor: pointer; }}
+  .badge {{ display: inline-block; padding: 2px 6px; border-radius: 4px; background: #eef; color: #224; font-size: 12px; margin-left: 8px; }}
+  .bad {{ background: #fee; color: #800; }}
+  .ok {{ background: #efe; color: #060; }}
+  .warn {{ background: #ffd; color: #553; }}
+</style></head><body>
+<h1>Intake Pipeline — {safe_sku} <span class='badge warn'>read-only / draft-only</span></h1>
+<p>This cockpit calls the new <code>/api/items/{safe_sku}/...</code> endpoints. Nothing here publishes or mutates remote state.</p>
+<section><h2>Stage status</h2>
+  <div class='row'>
+    <button id='btn-status'>Run intake pipeline preview</button>
+    <button id='btn-report'>View correction report v2</button>
+    <button id='btn-readiness'>Recheck publish readiness</button>
+    <button id='btn-drafts'>Generate platform drafts</button>
+    <button id='btn-recs'>Marketplace recommendations</button>
+  </div>
+  <pre id='out'>(click a button above)</pre>
+</section>
+<script>
+const SKU = {sku!r};
+async function show(promise) {{
+  const out = document.getElementById('out');
+  out.textContent = 'loading...';
+  try {{
+    const resp = await promise;
+    const body = await resp.json();
+    out.textContent = JSON.stringify(body, null, 2);
+  }} catch (e) {{ out.textContent = String(e); }}
+}}
+document.getElementById('btn-status').onclick = () =>
+  show(fetch(`/api/items/${{SKU}}/intake-pipeline-status?run_deep_analysis=true`));
+document.getElementById('btn-report').onclick = () =>
+  show(fetch(`/api/items/${{SKU}}/correction-report-v2`));
+document.getElementById('btn-readiness').onclick = () =>
+  show(fetch(`/api/items/${{SKU}}/correction-report`));
+document.getElementById('btn-drafts').onclick = () =>
+  show(fetch(`/api/items/${{SKU}}/platform-drafts`, {{method: 'POST', headers: {{'content-type':'application/json'}}, body: '{{}}'}}));
+document.getElementById('btn-recs').onclick = () =>
+  show(fetch(`/api/items/${{SKU}}/marketplace-recommendations`, {{method: 'POST', headers: {{'content-type':'application/json'}}, body: JSON.stringify({{selection_mode: 'hybrid'}})}}));
+</script>
+</body></html>"""
+
+
 def _nav(active: str) -> str:
     pages = [
         ("Dashboard", "/", "dashboard"),

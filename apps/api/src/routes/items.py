@@ -439,6 +439,56 @@ def post_reanalysis_preview(
     return build_reanalysis_preview(item, body.pending_updates or {})
 
 
+class _PlatformDraftsRequest(BaseModel):
+    platforms: list[str] | None = None
+
+
+@router.post("/{sku}/platform-drafts")
+def post_platform_drafts(
+    sku: str,
+    body: _PlatformDraftsRequest | None = None,
+    session: Session = Depends(get_session),
+):
+    """Generate per-platform listing drafts. Never publishes."""
+    from packages.intake.src.platform_translation import translate_item_for_platforms
+
+    repo = ItemRepository(session)
+    item = repo.get_by_sku(sku)
+    if not item:
+        raise HTTPException(status_code=404, detail=f"Item {sku} not found")
+    platforms = body.platforms if (body and body.platforms) else None
+    drafts = translate_item_for_platforms(item, platforms=platforms)
+    return {
+        "sku": sku,
+        "drafts": [d.to_dict() for d in drafts],
+        "no_ebay_mutation_performed": True,
+        "no_external_provider_called": True,
+    }
+
+
+class _MarketplaceRecommendationsRequest(BaseModel):
+    selection_mode: str = "hybrid"  # manual | auto | hybrid
+
+
+@router.post("/{sku}/marketplace-recommendations")
+def post_marketplace_recommendations(
+    sku: str,
+    body: _MarketplaceRecommendationsRequest | None = None,
+    session: Session = Depends(get_session),
+):
+    """Recommend marketplaces + return drafts. Never publishes."""
+    from packages.intake.src.platform_translation import recommend_marketplaces
+
+    repo = ItemRepository(session)
+    item = repo.get_by_sku(sku)
+    if not item:
+        raise HTTPException(status_code=404, detail=f"Item {sku} not found")
+    mode = (body.selection_mode if body else "hybrid") or "hybrid"
+    if mode not in {"manual", "auto", "hybrid"}:
+        raise HTTPException(status_code=422, detail=f"Invalid selection_mode: {mode}")
+    return recommend_marketplaces(item, selection_mode=mode)
+
+
 @router.patch("/{sku}")
 def update_item(sku: str, updates: dict, session: Session = Depends(get_session)):
     """Manual field override — sets manual_override=True to protect from AI reprocessing."""
