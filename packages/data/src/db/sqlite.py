@@ -82,6 +82,10 @@ def migrate_add_columns() -> None:
         ("promotion_pct", "REAL"),
         ("cost_basis", "REAL"),
         ("last_synced_at", "TEXT"),
+        # Intake quality gate
+        ("intake_quality_status", "TEXT"),
+        ("missing_photo_types", "TEXT"),
+        ("needs_more_photos_for_analysis", "INTEGER DEFAULT 0"),
     ]
     for col_name, col_def in new_columns:
         try:

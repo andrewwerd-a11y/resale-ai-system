@@ -6,7 +6,7 @@ from pathlib import Path
 from packages.domain.src.entities.item import Item
 from packages.ebay.src.aspect_validation import validate_aspects
 from packages.ebay.src.category_spreadsheet import CategorySpreadsheet
-from packages.ebay.src.inventory_client import EbayInventoryClient
+from packages.ebay.src.condition_mapping import CONDITION_ID_TO_ENUM
 from packages.ebay.src.public_image_urls import (
     extract_public_image_urls,
     is_valid_public_image_url,
@@ -14,6 +14,7 @@ from packages.ebay.src.public_image_urls import (
     normalize_public_image_url,
 )
 
+INVALID_CONDITION_ID_FORMAT_ACTION = "Normalize condition_id to a valid eBay numeric condition ID before publishing."
 
 _DEFAULT_CATEGORY_CONDITION_POLICIES: dict[str, dict] = {
     "29223": {"allowed_condition_ids": ["3000", "4000", "5000", "6000"], "source": "builtin"},
@@ -144,16 +145,31 @@ def evaluate_publish_compatibility(item: Item, *, strict_condition_policy: bool 
 
     policy = get_category_condition_policy(str(item.ebay_category_id or ""))
     condition_id = str(item.condition_id or "").strip()
-    if not condition_id:
+    condition_id_format_valid = _is_valid_condition_id_format(condition_id)
+    condition_context = policy | {
+        "condition_id": condition_id,
+        "condition_id_valid": condition_id_format_valid,
+    }
+    if not condition_id_format_valid:
         add_check(
-            "category_condition_policy",
+            "condition_id_format",
             False,
-            "Condition ID is missing for the selected category.",
+            (
+                "Condition ID is missing for the selected category."
+                if not condition_id
+                else f"Condition ID '{condition_id}' is not a clean numeric eBay condition ID."
+            ),
             blocking=True,
-            action="Choose a valid condition for the selected category before retrying publish.",
-            context=policy,
+            action=INVALID_CONDITION_ID_FORMAT_ACTION,
+            context=condition_context,
         )
     elif not policy["known"]:
+        add_check(
+            "condition_id_format",
+            True,
+            f"Condition ID '{condition_id}' is a clean numeric eBay condition ID.",
+            context=condition_context,
+        )
         add_check(
             "category_condition_policy",
             not strict_condition_policy,
@@ -165,9 +181,15 @@ def evaluate_publish_compatibility(item: Item, *, strict_condition_policy: bool 
                 else None
             ),
             action="Fetch or confirm category-specific condition compatibility before retrying publish.",
-            context=policy | {"condition_id": condition_id},
+            context=condition_context,
         )
     else:
+        add_check(
+            "condition_id_format",
+            True,
+            f"Condition ID '{condition_id}' is a clean numeric eBay condition ID.",
+            context=condition_context,
+        )
         allowed_condition_ids = [str(v) for v in policy["allowed_condition_ids"]]
         condition_ok = condition_id in allowed_condition_ids
         add_check(
@@ -180,15 +202,15 @@ def evaluate_publish_compatibility(item: Item, *, strict_condition_policy: bool 
             ),
             blocking=True,
             action="Choose an allowed category-specific condition ID before retrying publish.",
-            context=policy | {"condition_id": condition_id},
+            context=condition_context,
         )
 
-    client = EbayInventoryClient()
     template = None
     if str(item.ebay_category_id or "").strip():
         template = CategorySpreadsheet().load_template(str(item.ebay_category_id or "").strip())
 
-    aspect_validation = validate_aspects(client._collect_item_specifics(item, template))
+    collected_item_specifics = _collect_local_item_specifics(item, template)
+    aspect_validation = validate_aspects(collected_item_specifics)
     add_check(
         "aspect_value_constraints",
         aspect_validation["ok"],
@@ -208,7 +230,7 @@ def evaluate_publish_compatibility(item: Item, *, strict_condition_policy: bool 
     missing_required = []
     missing_recommended = []
     if template is not None:
-        flattened = _flatten_values(client._collect_item_specifics(item, template))
+        flattened = _flatten_values(collected_item_specifics)
         for field_name in template.required_fields:
             if not flattened.get(field_name):
                 missing_required.append(field_name)
@@ -261,6 +283,11 @@ def evaluate_publish_compatibility(item: Item, *, strict_condition_policy: bool 
     }
 
 
+def _is_valid_condition_id_format(value: str) -> bool:
+    text = str(value or "").strip()
+    return bool(text and text.isdigit() and text in CONDITION_ID_TO_ENUM)
+
+
 def _flatten_values(values: dict[str, list[str]]) -> dict[str, str]:
     flattened: dict[str, str] = {}
     for key, raw_values in values.items():
@@ -270,3 +297,45 @@ def _flatten_values(values: dict[str, list[str]]) -> dict[str, str]:
         if first:
             flattened[key] = first
     return flattened
+
+
+def _collect_local_item_specifics(item: Item, template=None) -> dict[str, list[str]]:
+    specifics: dict[str, list[str]] = {}
+    stored: dict = {}
+    if isinstance(item.item_specifics, dict):
+        stored = item.item_specifics
+    elif isinstance(item.item_specifics, str):
+        try:
+            stored = json.loads(item.item_specifics)
+        except Exception:
+            stored = {}
+
+    field_map = {
+        "Brand": item.brand,
+        "Type": item.type,
+        "Color": item.color,
+        "Size": item.size,
+        "Material": item.material,
+        "Style": item.style,
+        "Pattern": item.pattern,
+        "Department": item.department,
+    }
+    for ebay_field, value in field_map.items():
+        if value:
+            specifics[ebay_field] = [str(value)]
+
+    for key, value in stored.items():
+        if not value:
+            continue
+        specifics[str(key)] = [str(value)] if not isinstance(value, list) else [str(entry) for entry in value]
+
+    if template is not None:
+        required_fields = getattr(template, "required_fields", [])
+        field_constraints = getattr(template, "field_constraints", {})
+        for field_name in required_fields:
+            if field_name not in specifics:
+                defaults = field_constraints.get(field_name, [])
+                if defaults:
+                    specifics[field_name] = [defaults[0]]
+
+    return specifics

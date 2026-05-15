@@ -18,6 +18,11 @@ from apps.api.src.services.operation_diagnostics import (
     record_failure,
     record_success,
 )
+from apps.api.src.services.bulk_publish_preview import (
+    DECISION_WOULD_PUBLISH,
+    DEFAULT_BATCH_PUBLISH_STATUSES,
+    build_bulk_publish_preview,
+)
 from apps.api.src.services.publish_compatibility import evaluate_publish_compatibility
 from apps.api.src.services.publish_readiness import evaluate_publish_readiness
 from apps.api.src.services.publish_repair import (
@@ -65,6 +70,12 @@ class ApprovedRepairEntry(BaseModel):
 
 class BulkApplyApprovedFixesBody(BaseModel):
     approvals: list[ApprovedRepairEntry]
+
+
+class BatchPublishPreviewBody(BaseModel):
+    skus: list[str] = []
+    statuses: list[str] = []
+    persist_report: bool = True
 
 
 def _try_update_category_stats(item, sold: bool = False, sold_price: float | None = None) -> None:
@@ -287,6 +298,35 @@ def repair_queue_bulk_apply_approved_fixes(
             raise HTTPException(status_code=403, detail=str(exc))
     return bulk_apply_approved_fixes(session, [entry.model_dump() for entry in body.approvals])
 
+
+@router.post("/publish/batch-preview")
+def publish_batch_preview(
+    body: BatchPublishPreviewBody,
+    session: Session = Depends(get_session),
+):
+    selected = parse_sku_list(",".join(body.skus))
+    statuses = [str(value or "").strip().lower() for value in body.statuses]
+    if is_route_guard_enabled():
+        if not selected:
+            raise HTTPException(
+                status_code=403,
+                detail="Explicit SKUs are required for batch publish preview while E2E_ROUTE_GUARD_ENABLED is active.",
+            )
+        try:
+            selected = assert_route_skus_allowed(selected, "ebay.publish_batch_preview", require_non_empty=True)
+        except E2ESafetyError as exc:
+            raise HTTPException(status_code=403, detail=str(exc))
+    try:
+        return build_bulk_publish_preview(
+            session,
+            skus=selected,
+            statuses=statuses,
+            persist_report=body.persist_report,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
 @router.post("/publish/batch")
 def publish_batch(
     skus: str = "",
@@ -296,6 +336,7 @@ def publish_batch(
     from packages.ebay.src.inventory_client import EbayInventoryClient
     import datetime
     import uuid
+
     selected = parse_sku_list(skus)
     batch_id = f"publish-batch-{uuid.uuid4().hex[:12]}"
     if is_route_guard_enabled():
@@ -307,11 +348,14 @@ def publish_batch(
         raise HTTPException(status_code=400, detail="e2e_only requires explicit skus")
 
     repo = ItemRepository(session)
-    items = repo.list_by_status(ItemStatus.EXPORT_READY) + repo.list_by_status(ItemStatus.APPROVED)
-    if selected:
-        allowed = set(selected)
-        items = [item for item in items if (item.sku or "").upper() in allowed]
-    if not items:
+    preview = build_bulk_publish_preview(
+        session,
+        skus=selected,
+        statuses=[] if selected else DEFAULT_BATCH_PUBLISH_STATUSES,
+        persist_report=False,
+    )
+    preview_decisions = preview["decisions"]
+    if not preview_decisions:
         record_success(
             session,
             operation_name="ebay_publish_batch",
@@ -323,44 +367,108 @@ def publish_batch(
             ebay_mutation_attempted=False,
             ebay_mutation_succeeded=False,
             external_service="local",
-            result_context={"selected_skus": selected, "count": 0},
+            result_context={"selected_skus": selected, "selected_statuses": DEFAULT_BATCH_PUBLISH_STATUSES, "count": 0},
         )
-        return {"message": "No items ready to publish", "count": 0}
+        return {
+            "message": "No items ready to publish",
+            "count": 0,
+            "summary": _batch_summary(total=0, attempted=0, published=0, skipped=0, failed=0),
+            "attempted": [],
+            "published_items": [],
+            "skipped_items": [],
+            "failed_items": [],
+            "preview_summary": preview["summary"],
+        }
+
     client = EbayInventoryClient()
+    attempted_items: list[dict] = []
+    published_items: list[dict] = []
+    skipped_items: list[dict] = []
+    failed_items: list[dict] = []
     results = {"published": 0, "failed": 0, "skipped": 0, "errors": [], "skipped_skus": []}
-    for item in items:
-        repair_blocker = get_publish_repair_blocker(session, item.sku or "")
-        if repair_blocker["blocked_by_repair_queue"]:
+    for preview_decision in preview_decisions:
+        sku = str(preview_decision.get("sku") or "").upper()
+        if str(preview_decision.get("decision") or "") != DECISION_WOULD_PUBLISH:
+            if preview_decision.get("blocked_by_repair_queue"):
+                repair_blocker = preview_decision.get("repair_blocker") or {}
+                record_failure(
+                    session,
+                    operation_name="ebay_publish_batch_item",
+                    route="/api/ebay/publish/batch",
+                    sku=sku,
+                    batch_id=batch_id,
+                    status="blocked",
+                    safe_message="Publish skipped because repair queue blocks retry.",
+                    external_service="local",
+                    stage="preflight_repair_queue",
+                    error_family="publish_repair_queue",
+                    error_code=str(preview_decision.get("classified_error_code") or "blocked_by_repair_queue"),
+                    recommended_next_action=str(preview_decision.get("next_action") or ""),
+                    result_context={
+                        "repair_plan_id": preview_decision.get("repair_plan_id") or "",
+                        "retry_allowed": bool(preview_decision.get("retry_allowed")),
+                    },
+                )
+            elif _requires_publish_blocked_record(preview_decision):
+                item = repo.get_by_sku(sku)
+                if item is not None:
+                    repair_record = record_publish_blocked(
+                        session,
+                        item,
+                        blockers=list(preview_decision.get("preflight_blockers") or []),
+                        readiness=preview_decision.get("readiness") or evaluate_publish_readiness(item).as_dict(),
+                        compatibility=preview_decision.get("compatibility") or evaluate_publish_compatibility(item, strict_condition_policy=True),
+                    )
+                    plan_ids = [plan.get("id") for plan in repair_record.get("repair_plan", []) if plan.get("id")]
+                    if plan_ids and not preview_decision.get("repair_plan_id"):
+                        preview_decision["repair_plan_id"] = plan_ids[0]
+            decision = _preview_to_batch_decision(preview_decision)
+            skipped_items.append(decision)
+            results["skipped"] += 1
+            results["skipped_skus"].append(_legacy_skipped(decision))
+            continue
+
+        item = repo.get_by_sku(sku)
+        if item is None:
             record_failure(
                 session,
                 operation_name="ebay_publish_batch_item",
                 route="/api/ebay/publish/batch",
-                sku=item.sku,
+                sku=sku,
                 batch_id=batch_id,
                 status="blocked",
-                safe_message="Publish skipped because repair queue blocks retry.",
+                safe_message="Publish skipped because the local item record was not found.",
                 external_service="local",
-                stage="preflight_repair_queue",
-                error_family="publish_repair_queue",
-                error_code=repair_blocker["classified_error_code"] or "blocked_by_repair_queue",
-                recommended_next_action="Resolve or supersede the repair queue blocker before publishing.",
-                result_context={"repair_plan_id": repair_blocker["repair_plan_id"], "retry_allowed": repair_blocker["retry_allowed"]},
+                stage="local_lookup",
+                error_family="missing_local_item",
+                error_code="missing_item",
+                recommended_next_action="Create or import the item before batch publish.",
             )
+            decision = _preview_to_batch_decision(
+                preview_decision
+                | {
+                    "decision": "SKIP",
+                    "reason_code": "missing_item",
+                    "classified_error_code": "missing_item",
+                    "message": "Item was not found.",
+                    "next_action": "Create or import the item before batch publish.",
+                    "retry_allowed": False,
+                    "requires_review": True,
+                },
+                stage="local_lookup",
+            )
+            skipped_items.append(decision)
             results["skipped"] += 1
-            results["skipped_skus"].append(
-                {
-                    "sku": item.sku,
-                    "code": "blocked_by_repair_queue",
-                    "reason": repair_blocker["reason"],
-                    "repair_plan_id": repair_blocker["repair_plan_id"],
-                    "latest_publish_attempt_id": repair_blocker["latest_publish_attempt_id"],
-                    "repair_status": repair_blocker["repair_status"],
-                    "retry_allowed": repair_blocker["retry_allowed"],
-                    "classified_error_code": repair_blocker["classified_error_code"],
-                    "suggested_actions": repair_blocker["suggested_actions"],
-                }
-            )
+            results["skipped_skus"].append(_legacy_skipped(decision))
             continue
+
+        attempted_items.append(
+            {
+                "sku": sku,
+                "stage": "publish_item",
+                "planned_action": str(preview_decision.get("planned_action") or "publish"),
+            }
+        )
         result = client.publish_item(item)
         if result.ok:
             data = result.value
@@ -390,8 +498,22 @@ def publish_batch(
                 result_context={"listing_id": data.get("listing_id"), "offer_id": data.get("offer_id"), "photos_uploaded": len(data.get("photo_urls") or [])},
             )
             results["published"] += 1
+            published_items.append(
+                {
+                    "sku": sku,
+                    "listing_id": data.get("listing_id") or "",
+                    "offer_id": data.get("offer_id") or "",
+                    "listing_url": data.get("listing_url") or "",
+                }
+            )
         else:
             results["failed"] += 1
+            repair_record = record_publish_failure(
+                session,
+                item,
+                result=result,
+                request_summary={"sku": sku, "mode": "batch_publish"},
+            )
             recovered_offer_saved = _persist_partial_publish_state(item, result, repo)
             ebay_classification = classify_ebay_error_payload(result.details.get("body") or result.error or "")
             stage = str(result.details.get("stage") or "")
@@ -422,7 +544,143 @@ def publish_batch(
             if recovered_offer_saved:
                 error_detail += f" | recovered offer_id: {item.offer_id}"
             results["errors"].append(f"{item.sku}: {error_detail}")
+            failed_items.append(
+                _batch_decision(
+                    sku=sku,
+                    reason_code=repair_record["classified_error"]["code"] or ebay_classification["error_code"],
+                    message=result.error or "Batch publish item failed.",
+                    next_action=result.details.get("next_action") or ebay_classification["recommended_next_action"],
+                    repair_plan_id=_first_repair_plan_id(repair_record),
+                    retry_allowed=bool(repair_record.get("retry_allowed")),
+                    requires_review=bool(repair_record.get("requires_review")),
+                    stage=stage or "publish_item",
+                    classified_error=repair_record["classified_error"]["code"] or ebay_classification["error_code"],
+                    raw_error_summary=ebay_classification["raw_error_summary"],
+                )
+            )
+    results["summary"] = _batch_summary(
+        total=preview["summary"]["total"],
+        attempted=len(attempted_items),
+        published=results["published"],
+        skipped=results["skipped"],
+        failed=results["failed"],
+    )
+    results["attempted"] = attempted_items
+    results["published_items"] = published_items
+    results["skipped_items"] = skipped_items
+    results["failed_items"] = failed_items
+    results["preview_summary"] = preview["summary"]
     return results
+
+
+def _batch_summary(*, total: int, attempted: int, published: int, skipped: int, failed: int) -> dict:
+    return {
+        "total": total,
+        "attempted_count": attempted,
+        "published_count": published,
+        "skipped_count": skipped,
+        "failed_count": failed,
+    }
+
+
+def _preview_to_batch_decision(preview_decision: dict, *, stage: str = "") -> dict:
+    blocked_by_repair_queue = bool(preview_decision.get("blocked_by_repair_queue"))
+    reason_code = "blocked_by_repair_queue" if blocked_by_repair_queue else str(preview_decision.get("reason_code") or "skipped")
+    classified_error = str(preview_decision.get("classified_error_code") or preview_decision.get("reason_code") or "")
+    return _batch_decision(
+        sku=str(preview_decision.get("sku") or ""),
+        reason_code=reason_code,
+        message=str(preview_decision.get("message") or ""),
+        next_action=str(preview_decision.get("next_action") or ""),
+        repair_plan_id=str(preview_decision.get("repair_plan_id") or ""),
+        retry_allowed=bool(preview_decision.get("retry_allowed")),
+        requires_review=bool(preview_decision.get("requires_review")),
+        stage=stage or _preflight_stage_for_reason(reason_code),
+        classified_error=classified_error,
+        latest_publish_attempt_id=str(preview_decision.get("latest_publish_attempt_id") or ""),
+        details={
+            "decision": preview_decision.get("decision") or "",
+            "planned_action": preview_decision.get("planned_action") or "",
+            "photo_hosting_state": preview_decision.get("photo_hosting_state") or "",
+            "blocked_by_repair_queue": blocked_by_repair_queue,
+            "local_publish_ready": bool(preview_decision.get("local_publish_ready")),
+            "effective_publish_ready": bool(preview_decision.get("effective_publish_ready")),
+            "primary_reason_code": preview_decision.get("primary_reason_code") or preview_decision.get("reason_code") or "",
+            "secondary_blockers": preview_decision.get("secondary_blockers") or [],
+            "condition_id_valid": bool(preview_decision.get("condition_id_valid")),
+            "category_policy_cached": bool(preview_decision.get("category_policy_cached")),
+            "category_policy_known": bool(preview_decision.get("category_policy_known")),
+            "needs_review_status_blocker": bool(preview_decision.get("needs_review_status_blocker")),
+            "blockers": list(preview_decision.get("preflight_blockers") or []),
+        }
+        | (preview_decision.get("details") or {}),
+    )
+
+
+def _preflight_stage_for_reason(reason_code: str) -> str:
+    if reason_code in {"blocked_by_repair_queue", "requires_publish_decision_after_refresh"}:
+        return "preflight_repair_queue"
+    if reason_code in {"expired_or_invalid_access_token", "insufficient_scope", "ebay_auth_not_ready"}:
+        return "preflight_auth"
+    if reason_code in {"already_listed", "status_not_publishable", "missing_item"}:
+        return "preflight_status"
+    return "preflight_readiness"
+
+
+def _requires_publish_blocked_record(preview_decision: dict) -> bool:
+    return bool(preview_decision.get("preflight_blockers")) and not bool(preview_decision.get("blocked_by_repair_queue"))
+
+
+def _first_repair_plan_id(repair_record: dict) -> str:
+    repair_plan = repair_record.get("repair_plan") or []
+    if not repair_plan:
+        return ""
+    return str(repair_plan[0].get("id") or "")
+
+
+def _batch_decision(
+    *,
+    sku: str,
+    reason_code: str,
+    message: str,
+    next_action: str,
+    repair_plan_id: str = "",
+    retry_allowed: bool = False,
+    requires_review: bool = False,
+    stage: str = "",
+    classified_error: str = "",
+    raw_error_summary: str = "",
+    latest_publish_attempt_id: str = "",
+    details: dict | None = None,
+) -> dict:
+    return {
+        "sku": (sku or "").upper(),
+        "reason_code": reason_code,
+        "code": reason_code,
+        "message": message,
+        "stage": stage,
+        "next_action": next_action,
+        "repair_plan_id": repair_plan_id or "",
+        "latest_publish_attempt_id": latest_publish_attempt_id or "",
+        "retry_allowed": bool(retry_allowed),
+        "requires_review": bool(requires_review),
+        "classified_error": classified_error or reason_code,
+        "raw_error_summary": raw_error_summary or "",
+        "details": details or {},
+    }
+
+
+def _legacy_skipped(decision: dict) -> dict:
+    return {
+        "sku": decision.get("sku") or "",
+        "code": decision.get("reason_code") or decision.get("code") or "",
+        "reason": decision.get("message") or "",
+        "repair_plan_id": decision.get("repair_plan_id") or "",
+        "latest_publish_attempt_id": decision.get("latest_publish_attempt_id") or "",
+        "retry_allowed": bool(decision.get("retry_allowed")),
+        "classified_error_code": decision.get("classified_error") or "",
+        "suggested_actions": [decision.get("next_action") or ""],
+    }
 
 @router.post("/publish/{sku}")
 def publish_item(sku: str, session: Session = Depends(get_session)):

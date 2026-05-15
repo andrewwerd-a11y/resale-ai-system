@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from packages.core.src.constants import ItemStatus
 from packages.domain.src.entities.item import Item
 from apps.api.src.services.publish_compatibility import evaluate_publish_compatibility
@@ -111,3 +113,38 @@ def test_unknown_category_condition_policy_blocks_strict_live_publish():
 
     assert result["ready"] is False
     assert any("Condition policy for the selected category is not cached locally." in blocker for blocker in result["blockers"])
+
+
+@pytest.mark.parametrize(
+    "condition_id",
+    [
+        "['1000', '3000']",
+        "1000=New, New without tags",
+        "",
+    ],
+)
+def test_malformed_condition_id_format_blocks_publish_compatibility(condition_id):
+    result = evaluate_publish_compatibility(
+        _item(ebay_category_id="14056", condition_id=condition_id),
+        strict_condition_policy=True,
+    )
+
+    condition_check = next(check for check in result["checks"] if check["name"] == "condition_id_format")
+    assert result["ready"] is False
+    assert condition_check["ok"] is False
+    assert condition_check["blocking"] is True
+    assert condition_check["context"]["condition_id_valid"] is False
+    assert condition_check["action"] == "Normalize condition_id to a valid eBay numeric condition ID before publishing."
+
+
+@pytest.mark.parametrize("condition_id", ["1000", "3000", "4000", "5000", "6000"])
+def test_clean_numeric_condition_ids_pass_format_validation(condition_id):
+    result = evaluate_publish_compatibility(
+        _item(ebay_category_id="999999", condition_id=condition_id),
+        strict_condition_policy=False,
+    )
+
+    condition_check = next(check for check in result["checks"] if check["name"] == "condition_id_format")
+    assert condition_check["ok"] is True
+    assert condition_check["context"]["condition_id_valid"] is True
+    assert not any("not a clean numeric eBay condition ID" in blocker for blocker in result["blockers"])

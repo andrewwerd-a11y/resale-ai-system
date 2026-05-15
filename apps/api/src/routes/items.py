@@ -10,7 +10,9 @@ from pydantic import BaseModel
 from sqlmodel import Session
 
 from apps.api.src.services.claude_diagnostics import classify_claude_error, get_claude_readiness
+from apps.api.src.services.intake_correction_report import build_intake_correction_report
 from apps.api.src.services.operation_diagnostics import classify_exception, record_failure, record_success
+from packages.intake.src.quality_gate import apply_intake_quality_to_item, evaluate_intake_quality
 from packages.data.src.db.sqlite import get_session
 from packages.data.src.repositories.item_repo import ItemRepository
 from packages.testing.src.e2e_guard import (
@@ -22,6 +24,20 @@ from packages.testing.src.e2e_guard import (
 )
 
 router = APIRouter()
+
+
+def _intake_quality_block_detail(item) -> dict | None:
+    quality = evaluate_intake_quality(item)
+    apply_intake_quality_to_item(item, quality)
+    if quality.should_run_deep_analysis:
+        return None
+    return {
+        "code": "intake_quality_blocked",
+        "sku": item.sku,
+        "message": "Item needs intake-quality fixes before deep analysis or publish approval.",
+        "next_action": quality.suggested_next_uploads[0] if quality.suggested_next_uploads else quality.reason,
+        "intake_quality": quality.as_dict(),
+    }
 
 
 def _category_intel_error_response(result) -> tuple[int, dict]:
@@ -233,6 +249,24 @@ def get_item(sku: str, session: Session = Depends(get_session)):
     return item.model_dump()
 
 
+@router.get("/{sku}/intake-quality")
+def get_intake_quality(sku: str, session: Session = Depends(get_session)):
+    repo = ItemRepository(session)
+    item = repo.get_by_sku(sku)
+    if not item:
+        raise HTTPException(status_code=404, detail=f"Item {sku} not found")
+    return evaluate_intake_quality(item).as_dict() | {"sku": sku, "no_ebay_mutation_performed": True}
+
+
+@router.get("/{sku}/correction-report")
+def get_intake_correction_report(sku: str, session: Session = Depends(get_session)):
+    repo = ItemRepository(session)
+    item = repo.get_by_sku(sku)
+    if not item:
+        raise HTTPException(status_code=404, detail=f"Item {sku} not found")
+    return build_intake_correction_report(item)
+
+
 @router.patch("/{sku}")
 def update_item(sku: str, updates: dict, session: Session = Depends(get_session)):
     """Manual field override — sets manual_override=True to protect from AI reprocessing."""
@@ -303,6 +337,11 @@ def analyze_single(sku: str, session: Session = Depends(get_session)):
     item = repo.get_by_sku(sku)
     if not item:
         raise HTTPException(status_code=404, detail=f"Item {sku} not found")
+
+    block = _intake_quality_block_detail(item)
+    if block:
+        repo.upsert(item)
+        raise HTTPException(status_code=409, detail=block)
 
     provider = OllamaProvider()
     if not provider.is_available():
@@ -581,13 +620,19 @@ def bulk_approve(body: BulkSkuRequest, session: Session = Depends(get_session)):
         raise HTTPException(status_code=403, detail=str(exc))
     repo = ItemRepository(session)
     updated = []
+    blocked = []
     for sku in body.skus:
         item = repo.get_by_sku(sku)
         if item:
+            block = _intake_quality_block_detail(item)
+            if block:
+                repo.upsert(item)
+                blocked.append(block)
+                continue
             item.status = ItemStatus.APPROVED
             repo.upsert(item)
             updated.append(sku)
-    return {"updated": len(updated), "skus": updated}
+    return {"updated": len(updated), "skus": updated, "blocked": blocked}
 
 
 @router.post("/bulk-review")

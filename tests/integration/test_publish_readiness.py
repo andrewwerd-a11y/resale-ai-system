@@ -8,6 +8,8 @@ from apps.api.src.routes import listings
 from packages.core.src import config as core_config
 from packages.core.src.constants import ItemStatus
 from packages.data.src.db import sqlite as sqlite_db
+from packages.data.src.models.publish_attempt_record import PublishAttemptRecord
+from packages.data.src.models.publish_repair_plan_record import PublishRepairPlanRecord
 from packages.data.src.repositories.item_repo import ItemRepository
 from packages.domain.src.entities.item import Item
 
@@ -50,6 +52,48 @@ def _seed_item(**overrides) -> None:
     base.update(overrides)
     with Session(sqlite_db.engine) as session:
         ItemRepository(session).upsert(Item(**base))
+
+
+def _seed_blocking_repair_plan(
+    *,
+    sku: str = "BK-000005",
+    publish_attempt_id: str = "attempt-blocked",
+    repair_plan_id: str | None = None,
+    classified_error_code: str = "requires_publish_decision_after_refresh",
+) -> str:
+    with Session(sqlite_db.engine) as session:
+        attempt = PublishAttemptRecord(
+            id=publish_attempt_id,
+            sku=sku,
+            stage="publish_offer",
+            status="failed",
+            classified_error_code=classified_error_code,
+            repair_layer="post_refresh_publish_decision",
+            requires_review=True,
+            retry_allowed=False,
+        )
+        session.add(attempt)
+        plan = PublishRepairPlanRecord(
+            id=repair_plan_id,
+            sku=sku,
+            publish_attempt_id=publish_attempt_id,
+            status="needs_manual_review",
+            affected_field="publish_readiness",
+            current_value_json="{}",
+            expected_value_json="{}",
+            suggested_value_json="{}",
+            suggested_actions_json='["Review the active repair plan and complete the required manual publish decision."]',
+            risk_level="high",
+            safe_to_auto_apply=False,
+            requires_review=True,
+            retry_allowed=False,
+            source="stale_offer_refresh",
+            repair_layer="post_refresh_publish_decision",
+            classified_error_code=classified_error_code,
+        )
+        session.add(plan)
+        session.commit()
+        return plan.id
 
 
 def _block_external_calls(monkeypatch):
@@ -317,3 +361,76 @@ def test_publish_readiness_malformed_hosted_url_blocks_compatibility(monkeypatch
     assert compatibility_check["ok"] is False
     assert public_image_check["ok"] is False
     assert public_image_check["action"] == "Repair malformed hosted image URLs before retrying publish."
+
+
+def test_publish_readiness_publish_preview_and_diagnostics_agree_on_active_repair_blocker(monkeypatch, tmp_path):
+    monkeypatch.setenv("E2E_ROUTE_GUARD_ENABLED", "true")
+    monkeypatch.setenv("APPROVED_E2E_SKUS", "BK-000005,BK-000008,BK-000009")
+    monkeypatch.setenv("EBAY_FULFILLMENT_POLICY_ID", "fulfillment-1")
+    monkeypatch.setenv("EBAY_PAYMENT_POLICY_ID", "payment-1")
+    monkeypatch.setenv("EBAY_RETURN_POLICY_ID", "return-1")
+    _configure_temp_db(monkeypatch, tmp_path)
+    _block_external_calls(monkeypatch)
+    _seed_item(
+        status=ItemStatus.EXPORT_READY,
+        ebay_category_id="14056",
+        condition_id="3000",
+        offer_id="156719395011",
+        image_paths=["https://res.cloudinary.com/demo/image/upload/v1/BK-000005-01.jpg"],
+    )
+    repair_plan_id = _seed_blocking_repair_plan(sku="BK-000005")
+
+    def fail_mutation(*_args, **_kwargs):
+        raise AssertionError("publish readiness/preview/diagnostics must not perform live eBay mutation")
+
+    monkeypatch.setattr("packages.ebay.src.inventory_client.EbayInventoryClient.publish_item", fail_mutation)
+    monkeypatch.setattr("packages.ebay.src.inventory_client.EbayInventoryClient._put", fail_mutation)
+    monkeypatch.setattr("packages.ebay.src.inventory_client.EbayInventoryClient._post", fail_mutation)
+
+    with _client() as client:
+        readiness_resp = client.get("/api/listings/BK-000005/publish-readiness")
+        preview_resp = client.get("/api/listings/BK-000005/publish-preview")
+        diagnostics_resp = client.get("/api/listings/BK-000005/publish-diagnostics")
+
+    assert readiness_resp.status_code == 200
+    assert preview_resp.status_code == 200
+    assert diagnostics_resp.status_code == 200
+
+    readiness = readiness_resp.json()
+    preview = preview_resp.json()
+    diagnostics = diagnostics_resp.json()
+
+    assert readiness["ready"] is False
+    assert readiness["blocked_by_repair_queue"] is True
+    assert "blocked_by_repair_queue" in readiness["blockers"]
+    assert readiness["repair_plan_id"] == repair_plan_id
+    assert readiness["retry_allowed"] is False
+    assert readiness["classified_error_code"] == "requires_publish_decision_after_refresh"
+    assert any(
+        action == "Resolve or supersede the active repair plan in the repair queue before publishing."
+        for action in readiness["required_actions"]
+    )
+    not_blocked_check = next(check for check in readiness["checks"] if check["name"] == "not_blocked_from_publish")
+    assert not_blocked_check["ok"] is False
+    assert not_blocked_check["context"]["repair_plan_id"] == repair_plan_id
+
+    assert preview["blocked_by_repair_queue"] is True
+    assert preview["would_publish"] is False
+    assert preview["mutation_allowed"] is False
+    assert preview["retry_allowed"] is False
+    assert preview["repair_plan_id"] == repair_plan_id
+    assert preview["classified_error_code"] == "requires_publish_decision_after_refresh"
+
+    assert diagnostics["blocked_by_repair_queue"] is True
+    assert diagnostics["ready_to_retry"] is False
+    assert diagnostics["repair_plan_id"] == repair_plan_id
+    assert diagnostics["retry_allowed"] is False
+    assert diagnostics["classified_error_code"] == "requires_publish_decision_after_refresh"
+    assert diagnostics["local_publish_ready"] is True
+    assert diagnostics["effective_publish_ready"] is False
+    assert diagnostics["publish_block_summary"] == "Item data is locally publish-ready, but publish is blocked by active repair plan."
+    assert "blocked_by_repair_queue" in diagnostics["effective_publish_blockers"]
+
+    assert readiness["repair_plan_id"] == preview["repair_plan_id"] == diagnostics["repair_plan_id"]
+    assert readiness["retry_allowed"] == preview["retry_allowed"] == diagnostics["retry_allowed"]
+    assert readiness["classified_error_code"] == preview["classified_error_code"] == diagnostics["classified_error_code"]

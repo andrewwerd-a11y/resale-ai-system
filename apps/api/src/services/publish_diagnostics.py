@@ -6,6 +6,12 @@ from sqlmodel import Session
 
 from apps.api.src.services.publish_compatibility import get_category_condition_policy
 from apps.api.src.services.publish_repair import get_publish_repair_blocker
+from apps.api.src.services.publish_readiness import (
+    REPAIR_QUEUE_BLOCKED_DETAIL,
+    REPAIR_QUEUE_LOCAL_READY_DETAIL,
+    apply_publish_repair_blocker,
+    evaluate_publish_readiness,
+)
 from packages.data.src.repositories.item_repo import ItemRepository
 from packages.ebay.src.condition_mapping import (
     condition_id_to_inventory_enum,
@@ -43,6 +49,8 @@ def build_publish_diagnostics(
         }
 
     repair_blocker = get_publish_repair_blocker(session, normalized)
+    local_publish_readiness = evaluate_publish_readiness(item)
+    effective_publish_readiness = apply_publish_repair_blocker(local_publish_readiness, repair_blocker)
     condition_diagnostics = repair_blocker.get("condition_diagnostics") or {}
     condition_id = str(item.condition_id or "")
     category_id = str(item.ebay_category_id or "")
@@ -166,6 +174,13 @@ def build_publish_diagnostics(
             )
         ),
         "local_status": str(item.status or ""),
+        "local_publish_ready": bool(local_publish_readiness.ready),
+        "effective_publish_ready": bool(effective_publish_readiness.ready),
+        "effective_publish_blockers": list(effective_publish_readiness.blockers),
+        "publish_block_summary": _publish_block_summary(
+            local_publish_ready=bool(local_publish_readiness.ready),
+            repair_blocker=repair_blocker,
+        ),
         "local_category_id": category_id,
         "local_category_name": str(item.ebay_category_name or ""),
         "local_condition_id": condition_id,
@@ -177,6 +192,7 @@ def build_publish_diagnostics(
         "repair_plan_id": repair_blocker.get("repair_plan_id") or "",
         "latest_publish_attempt_id": repair_blocker.get("latest_publish_attempt_id") or "",
         "repair_status": repair_blocker.get("repair_status") or {},
+        "ready_to_retry": bool(repair_blocker.get("retry_allowed")),
         "retry_allowed": bool(repair_blocker.get("retry_allowed")),
         "classified_error_code": repair_blocker.get("classified_error_code") or "",
         "blocked_by_repair_queue": bool(repair_blocker.get("blocked_by_repair_queue")),
@@ -190,6 +206,12 @@ def build_publish_diagnostics(
         "stale_offer_remediation_draft": stale_offer_remediation_draft,
         "repair_queue_blocker": repair_blocker,
     }
+
+
+def _publish_block_summary(*, local_publish_ready: bool, repair_blocker: dict) -> str:
+    if repair_blocker.get("blocked_by_repair_queue"):
+        return REPAIR_QUEUE_LOCAL_READY_DETAIL if local_publish_ready else REPAIR_QUEUE_BLOCKED_DETAIL
+    return ""
 
 
 def build_stale_offer_remediation_draft(

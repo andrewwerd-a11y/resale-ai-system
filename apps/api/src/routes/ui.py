@@ -1086,19 +1086,36 @@ def _intake_html() -> str:
 <div id="worker-msg" style="margin-bottom:12px;font-size:13px"></div>
 <table>
   <thead><tr>
-    <th>SKU</th><th>Category</th><th>Images</th><th>Cost ($)</th><th>Status</th><th>Action</th>
+    <th>SKU</th><th>Category</th><th>Images</th><th>Intake quality</th><th>Cost ($)</th><th>Status</th><th>Action</th>
   </tr></thead>
-  <tbody id="intake-body"><tr><td colspan="6" style="color:#888780">Loading...</td></tr></tbody>
+  <tbody id="intake-body"><tr><td colspan="7" style="color:#888780">Loading...</td></tr></tbody>
 </table>
+<pre id="correction-report" style="display:none;margin-top:16px;background:#111110;border:1px solid #2c2c2a;border-radius:6px;padding:12px;color:#d4d2c8;font-size:12px;white-space:pre-wrap;max-height:420px;overflow:auto"></pre>
 </main>
 <script>
 async function load() {{
   const r = await fetch('/api/items?status=pending_intake&limit=200');
   const items = await r.json();
+  const qualityEntries = await Promise.all(items.map(async function(it) {{
+    try {{
+      const qr = await fetch(`/api/items/${{it.sku}}/intake-quality`);
+      return [it.sku, await qr.json()];
+    }} catch(e) {{
+      return [it.sku, null];
+    }}
+  }}));
+  const qualityBySku = Object.fromEntries(qualityEntries);
   document.getElementById('intake-count').textContent = `(${{items.length}})`;
   document.getElementById('intake-body').innerHTML = items.length
     ? items.map(it => {{
-        const imgs = (it.image_paths||'').split('|').filter(Boolean).length;
+        const paths = Array.isArray(it.image_paths) ? it.image_paths : (it.image_paths||'').split('|').filter(Boolean);
+        const imgs = paths.length;
+        const q = qualityBySku[it.sku] || {{}};
+        const missing = (q.missing_photo_types || []).slice(0, 3).join(', ');
+        const qualityText = q.intake_quality_status || '-';
+        const warn = q.needs_more_photos_for_analysis
+          ? '<div style="color:#fac775;font-size:11px;margin-top:3px">Add more photos before analysis: ' + missing + '</div>'
+          : '';
         const margin = it.estimated_price && it.cost
           ? ' (~' + Math.round((it.estimated_price - it.cost) / it.estimated_price * 100) + '% margin)'
           : '';
@@ -1106,6 +1123,7 @@ async function load() {{
           <td style="font-family:monospace">${{it.sku}}</td>
           <td>${{it.category_label||it.category_key||'-'}}</td>
           <td>${{imgs}}</td>
+          <td><span class="badge ${{q.should_run_deep_analysis ? 'approved' : 'needs_review'}}">${{qualityText}}</span>${{warn}}</td>
           <td><input type="number" min="0" step="0.01"
               style="width:72px;padding:3px 6px;background:#2c2c2a;border:1px solid #3a3a38;color:#f1efe8;border-radius:4px;font-size:12px"
               value="${{it.cost||''}}"
@@ -1115,10 +1133,12 @@ async function load() {{
             <span style="font-size:11px;color:#888780">${{margin}}</span></td>
           <td><span class="badge pending_intake">pending_intake</span></td>
           <td><button class="btn btn-gray" style="font-size:11px;padding:4px 10px"
-              onclick="analyzeOne('${{it.sku}}', this)">Analyze</button></td>
+              onclick="analyzeOne('${{it.sku}}', this)" ${{q.should_run_deep_analysis ? '' : 'disabled'}}>Analyze</button>
+              <button class="btn btn-gray" style="font-size:11px;padding:4px 10px;margin-left:4px"
+              onclick="showCorrectionReport('${{it.sku}}')">Report</button></td>
         </tr>`;
       }}).join('')
-    : '<tr><td colspan="6" style="color:#5dcaa5">No pending items.</td></tr>';
+    : '<tr><td colspan="7" style="color:#5dcaa5">No pending items.</td></tr>';
 }}
 async function runWorker() {{
   document.getElementById('worker-msg').innerHTML = '<span style="color:#fac775">Starting worker...</span>';
@@ -1144,8 +1164,15 @@ async function analyzeOne(sku, btn) {{
   btn.disabled = true;
   const r = await fetch(`/api/items/${{sku}}/analyze`, {{method:'POST'}});
   const d = await r.json();
-  btn.textContent = d.status || 'Done';
+  btn.textContent = r.ok ? (d.status || 'Done') : 'Blocked';
   load();
+}}
+async function showCorrectionReport(sku) {{
+  const r = await fetch(`/api/items/${{sku}}/correction-report`);
+  const d = await r.json();
+  const el = document.getElementById('correction-report');
+  el.style.display = 'block';
+  el.textContent = JSON.stringify(d, null, 2);
 }}
 load();
 </script>
@@ -3679,8 +3706,13 @@ TO-000016</textarea>
             <option value="false">Local-only diagnostics</option>
           </select>
         </div>
+        <div>
+          <label for="batch-preview-statuses">Preview status filters</label>
+          <input id="batch-preview-statuses" value="approved, export_ready" placeholder="approved, export_ready">
+        </div>
         <div style="flex:0 0 auto">
           <button class="btn btn-purple" onclick="runBatchDiagnostics()">Run Read-Only Publish Diagnostics</button>
+          <button class="btn btn-green" onclick="runBulkPublishPreview()" style="margin-top:8px">Preview Bulk Publish</button>
         </div>
       </div>
       <div id="batch-status" class="status-line">No batch diagnostics run yet.</div>
@@ -3698,6 +3730,27 @@ TO-000016</textarea>
           <h3>Copyable Codex Prompt</h3>
           <div class="copy-row"><button class="btn btn-gray" onclick="copyField('batch-prompt')">Copy</button><span>Paste into Codex/GPT for deeper analysis.</span></div>
           <textarea id="batch-prompt" class="text-output" readonly placeholder="Batch diagnostics Codex prompt will appear here."></textarea>
+        </div>
+      </div>
+      <div class="report-block">
+        <h2>Bulk Publish Preview</h2>
+        <div class="section-note">Read-only batch publish dry-run. Uses the same item-level safety gate as batch publish, returns operator decisions, and never calls eBay mutation methods.</div>
+        <div id="batch-preview-status" class="status-line">No bulk publish preview run yet.</div>
+        <div id="batch-preview-summary" class="summary-grid"></div>
+        <div id="batch-preview-groups" class="data-list"></div>
+        <div id="batch-preview-safety"></div>
+        <div id="batch-preview-results" class="result-cards"><div class="empty">No bulk publish preview loaded.</div></div>
+        <div class="report-grid">
+          <div class="report-box">
+            <h3>Preview Report Markdown</h3>
+            <div class="copy-row"><button class="btn btn-gray" onclick="copyField('batch-preview-markdown')">Copy</button><span>Operator-ready dry-run summary.</span></div>
+            <textarea id="batch-preview-markdown" class="text-output" readonly placeholder="Bulk publish preview markdown will appear here."></textarea>
+          </div>
+          <div class="report-box">
+            <h3>Persisted Report Path</h3>
+            <div class="copy-row"><button class="btn btn-gray" onclick="copyField('batch-preview-report-path')">Copy</button><span>Local markdown path, if report persistence is enabled.</span></div>
+            <textarea id="batch-preview-report-path" class="text-output" readonly placeholder="No bulk publish preview report written yet."></textarea>
+          </div>
         </div>
       </div>
     </section>
@@ -3778,6 +3831,15 @@ function parseSkus(raw) {{
     String(raw || '')
       .split(/[\\n,]+/)
       .map(value => value.trim().toUpperCase())
+      .filter(Boolean)
+  ));
+}}
+
+function parseStatuses(raw) {{
+  return Array.from(new Set(
+    String(raw || '')
+      .split(/[\\n,]+/)
+      .map(value => value.trim().toLowerCase())
       .filter(Boolean)
   ));
 }}
@@ -3941,6 +4003,116 @@ async function runBatchDiagnostics() {{
     document.getElementById('batch-safety').innerHTML = '';
     document.getElementById('batch-results').innerHTML = `<div class="empty">Diagnostics failed: ${{esc(error.message)}}</div>`;
     setStatus('batch-status', error.message, 'err');
+  }}
+}}
+
+function renderPreviewSummary(summary) {{
+  const target = document.getElementById('batch-preview-summary');
+  if (!summary) {{
+    target.innerHTML = '';
+    return;
+  }}
+  const keys = [
+    'total',
+    'would_publish_count',
+    'skip_count',
+    'repair_count',
+    'review_count',
+    'already_listed_count',
+    'auth_blocked_count',
+    'missing_photo_count',
+    'stale_offer_count',
+    'invalid_category_condition_count',
+  ];
+  target.innerHTML = keys.map(key => `
+    <div class="summary-card">
+      <span class="label">${{esc(key.replaceAll('_', ' '))}}</span>
+      <span class="value">${{esc(summary[key] ?? 0)}}</span>
+    </div>
+  `).join('');
+}}
+
+function renderPreviewGroups(grouped) {{
+  const target = document.getElementById('batch-preview-groups');
+  const entries = Object.entries(grouped || {{}});
+  if (!entries.length) {{
+    target.innerHTML = '<span class="tag ok">No grouped preview decisions</span>';
+    return;
+  }}
+  target.innerHTML = entries.map(([label, skus]) => `<span class="tag warn">${{esc(label)}}: ${{esc((skus || []).join(', '))}}</span>`).join('');
+}}
+
+function renderPreviewResults(results) {{
+  const target = document.getElementById('batch-preview-results');
+  if (!results || !results.length) {{
+    target.innerHTML = '<div class="empty">No bulk publish preview loaded.</div>';
+    return;
+  }}
+  target.innerHTML = results.map(result => {{
+    const decision = String(result.decision || 'SKIP');
+    const tone = decision === 'WOULD_PUBLISH' ? 'ok' : (decision === 'AUTH_BLOCKED' ? 'err' : 'warn');
+    return `
+      <div class="result-card">
+        <h3>${{esc(result.sku || 'Unknown SKU')}} <span class="tag ${{tone}}">${{esc(decision)}}</span></h3>
+        <div class="result-grid">
+          <div class="kv"><div class="k">Reason code</div><div class="v">${{esc(result.reason_code || '')}}</div></div>
+          <div class="kv"><div class="k">Classified error</div><div class="v">${{esc(result.classified_error_code || '')}}</div></div>
+          <div class="kv"><div class="k">Planned action</div><div class="v">${{esc(result.planned_action || '')}}</div></div>
+          <div class="kv"><div class="k">Photo hosting state</div><div class="v">${{esc(result.photo_hosting_state || '')}}</div></div>
+          <div class="kv"><div class="k">Local publish ready</div><div class="v">${{esc(String(Boolean(result.local_publish_ready)))}}</div></div>
+          <div class="kv"><div class="k">Effective publish ready</div><div class="v">${{esc(String(Boolean(result.effective_publish_ready)))}}</div></div>
+          <div class="kv"><div class="k">Category / condition</div><div class="v">${{esc((result.category_id || '') + ' / ' + (result.condition_id || ''))}}</div></div>
+          <div class="kv"><div class="k">Inventory enum</div><div class="v">${{esc(result.inventory_condition_enum || '')}}</div></div>
+          <div class="kv"><div class="k">Offer / listing</div><div class="v">${{esc((result.offer_id || '') + ' / ' + (result.listing_id || ''))}}</div></div>
+          <div class="kv"><div class="k">Repair plan</div><div class="v">${{esc(result.repair_plan_id || '')}}</div></div>
+          <div class="kv"><div class="k">Message</div><div class="v">${{esc(result.message || '')}}</div></div>
+          <div class="kv"><div class="k">Next action</div><div class="v">${{esc(result.next_action || '')}}</div></div>
+        </div>
+        <div class="meta-row" style="margin-top:10px">
+          <span class="tag mono">${{esc('blocked_by_repair_queue=' + String(Boolean(result.blocked_by_repair_queue)))}}</span>
+          <span class="tag mono">${{esc('retry_allowed=' + String(Boolean(result.retry_allowed)))}}</span>
+          <span class="tag mono">${{esc('requires_review=' + String(Boolean(result.requires_review)))}}</span>
+        </div>
+      </div>
+    `;
+  }}).join('');
+}}
+
+async function runBulkPublishPreview() {{
+  const skus = parseSkus(document.getElementById('batch-skus').value);
+  const statuses = parseStatuses(document.getElementById('batch-preview-statuses').value);
+  if (!skus.length && !statuses.length) {{
+    setStatus('batch-preview-status', 'Enter explicit SKUs or at least one status filter before preview.', 'err');
+    return;
+  }}
+  setStatus('batch-preview-status', 'Running bulk publish preview...', '');
+  document.getElementById('batch-preview-results').innerHTML = '<div class="empty">Loading bulk publish preview...</div>';
+  try {{
+    const resp = await fetch('/api/ebay/publish/batch-preview', {{
+      method: 'POST',
+      headers: {{ 'Content-Type': 'application/json' }},
+      body: JSON.stringify({{ skus, statuses, persist_report: true }}),
+    }});
+    const body = await resp.json();
+    if (!resp.ok) throw new Error(body.detail || 'Bulk publish preview failed.');
+    renderPreviewSummary(body.summary || {{}});
+    renderPreviewGroups(body.grouped_decisions || {{}});
+    renderSafetyFlags('batch-preview-safety', body, [
+      body.report_type ? 'Report type: ' + body.report_type : '',
+      body.persisted_report_path ? 'Report saved locally' : 'Report persistence disabled',
+    ]);
+    renderPreviewResults(body.decisions || []);
+    document.getElementById('batch-preview-markdown').value = body.report_markdown || '';
+    document.getElementById('batch-preview-report-path').value = body.persisted_report_path || '';
+    setStatus('batch-preview-status', `Loaded bulk publish preview for ${{body.summary?.total ?? 0}} SKU(s).`, 'ok');
+  }} catch (error) {{
+    renderPreviewSummary(null);
+    document.getElementById('batch-preview-groups').innerHTML = '';
+    document.getElementById('batch-preview-safety').innerHTML = '';
+    document.getElementById('batch-preview-results').innerHTML = `<div class="empty">Bulk publish preview failed: ${{esc(error.message)}}</div>`;
+    document.getElementById('batch-preview-markdown').value = '';
+    document.getElementById('batch-preview-report-path').value = '';
+    setStatus('batch-preview-status', error.message, 'err');
   }}
 }}
 

@@ -12,7 +12,7 @@ from apps.api.src.services.publish_compatibility import (
     evaluate_publish_compatibility,
     get_category_condition_policy,
 )
-from apps.api.src.services.publish_readiness import evaluate_publish_readiness
+from apps.api.src.services.publish_readiness import apply_publish_repair_blocker, evaluate_publish_readiness
 from packages.core.src.config import get_settings
 from packages.data.src.models.publish_attempt_record import PublishAttemptRecord
 from packages.data.src.models.publish_repair_decision_record import PublishRepairDecisionRecord
@@ -233,13 +233,13 @@ def get_repair_queue_detail(session: Session, sku: str) -> dict:
         .order_by(PublishRepairDecisionRecord.created_at.desc())
     ).all()
 
-    readiness = evaluate_publish_readiness(item).as_dict() if item else None
+    local_readiness = evaluate_publish_readiness(item) if item else None
     compatibility = evaluate_publish_compatibility(item, strict_condition_policy=True) if item else None
     ready_to_retry = bool(
         item
-        and readiness
+        and local_readiness
         and compatibility
-        and readiness["ready"]
+        and local_readiness.ready
         and compatibility["ready"]
         and not any(str(plan.status) in ACTIVE_REPAIR_STATUSES - {"ready_to_retry", "resolved", "ignored"} for plan in plans)
     )
@@ -248,6 +248,11 @@ def get_repair_queue_detail(session: Session, sku: str) -> dict:
 
     repair_status = summarize_repair_status(session, normalized)
     repair_blocker = get_publish_repair_blocker(session, normalized)
+    readiness = (
+        apply_publish_repair_blocker(local_readiness, repair_blocker).as_dict()
+        if local_readiness is not None
+        else None
+    )
     if ready_to_retry and plans:
         for plan in plans:
             if plan.status not in {"resolved", "ignored"}:

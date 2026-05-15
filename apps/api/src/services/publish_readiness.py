@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -12,7 +13,6 @@ from packages.ebay.src.category_intelligence import CategoryIntelligence, Catego
 from packages.ebay.src.category_spreadsheet import CategorySpreadsheet
 from packages.ebay.src.aspect_validation import validate_aspects
 from packages.ebay.src.condition_mapping import CONDITION_ID_TO_ENUM, normalize_inventory_enum
-from packages.ebay.src.inventory_client import EbayInventoryClient
 from packages.ebay.src.photo_uploader import PhotoUploader
 from packages.ebay.src.public_image_urls import extract_public_image_urls
 from packages.testing.src.e2e_guard import is_e2e_sku_allowed, is_route_guard_enabled
@@ -27,6 +27,12 @@ class PublishReadinessResult:
     blockers: list[str]
     warnings: list[str]
     required_actions: list[str]
+    blocked_by_repair_queue: bool = False
+    repair_plan_id: str = ""
+    latest_publish_attempt_id: str = ""
+    repair_status: dict | None = None
+    retry_allowed: bool = True
+    classified_error_code: str = ""
 
     def as_dict(self) -> dict:
         return {
@@ -36,12 +42,22 @@ class PublishReadinessResult:
             "blockers": self.blockers,
             "warnings": self.warnings,
             "required_actions": self.required_actions,
+            "blocked_by_repair_queue": self.blocked_by_repair_queue,
+            "repair_plan_id": self.repair_plan_id,
+            "latest_publish_attempt_id": self.latest_publish_attempt_id,
+            "repair_status": self.repair_status or {},
+            "retry_allowed": self.retry_allowed,
+            "classified_error_code": self.classified_error_code,
         }
 
 
 PUBLISHABLE_STATUSES = {ItemStatus.APPROVED, ItemStatus.EXPORT_READY}
 CategoryTemplateProvider = Callable[[Item], Result[CategoryTemplate]]
 SellerPolicyProvider = Callable[[], dict]
+REPAIR_QUEUE_BLOCKER_CODE = "blocked_by_repair_queue"
+REPAIR_QUEUE_BLOCKED_DETAIL = "Publish is blocked by active repair plan."
+REPAIR_QUEUE_LOCAL_READY_DETAIL = "Item data is locally publish-ready, but publish is blocked by active repair plan."
+REPAIR_QUEUE_REQUIRED_ACTION = "Resolve or supersede the active repair plan in the repair queue before publishing."
 
 
 def evaluate_publish_readiness(
@@ -232,7 +248,7 @@ def evaluate_publish_readiness(
         action="Choose a supported eBay condition ID before publishing.",
     )
 
-    aspect_validation = validate_aspects(EbayInventoryClient()._collect_item_specifics(item))
+    aspect_validation = validate_aspects(_collect_local_item_specifics(item))
     add_check(
         "aspect_value_lengths",
         aspect_validation["ok"],
@@ -326,6 +342,65 @@ def evaluate_publish_readiness(
     )
 
 
+def apply_publish_repair_blocker(
+    readiness: PublishReadinessResult,
+    repair_blocker: dict | None,
+) -> PublishReadinessResult:
+    checks = [dict(check) for check in readiness.checks]
+    blockers = list(readiness.blockers)
+    warnings = list(readiness.warnings)
+    required_actions = list(readiness.required_actions)
+    repair_context = {
+        "blocked_by_repair_queue": bool((repair_blocker or {}).get("blocked_by_repair_queue")),
+        "repair_plan_id": str((repair_blocker or {}).get("repair_plan_id") or ""),
+        "latest_publish_attempt_id": str((repair_blocker or {}).get("latest_publish_attempt_id") or ""),
+        "repair_status": (repair_blocker or {}).get("repair_status") or {},
+        "retry_allowed": bool((repair_blocker or {}).get("retry_allowed")),
+        "classified_error_code": str((repair_blocker or {}).get("classified_error_code") or ""),
+        "reason": str((repair_blocker or {}).get("reason") or ""),
+        "suggested_actions": list((repair_blocker or {}).get("suggested_actions") or []),
+    }
+    blocked_by_repair_queue = repair_context["blocked_by_repair_queue"]
+    detail = REPAIR_QUEUE_LOCAL_READY_DETAIL if readiness.ready else REPAIR_QUEUE_BLOCKED_DETAIL
+
+    if blocked_by_repair_queue:
+        not_blocked_check = next((check for check in checks if check.get("name") == "not_blocked_from_publish"), None)
+        if not_blocked_check is not None:
+            not_blocked_check["ok"] = False
+            not_blocked_check["blocking"] = True
+            not_blocked_check["detail"] = "Item is blocked from publish by an active repair plan."
+            not_blocked_check["context"] = repair_context
+        if not any(check.get("name") == "repair_queue_blocker" for check in checks):
+            checks.append(
+                {
+                    "name": "repair_queue_blocker",
+                    "ok": False,
+                    "blocking": True,
+                    "detail": detail,
+                    "context": repair_context,
+                }
+            )
+        if REPAIR_QUEUE_BLOCKER_CODE not in blockers:
+            blockers.append(REPAIR_QUEUE_BLOCKER_CODE)
+        if REPAIR_QUEUE_REQUIRED_ACTION not in required_actions:
+            required_actions.append(REPAIR_QUEUE_REQUIRED_ACTION)
+
+    return PublishReadinessResult(
+        sku=readiness.sku,
+        ready=bool(readiness.ready and not blocked_by_repair_queue),
+        checks=checks,
+        blockers=blockers,
+        warnings=warnings,
+        required_actions=required_actions,
+        blocked_by_repair_queue=blocked_by_repair_queue,
+        repair_plan_id=repair_context["repair_plan_id"],
+        latest_publish_attempt_id=repair_context["latest_publish_attempt_id"],
+        repair_status=repair_context["repair_status"],
+        retry_allowed=repair_context["retry_allowed"] if repair_blocker else readiness.retry_allowed,
+        classified_error_code=repair_context["classified_error_code"],
+    )
+
+
 def not_found_publish_readiness(sku: str) -> PublishReadinessResult:
     normalized = (sku or "").strip().upper()
     detail = f"Item {normalized} not found."
@@ -343,6 +418,7 @@ def not_found_publish_readiness(sku: str) -> PublishReadinessResult:
         blockers=[detail],
         warnings=[],
         required_actions=["Create or import the item record before publishing."],
+        retry_allowed=False,
     )
 
 
@@ -440,6 +516,36 @@ def _add_template_validation_check(item: Item, template: CategoryTemplate, *, ad
             "invalid_fields": validation.invalid_fields,
         },
     )
+
+
+def _collect_local_item_specifics(item: Item) -> dict[str, list[str]]:
+    specifics: dict[str, list[str]] = {}
+    stored: dict = {}
+    if isinstance(item.item_specifics, dict):
+        stored = item.item_specifics
+    elif isinstance(item.item_specifics, str):
+        try:
+            stored = json.loads(item.item_specifics)
+        except Exception:
+            stored = {}
+    field_map = {
+        "Brand": item.brand,
+        "Type": item.type,
+        "Color": item.color,
+        "Size": item.size,
+        "Material": item.material,
+        "Style": item.style,
+        "Pattern": item.pattern,
+        "Department": item.department,
+    }
+    for ebay_field, value in field_map.items():
+        if value:
+            specifics[ebay_field] = [str(value)]
+    for key, value in stored.items():
+        if not value:
+            continue
+        specifics[str(key)] = [str(value)] if not isinstance(value, list) else [str(entry) for entry in value]
+    return specifics
 
 
 def _resolve_seller_policy_state(

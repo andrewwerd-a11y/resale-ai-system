@@ -6,7 +6,7 @@ from packages.core.src import config as core_config
 from packages.core.src.result import Result
 from packages.domain.src.entities.item import Item
 from packages.ebay.src.category_intelligence import CategoryTemplate
-from apps.api.src.services.publish_readiness import evaluate_publish_readiness
+from apps.api.src.services.publish_readiness import apply_publish_repair_blocker, evaluate_publish_readiness
 
 
 def _make_item(photo_path: str, **overrides) -> Item:
@@ -186,3 +186,39 @@ def test_overlong_non_normalizable_aspect_blocks_readiness(monkeypatch, tmp_path
     assert result.ready is False
     assert aspect_check["ok"] is False
     assert any("Aspect 'Theme' value exceeds eBay's 65-character limit" in blocker for blocker in result.blockers)
+
+
+def test_active_repair_queue_blocker_forces_readiness_false(monkeypatch, tmp_path):
+    _block_network(monkeypatch)
+    monkeypatch.setenv("EBAY_FULFILLMENT_POLICY_ID", "fulfillment-1")
+    monkeypatch.setenv("EBAY_PAYMENT_POLICY_ID", "payment-1")
+    monkeypatch.setenv("EBAY_RETURN_POLICY_ID", "return-1")
+    core_config.get_settings.cache_clear()
+
+    readiness = evaluate_publish_readiness(
+        _make_item(_hosted_photo_url(), condition_id="3000"),
+        category_template_provider=lambda _item: Result.success(_template()),
+    )
+    repair_blocker = {
+        "blocked_by_repair_queue": True,
+        "repair_plan_id": "repair-plan-1",
+        "latest_publish_attempt_id": "attempt-1",
+        "repair_status": {"status": "needs_manual_review"},
+        "retry_allowed": False,
+        "classified_error_code": "requires_publish_decision_after_refresh",
+        "reason": "Latest repair plan requires manual review before publish can be retried.",
+        "suggested_actions": ["Review the active repair plan before publishing."],
+    }
+
+    result = apply_publish_repair_blocker(readiness, repair_blocker)
+
+    assert result.ready is False
+    assert result.blocked_by_repair_queue is True
+    assert "blocked_by_repair_queue" in result.blockers
+    assert result.repair_plan_id == "repair-plan-1"
+    assert result.retry_allowed is False
+    assert result.classified_error_code == "requires_publish_decision_after_refresh"
+    assert "Resolve or supersede the active repair plan in the repair queue before publishing." in result.required_actions
+    not_blocked_check = next(check for check in result.checks if check["name"] == "not_blocked_from_publish")
+    assert not_blocked_check["ok"] is False
+    assert not_blocked_check["context"]["repair_plan_id"] == "repair-plan-1"

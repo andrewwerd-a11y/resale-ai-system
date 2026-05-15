@@ -21,10 +21,12 @@ def test_diagnostic_cockpit_page_renders_expected_sections() -> None:
     html = resp.text
     assert "Diagnostic Cockpit v1" in html
     assert "Run Read-Only Publish Diagnostics" in html
+    assert "Preview Bulk Publish" in html
     assert "Recent Operation Events" in html
     assert "Per-SKU Diagnostic History" in html
     assert "Diagnostic Reports" in html
     assert "/api/listings/publish-diagnostics/batch" in html
+    assert "/api/ebay/publish/batch-preview" in html
     assert "/api/diagnostics/events/recent" in html
     assert "/api/diagnostics/reports/weekly" in html
     assert "No live eBay mutation" in html

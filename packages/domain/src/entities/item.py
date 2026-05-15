@@ -135,6 +135,9 @@ class Item(BaseModel):
 
     # AI / review
     confidence_score: float | None = None
+    intake_quality_status: str | None = None
+    missing_photo_types: list[str] = Field(default_factory=list)
+    needs_more_photos_for_analysis: bool = False
     needs_review: bool = False
     review_reasons: list[str] = Field(default_factory=list)
     manual_override: bool = False

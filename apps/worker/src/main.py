@@ -30,6 +30,7 @@ from packages.data.src.repositories.sku_repo import SKURepository
 from packages.domain.src.entities.item import Item
 from packages.intake.src.folder_scanner import FolderScanner
 from packages.intake.src.image_normalizer import ImageNormalizer
+from packages.intake.src.quality_gate import apply_intake_quality_to_item, evaluate_intake_quality
 from packages.vision.src.ollama_provider import OllamaProvider
 from packages.vision.src.prompt_builder import build_extraction_prompt
 from packages.vision.src.response_parser import ResponseParser
@@ -74,6 +75,23 @@ def process_item(
         return False, f"category_mapping_failed: {cat_result.error}"
     cat_data = cat_result.value
     category_key = cat_data["category_key"]
+
+    intake_item = Item(
+        sku=sku,
+        status=ItemStatus.NEEDS_REVIEW,
+        batch_id=batch_id,
+        photo_folder=str(manifest.folder_path),
+        image_paths=image_paths,
+        category_key=category_key,
+        category_label=cat_data.get("category_label"),
+        ebay_category_id=cat_data.get("ebay_category_id"),
+        needs_review=True,
+    )
+    quality = evaluate_intake_quality(intake_item)
+    if not quality.should_run_deep_analysis:
+        apply_intake_quality_to_item(intake_item, quality)
+        item_repo.upsert(intake_item)
+        return True, f"review intake_quality_status={quality.intake_quality_status}"
 
     # Build prompt and run vision analysis
     prompt = build_extraction_prompt(category_key)

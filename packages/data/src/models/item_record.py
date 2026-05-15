@@ -122,6 +122,9 @@ class ItemRecord(SQLModel, table=True):
 
     # AI / review
     confidence_score: Optional[float] = None
+    intake_quality_status: Optional[str] = None
+    missing_photo_types: Optional[str] = None    # JSON array string
+    needs_more_photos_for_analysis: bool = False
     needs_review: bool = False
     review_reasons: Optional[str] = None      # JSON array string
     review_reason: Optional[str] = None

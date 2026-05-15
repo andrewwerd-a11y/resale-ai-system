@@ -268,6 +268,17 @@ def classify_ebay_error_payload(payload: Any) -> dict:
             "raw_error_payload": sanitized,
             "ebay_error_ids": error_ids,
         }
+    text_known = _classify_ebay_error_text(_summarize_payload(sanitized))
+    if text_known:
+        return {
+            "external_service": "ebay",
+            "error_family": text_known["error_family"],
+            "error_code": text_known["error_code"],
+            "recommended_next_action": text_known["recommended_next_action"],
+            "raw_error_summary": _truncate(_summarize_payload(sanitized)),
+            "raw_error_payload": sanitized,
+            "ebay_error_ids": error_ids,
+        }
     return {
         "external_service": "ebay",
         "error_family": "ebay_api_error" if error_ids else "ebay_unknown_error",
@@ -277,6 +288,71 @@ def classify_ebay_error_payload(payload: Any) -> dict:
         "raw_error_payload": sanitized,
         "ebay_error_ids": error_ids,
     }
+
+
+def _classify_ebay_error_text(summary: str) -> dict:
+    lower = (summary or "").lower()
+    if "invalid access token" in lower or "expired access token" in lower or "authorization" in lower and "invalid" in lower:
+        return {
+            "error_family": "auth",
+            "error_code": "expired_or_invalid_access_token",
+            "recommended_next_action": "Reconnect eBay OAuth or replace the active token before retrying publish.",
+        }
+    if "insufficient scope" in lower or "insufficient permissions" in lower or "scope" in lower and "permission" in lower:
+        return {
+            "error_family": "auth",
+            "error_code": "insufficient_scope",
+            "recommended_next_action": "Reconnect eBay OAuth with the required inventory and account scopes.",
+        }
+    if "fulfillment policy" in lower or "payment policy" in lower or "return policy" in lower or "listing policy" in lower:
+        return {
+            "error_family": "seller_policy",
+            "error_code": "seller_policy_missing_or_invalid",
+            "recommended_next_action": "Configure valid fulfillment, payment, and return policies before retrying publish.",
+        }
+    if "merchant location" in lower or "merchantlocationkey" in lower or "inventory location" in lower:
+        return {
+            "error_family": "merchant_location",
+            "error_code": "merchant_location_invalid",
+            "recommended_next_action": "Configure or verify the eBay inventory merchant location key before retrying publish.",
+        }
+    if "image url" in lower or "picture url" in lower or "imageurl" in lower:
+        return {
+            "error_family": "photo_hosting",
+            "error_code": "invalid_image_url",
+            "recommended_next_action": "Rehost or correct public photo URLs before retrying publish.",
+        }
+    if "inventory item" in lower and ("not found" in lower or "missing" in lower):
+        return {
+            "error_family": "missing_inventory_item",
+            "error_code": "inventory_item_not_found",
+            "recommended_next_action": "Recreate or refresh the inventory item before publishing the offer.",
+        }
+    if "offer" in lower and ("not found" in lower or "missing" in lower):
+        return {
+            "error_family": "stale_offer",
+            "error_code": "offer_not_found",
+            "recommended_next_action": "Recreate the offer or clear the stale local offer_id after explicit approval.",
+        }
+    if "already published" in lower or "duplicate listing" in lower:
+        return {
+            "error_family": "duplicate_publish_risk",
+            "error_code": "already_published",
+            "recommended_next_action": "Do not publish again; sync listing state or use revise/update flow.",
+        }
+    if "missing required" in lower and "aspect" in lower:
+        return {
+            "error_family": "category_aspects",
+            "error_code": "missing_required_aspects",
+            "recommended_next_action": "Populate missing required category aspects before retrying publish.",
+        }
+    if ("aspect" in lower and "too long" in lower) or ("aspect" in lower and "maximum" in lower) or ("invalid aspect" in lower):
+        return {
+            "error_family": "category_aspects",
+            "error_code": "invalid_aspect_value",
+            "recommended_next_action": "Correct invalid or overlong category aspect values before retrying publish.",
+        }
+    return {}
 
 
 def sanitize_error_payload(payload: Any) -> Any:

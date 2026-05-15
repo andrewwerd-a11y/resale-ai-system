@@ -24,7 +24,11 @@ from apps.api.src.services.publish_debug_diagnostics import (
 from apps.api.src.services.publish_diagnostics import build_publish_diagnostics
 from apps.api.src.services.operation_diagnostics import record_failure, record_success
 from apps.api.src.services.publish_repair import get_publish_repair_blocker
-from apps.api.src.services.publish_readiness import evaluate_publish_readiness, not_found_publish_readiness
+from apps.api.src.services.publish_readiness import (
+    apply_publish_repair_blocker,
+    evaluate_publish_readiness,
+    not_found_publish_readiness,
+)
 from apps.api.src.services.stale_offer_remediation import (
     PUBLISH_DECISION_TYPED_CONFIRMATION,
     REQUIRED_TYPED_CONFIRMATION,
@@ -231,7 +235,9 @@ def get_publish_readiness(sku: str, session: Session = Depends(get_session)):
     item = ItemRepository(session).get_by_sku(sku)
     if not item:
         raise HTTPException(status_code=404, detail=not_found_publish_readiness(sku).as_dict())
-    return evaluate_publish_readiness(item).as_dict()
+    readiness = evaluate_publish_readiness(item)
+    repair_blocker = get_publish_repair_blocker(session, item.sku or sku)
+    return apply_publish_repair_blocker(readiness, repair_blocker).as_dict()
 
 
 @router.get("/{sku}/publish-preview")
