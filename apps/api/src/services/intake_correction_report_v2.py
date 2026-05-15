@@ -155,7 +155,7 @@ def build_correction_report_v2(
         "platform_translation_allowed": platform_translation_allowed,
         "publish_approval_blocked": publish_approval_blocked,
         "no_ebay_mutation_performed": True,
-        "no_external_provider_called": True,
+        "no_external_provider_called": not (deep.external_call_made if deep else False),
         "no_publish_performed": True,
         "read_only": True,
         "draft_only": True,

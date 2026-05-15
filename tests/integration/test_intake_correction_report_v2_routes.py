@@ -184,3 +184,57 @@ def test_correction_report_v2_404_for_unknown(monkeypatch, tmp_path):
     with _client() as client:
         resp = client.get("/api/items/UNK/correction-report-v2")
     assert resp.status_code == 404
+
+
+# ── no_external_provider_called accuracy ──────────────────────────────────────
+
+def test_correction_report_v2_no_external_provider_called_true_when_deterministic(
+    monkeypatch, tmp_path
+):
+    """Deterministic deep result → no_external_provider_called=True."""
+    _configure_db(monkeypatch, tmp_path)
+    _seed(_ready_book())
+
+    with _client() as client:
+        resp = client.get("/api/items/BK-V2/correction-report-v2")
+
+    assert resp.status_code == 200
+    assert resp.json()["no_external_provider_called"] is True
+
+
+def test_correction_report_v2_no_external_provider_called_false_when_real_provider_used(
+    monkeypatch, tmp_path
+):
+    """When deep.external_call_made=True, no_external_provider_called must be False."""
+    from apps.api.src.services import intake_correction_report_v2 as report_v2
+    from packages.intake.src.analysis_contract import DeepAnalysisResult
+    from packages.intake.src.pipeline_types import ConfidenceSource, ProviderKind
+
+    _configure_db(monkeypatch, tmp_path)
+    _seed(_ready_book())
+
+    fake_deep = DeepAnalysisResult(
+        sku="BK-V2",
+        provider="claude-intake",
+        provider_kind=ProviderKind.EXTERNAL_MODEL,
+        confidence_source=ConfidenceSource.MIXED,
+        is_deterministic_fallback=False,
+        external_call_made=True,
+        fallback_warning="",
+        should_require_manual_review=True,
+        should_block_publish_approval=True,
+    )
+
+    monkeypatch.setattr(report_v2, "run_deep_analysis_preview", lambda *a, **kw: fake_deep)
+
+    with _client() as client:
+        resp = client.get("/api/items/BK-V2/correction-report-v2")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["no_external_provider_called"] is False
+    # Safety gates must remain unchanged regardless of provider.
+    assert body["no_ebay_mutation_performed"] is True
+    assert body["no_publish_performed"] is True
+    assert body["manual_approval_required"] is True
+    assert body["read_only"] is True
