@@ -396,6 +396,49 @@ def post_deep_analysis_preview(
     }
 
 
+@router.get("/{sku}/correction-report-v2")
+def get_correction_report_v2(
+    sku: str,
+    platform: str = "ebay",
+    user_context: str | None = None,
+    session: Session = Depends(get_session),
+):
+    """Read-only correction report v2 with staged-intake results.
+
+    Never publishes, never mutates, never calls external paid providers.
+    """
+    from apps.api.src.services.intake_correction_report_v2 import build_correction_report_v2
+
+    repo = ItemRepository(session)
+    item = repo.get_by_sku(sku)
+    if not item:
+        raise HTTPException(status_code=404, detail=f"Item {sku} not found")
+    return build_correction_report_v2(item, platform=platform, user_context=user_context)
+
+
+class _ReanalysisPreviewRequest(BaseModel):
+    pending_updates: dict[str, object] = {}
+
+
+@router.post("/{sku}/reanalysis-preview")
+def post_reanalysis_preview(
+    sku: str,
+    body: _ReanalysisPreviewRequest,
+    session: Session = Depends(get_session),
+):
+    """Preview which stages a set of pending user edits would invalidate.
+
+    Read-only: never writes the edits to the item.
+    """
+    from apps.api.src.services.intake_reanalysis import build_reanalysis_preview
+
+    repo = ItemRepository(session)
+    item = repo.get_by_sku(sku)
+    if not item:
+        raise HTTPException(status_code=404, detail=f"Item {sku} not found")
+    return build_reanalysis_preview(item, body.pending_updates or {})
+
+
 @router.patch("/{sku}")
 def update_item(sku: str, updates: dict, session: Session = Depends(get_session)):
     """Manual field override — sets manual_override=True to protect from AI reprocessing."""

@@ -1,0 +1,153 @@
+from __future__ import annotations
+
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+from sqlmodel import Session, create_engine
+
+from apps.api.src.routes import items
+from packages.core.src import config as core_config
+from packages.core.src.constants import ItemStatus
+from packages.data.src.db import sqlite as sqlite_db
+from packages.data.src.repositories.item_repo import ItemRepository
+from packages.domain.src.entities.item import Item
+
+
+def _client() -> TestClient:
+    app = FastAPI()
+    app.include_router(items.router, prefix="/api/items")
+    return TestClient(app)
+
+
+def _configure_db(monkeypatch, tmp_path):
+    db_path = tmp_path / "correction_v2.db"
+    monkeypatch.setenv("DB_PATH", str(db_path))
+    monkeypatch.setenv("E2E_ROUTE_GUARD_ENABLED", "false")
+    core_config.get_settings.cache_clear()
+    sqlite_db.get_settings.cache_clear()
+    engine = create_engine(f"sqlite:///{db_path}", connect_args={"check_same_thread": False})
+    monkeypatch.setattr(sqlite_db, "engine", engine)
+    sqlite_db.init_db()
+
+
+def _seed(item: Item) -> None:
+    with Session(sqlite_db.engine) as session:
+        ItemRepository(session).upsert(item)
+
+
+def _ready_book(**overrides) -> Item:
+    base = dict(
+        sku="BK-V2",
+        status=ItemStatus.PENDING_INTAKE,
+        category_key="books",
+        category_label="Books",
+        title_final="Reference Book",
+        brand="Penguin",
+        condition_label="Good",
+        condition_id="5000",
+        confidence_score=0.85,
+        image_paths=[
+            "front-cover.jpg", "back-cover.jpg", "spine.jpg",
+            "title-page.jpg", "copyright.jpg", "condition-flaws.jpg",
+        ],
+    )
+    base.update(overrides)
+    return Item(**base)
+
+
+def test_correction_report_v2_includes_all_sections(monkeypatch, tmp_path):
+    _configure_db(monkeypatch, tmp_path)
+    _seed(_ready_book())
+
+    with _client() as client:
+        resp = client.get("/api/items/BK-V2/correction-report-v2")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["schema_version"] == "v2"
+    assert body["no_ebay_mutation_performed"] is True
+    assert body["no_external_provider_called"] is True
+    assert body["first_pass_identity"]["decision"] == "READY_FOR_DEEP_ANALYSIS"
+    assert body["category_candidates"]["marketplace_candidates"]
+    assert body["marketplace_requirements"]["platform"] == "ebay"
+    assert body["deep_analysis_preview"] is not None
+    assert "grouped_next_actions" in body
+
+
+def test_correction_report_v2_groups_actions_for_missing_photos(monkeypatch, tmp_path):
+    _configure_db(monkeypatch, tmp_path)
+    _seed(_ready_book(image_paths=["front-cover.jpg"]))
+
+    with _client() as client:
+        resp = client.get("/api/items/BK-V2/correction-report-v2")
+
+    body = resp.json()
+    groups = {entry["group"] for entry in body["grouped_next_actions"]}
+    assert "Needs more photos" in groups
+    assert body["should_run_deep_analysis"] is False
+    assert body["publish_approval_blocked"] is True
+
+
+def test_correction_report_v2_flags_malformed_condition_id(monkeypatch, tmp_path):
+    _configure_db(monkeypatch, tmp_path)
+    _seed(_ready_book(condition_id="[3000, 4000]"))
+
+    with _client() as client:
+        resp = client.get("/api/items/BK-V2/correction-report-v2")
+
+    body = resp.json()
+    assert any("malformed" in entry.lower() for entry in body["malformed_data"])
+
+
+def test_reanalysis_preview_brand_change_triggers_rerun(monkeypatch, tmp_path):
+    _configure_db(monkeypatch, tmp_path)
+    _seed(_ready_book())
+
+    with _client() as client:
+        resp = client.post(
+            "/api/items/BK-V2/reanalysis-preview",
+            json={"pending_updates": {"brand": "Coach"}},
+        )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["impact_summary"]["should_rerun_deep_analysis"] is True
+    assert body["impact_summary"]["affects_identity"] is True
+    # Brand edits are flagged as risky claim:
+    assert body["trust_assessments"][0]["trust_level"] == "risky_claim"
+
+
+def test_reanalysis_preview_ignores_no_op_edits(monkeypatch, tmp_path):
+    _configure_db(monkeypatch, tmp_path)
+    _seed(_ready_book(brand="Penguin"))
+
+    with _client() as client:
+        resp = client.post(
+            "/api/items/BK-V2/reanalysis-preview",
+            json={"pending_updates": {"brand": "Penguin"}},
+        )
+
+    body = resp.json()
+    assert body["pending_change_events"] == []
+    assert body["impact_summary"]["should_rerun_deep_analysis"] is False
+
+
+def test_reanalysis_preview_color_edit_does_not_force_rerun(monkeypatch, tmp_path):
+    _configure_db(monkeypatch, tmp_path)
+    _seed(_ready_book())
+
+    with _client() as client:
+        resp = client.post(
+            "/api/items/BK-V2/reanalysis-preview",
+            json={"pending_updates": {"color": "Blue"}},
+        )
+
+    body = resp.json()
+    # color is a factual observation: no rerun required
+    assert body["impact_summary"]["should_rerun_deep_analysis"] is False
+
+
+def test_correction_report_v2_404_for_unknown(monkeypatch, tmp_path):
+    _configure_db(monkeypatch, tmp_path)
+    with _client() as client:
+        resp = client.get("/api/items/UNK/correction-report-v2")
+    assert resp.status_code == 404
