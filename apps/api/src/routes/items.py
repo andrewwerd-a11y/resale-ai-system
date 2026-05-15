@@ -267,6 +267,135 @@ def get_intake_correction_report(sku: str, session: Session = Depends(get_sessio
     return build_intake_correction_report(item)
 
 
+@router.get("/{sku}/intake-pipeline-status")
+def get_intake_pipeline_status(
+    sku: str,
+    platform: str = "ebay",
+    user_context: str | None = None,
+    run_deep_analysis: bool = False,
+    session: Session = Depends(get_session),
+):
+    """Read-only snapshot of the staged intake pipeline.
+
+    Never publishes, never mutates, never calls external paid providers.
+    """
+    from apps.api.src.services.intake_pipeline import build_pipeline_snapshot
+
+    repo = ItemRepository(session)
+    item = repo.get_by_sku(sku)
+    if not item:
+        raise HTTPException(status_code=404, detail=f"Item {sku} not found")
+    return build_pipeline_snapshot(
+        item,
+        platform=platform,
+        user_context=user_context,
+        run_deep_analysis=run_deep_analysis,
+    )
+
+
+class _IdentityScanRequest(BaseModel):
+    user_context: str | None = None
+
+
+@router.post("/{sku}/identity-scan")
+def post_identity_scan(
+    sku: str,
+    body: _IdentityScanRequest | None = None,
+    session: Session = Depends(get_session),
+):
+    """Run the deterministic first-pass identity scan (no external API)."""
+    from packages.intake.src.identity_scan import run_first_pass_identity
+
+    repo = ItemRepository(session)
+    item = repo.get_by_sku(sku)
+    if not item:
+        raise HTTPException(status_code=404, detail=f"Item {sku} not found")
+    result = run_first_pass_identity(item, user_context=(body.user_context if body else None))
+    return result.to_dict() | {"no_ebay_mutation_performed": True}
+
+
+@router.post("/{sku}/category-candidates")
+def post_category_candidates(sku: str, session: Session = Depends(get_session)):
+    """Read-only category resolution: candidates only, no taxonomy mutation."""
+    from packages.intake.src.category_resolver import resolve_categories
+    from packages.intake.src.identity_scan import run_first_pass_identity
+
+    repo = ItemRepository(session)
+    item = repo.get_by_sku(sku)
+    if not item:
+        raise HTTPException(status_code=404, detail=f"Item {sku} not found")
+    identity = run_first_pass_identity(item)
+    resolution = resolve_categories(item, identity=identity)
+    return resolution.to_dict() | {"no_ebay_mutation_performed": True}
+
+
+@router.get("/{sku}/marketplace-requirements")
+def get_marketplace_requirements_endpoint(
+    sku: str,
+    platform: str = "ebay",
+    category_id: str | None = None,
+    session: Session = Depends(get_session),
+):
+    """Read-only marketplace requirements for a given platform/category."""
+    from packages.intake.src.marketplace_requirements import get_marketplace_requirements
+
+    repo = ItemRepository(session)
+    item = repo.get_by_sku(sku)
+    if not item:
+        raise HTTPException(status_code=404, detail=f"Item {sku} not found")
+    requirements = get_marketplace_requirements(item, platform=platform, category_id=category_id)
+    return requirements.to_dict() | {"no_ebay_mutation_performed": True}
+
+
+class _DeepAnalysisRequest(BaseModel):
+    user_context: str | None = None
+    platform: str = "ebay"
+
+
+@router.post("/{sku}/deep-analysis-preview")
+def post_deep_analysis_preview(
+    sku: str,
+    body: _DeepAnalysisRequest | None = None,
+    session: Session = Depends(get_session),
+):
+    """Deterministic deep-analysis preview. Never persists, never publishes."""
+    from packages.intake.src.analysis_contract import run_deep_analysis_preview
+    from packages.intake.src.category_resolver import resolve_categories
+    from packages.intake.src.identity_scan import run_first_pass_identity
+    from packages.intake.src.marketplace_requirements import get_marketplace_requirements
+
+    repo = ItemRepository(session)
+    item = repo.get_by_sku(sku)
+    if not item:
+        raise HTTPException(status_code=404, detail=f"Item {sku} not found")
+    platform = (body.platform if body else None) or "ebay"
+    user_context = body.user_context if body else None
+    identity = run_first_pass_identity(item, user_context=user_context)
+    resolution = resolve_categories(item, identity=identity)
+    selected = None
+    if resolution.marketplace_candidates:
+        selected = max(
+            resolution.marketplace_candidates,
+            key=lambda c: (c.recommended, c.confidence),
+        )
+    requirements = get_marketplace_requirements(
+        item,
+        platform=platform,
+        category_id=(selected.category_id if selected else None),
+    )
+    result = run_deep_analysis_preview(
+        item,
+        identity=identity,
+        selected_category=selected,
+        marketplace_requirements=requirements,
+        user_context=user_context,
+    )
+    return result.to_dict() | {
+        "no_ebay_mutation_performed": True,
+        "no_external_provider_called": True,
+    }
+
+
 @router.patch("/{sku}")
 def update_item(sku: str, updates: dict, session: Session = Depends(get_session)):
     """Manual field override — sets manual_override=True to protect from AI reprocessing."""
