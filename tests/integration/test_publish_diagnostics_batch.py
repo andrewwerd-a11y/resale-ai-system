@@ -170,6 +170,11 @@ def test_batch_diagnostics_blocks_stale_live_used_good_without_mutation(monkeypa
     assert body["session_warning"]
     assert body["copyable_report_markdown"]
     assert body["copyable_codex_prompt"]
+    assert "workflow_hint=" in body["copyable_report_markdown"]
+    assert "primary_blocker_family=condition" in body["copyable_report_markdown"]
+    assert "Read-only analysis only." in body["copyable_codex_prompt"]
+    assert "No eBay mutation." in body["copyable_codex_prompt"]
+    assert "Do not publish through the normal flow." in body["copyable_codex_prompt"]
 
     stale = body["per_sku_results"][0]
     assert stale["sku"] == "BK-000008"
@@ -235,6 +240,9 @@ def test_batch_diagnostics_classifies_image_hosting_failures(monkeypatch, tmp_pa
     assert "missing_hosted_images" in result["blocker_codes"]
     assert result["image_hosting_readiness"]["status"] == "missing"
     assert result["recommended_next_action"] == "Host item images to public URLs before publish preview or publish."
+    prompt = resp.json()["copyable_codex_prompt"]
+    assert "workflow_lane: image_hosting_candidate" in prompt
+    assert "Investigate image hosting readiness only after confirming there are no higher-risk live-state, category, or condition blockers." in prompt
     assert result["raw_details"]
     serialized = str(result["raw_details"]).lower()
     assert "authorization" not in serialized
@@ -259,6 +267,11 @@ def test_batch_diagnostics_classifies_already_listed_items_separately(monkeypatc
     assert result["blocker_codes"] == []
     assert "listed/sync-review item" in result["recommended_next_action"]
     assert resp.json()["summary"]["ready_for_publish_preview"] == 0
+    prompt = resp.json()["copyable_codex_prompt"]
+    assert "workflow_lane: already_listed_or_sync_review" in prompt
+    assert "Review sync, revise readiness, and listed-state consistency only." in prompt
+    assert "workflow_hint: fresh publish candidate" not in prompt
+    assert "Do not treat this SKU as a fresh publish candidate" in prompt
 
 
 def test_batch_diagnostics_live_state_blockers_outrank_image_hosting(monkeypatch, tmp_path):
@@ -280,6 +293,41 @@ def test_batch_diagnostics_live_state_blockers_outrank_image_hosting(monkeypatch
     assert result["blocker_codes"].index("stale_live_inventory_condition_suspected") < result["blocker_codes"].index("local_image_path_only")
     assert result["recommended_next_action"].startswith("Do not publish.")
     assert "Host item images" not in result["recommended_next_action"]
+    prompt = resp.json()["copyable_codex_prompt"]
+    assert "workflow_lane: live_state_remediation_required" in prompt
+    assert "Do not publish through the normal flow." in prompt
+    assert "Host item images to public URLs before publish preview or publish." not in prompt
+
+
+def test_batch_diagnostics_unknown_manual_review_mixed_image_and_live_gap_avoids_host_images_first(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    _block_mutations(monkeypatch)
+    local_only = tmp_path / "local-only.jpg"
+    local_only.write_bytes(b"fake-image")
+    _seed_item(
+        status=ItemStatus.NEEDS_REVIEW,
+        image_paths=[str(local_only)],
+        offer_id="",
+        listing_id="",
+    )
+
+    resp = _post_batch(["BK-000008"], allow_live_readonly=True)
+
+    assert resp.status_code == 200
+    body = resp.json()
+    result = body["per_sku_results"][0]
+    assert result["workflow_lane"] == "unknown_manual_review"
+    assert result["workflow_hint"] == "status not publish candidate"
+    assert "missing_live_inventory_item" in result["blocker_codes"]
+    assert "local_image_path_only" in result["blocker_codes"]
+    assert "Host item images" not in result["recommended_next_action"]
+    assert "classification is clear" in result["recommended_next_action"]
+    assert "status=needs_review; lane=unknown_manual_review; workflow_hint=status not publish candidate" in body["copyable_report_markdown"]
+    prompt = body["copyable_codex_prompt"]
+    assert "workflow_lane: unknown_manual_review" in prompt
+    assert "Investigate why live inventory/readiness state is missing or unclear before treating this as normal publish prep." in prompt
+    assert "Confirm whether this is a fresh publish-prep item, an already-listed/sync item, or a remediation item;" in prompt
+    assert "Host item images to public URLs before publish preview or publish." not in prompt
 
 
 def test_batch_diagnostics_honors_route_guard(monkeypatch, tmp_path):

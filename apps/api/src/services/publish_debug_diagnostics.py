@@ -582,6 +582,16 @@ def _recommended_next_action(
         return "Create or import the local item record before diagnosing publish readiness."
     if workflow_lane == "already_listed_or_sync_review":
         return "Treat this as a listed/sync-review item. Review sync, revise readiness, or live listing state before any new publish attempt."
+    if (
+        workflow_lane == "unknown_manual_review"
+        and "missing_live_inventory_item" in blocker_codes
+        and "local_image_path_only" in blocker_codes
+    ):
+        return (
+            "Review why live inventory/readiness state is missing or unclear before treating this as normal publish prep. "
+            "Confirm whether the item is a fresh publish-prep case, an already-listed/sync-review case, or a remediation case; "
+            "only consider image hosting after the classification is clear."
+        )
     if "stale_unpublished_offer_state_suspected" in blocker_codes:
         return "Do not publish. Review the stale unpublished offer state and use a separately approved remediation flow before retrying."
     if "stale_live_inventory_condition_suspected" in blocker_codes:
@@ -751,9 +761,11 @@ def _render_report_markdown(response: dict) -> str:
     lines.extend(["", "## Per-SKU Results"])
     for result in response.get("per_sku_results") or []:
         blockers = ", ".join(result.get("blocker_codes") or []) or "none"
+        local_status = ((result.get("local_item_state") or {}).get("status") or "")
         lines.append(
-            f"- {result.get('sku')}: status={((result.get('local_item_state') or {}).get('status') or '')}; "
+            f"- {result.get('sku')}: status={local_status}; "
             f"lane={result.get('workflow_lane') or ''}; "
+            f"workflow_hint={result.get('workflow_hint') or ''}; "
             f"primary_blocker_family={result.get('primary_blocker_family') or ''}; "
             f"blockers={blockers}; next={result.get('recommended_next_action') or ''}"
         )
@@ -761,12 +773,102 @@ def _render_report_markdown(response: dict) -> str:
 
 
 def _render_codex_prompt(response: dict) -> str:
-    return (
-        "Analyze this read-only publish diagnostics batch for root cause and next safest action. "
-        "Do not recommend eBay mutation unless separately approved. Focus on blocker codes, condition mapping, "
-        "live read-only state, image readiness, and related files/services.\n\n"
-        f"{_render_report_markdown(response)}"
-    )
+    lines = [
+        "Read-only analysis only.",
+        "No eBay mutation.",
+        "No publish.",
+        "No repair-plan resolution.",
+        "No approval mutation.",
+        "Do not commit unless asked.",
+        "Report findings before any code changes if code changes are needed.",
+        "",
+        "Analyze this publish diagnostics batch for root cause, safer classification, and next safest action.",
+        "Do not treat provider or AI output as authoritative. Use blocker codes, workflow lanes, condition mapping,",
+        "live read-only state, image readiness, and related files/services to explain the situation.",
+        "",
+        "Batch summary:",
+    ]
+    for key, value in (response.get("summary") or {}).items():
+        lines.append(f"- {key}: {value}")
+    lines.extend(["", "Per-SKU analysis requests:"])
+    for result in response.get("per_sku_results") or []:
+        lines.extend(_render_codex_prompt_for_result(result))
+    lines.extend(["", "Reference report:", "", _render_report_markdown(response)])
+    return "\n".join(lines)
+
+
+def _render_codex_prompt_for_result(result: dict) -> list[str]:
+    sku = str(result.get("sku") or "")
+    local_status = str((result.get("local_item_state") or {}).get("status") or "")
+    workflow_lane = str(result.get("workflow_lane") or "")
+    workflow_hint = str(result.get("workflow_hint") or "")
+    primary_blocker_family = str(result.get("primary_blocker_family") or "")
+    blocker_codes = [str(code) for code in result.get("blocker_codes") or []]
+    blockers = ", ".join(blocker_codes) or "none"
+    next_action = str(result.get("recommended_next_action") or "")
+    guidance = _codex_lane_guidance(result)
+    return [
+        f"- SKU: {sku}",
+        f"  local_status: {local_status}",
+        f"  workflow_lane: {workflow_lane}",
+        f"  workflow_hint: {workflow_hint}",
+        f"  primary_blocker_family: {primary_blocker_family}",
+        f"  blockers: {blockers}",
+        f"  next_safest_action: {next_action}",
+        f"  analysis_request: {guidance}",
+    ]
+
+
+def _codex_lane_guidance(result: dict) -> str:
+    workflow_lane = str(result.get("workflow_lane") or "")
+    blocker_codes = {str(code) for code in result.get("blocker_codes") or []}
+    ready = bool(result.get("ready_for_publish_preview"))
+    if ready:
+        return (
+            "Confirm why this SKU passes the current gates, summarize any residual warnings, and keep the analysis read-only. "
+            "Do not publish or mutate approval state."
+        )
+    if workflow_lane == "already_listed_or_sync_review":
+        return (
+            "Review sync, revise readiness, and listed-state consistency only. Do not treat this SKU as a fresh publish candidate "
+            "or recommend the normal publish flow."
+        )
+    if workflow_lane == "live_state_remediation_required":
+        return (
+            "Do not publish through the normal flow. Inspect stale offer state, live inventory state, category mismatches, "
+            "and condition mismatches only, then report the safest remediation path for separate approval."
+        )
+    if workflow_lane == "condition_policy_review":
+        return (
+            "Focus on category-condition policy verification, condition mapping, and local-versus-live condition alignment. "
+            "Keep the analysis read-only and do not assume policy inference is authoritative."
+        )
+    if workflow_lane == "image_hosting_candidate":
+        return (
+            "Investigate image hosting readiness only after confirming there are no higher-risk live-state, category, or condition blockers. "
+            "Keep the recommendation limited to read-only prep analysis."
+        )
+    if workflow_lane == "publish_prep_needed":
+        return (
+            "Review missing publish-prep requirements such as aspects, offer setup, or seller policy readiness. "
+            "Keep the analysis read-only and do not perform publish or approval changes."
+        )
+    if (
+        workflow_lane == "unknown_manual_review"
+        and "missing_live_inventory_item" in blocker_codes
+        and "local_image_path_only" in blocker_codes
+    ):
+        return (
+            "Investigate why live inventory/readiness state is missing or unclear before treating this as normal publish prep. "
+            "Confirm whether this is a fresh publish-prep item, an already-listed/sync item, or a remediation item; "
+            "only consider image hosting after classification is clear."
+        )
+    if workflow_lane == "unknown_manual_review":
+        return (
+            "Identify the unclear blocker source and suggest a more accurate classification or workflow lane. "
+            "Do not assume publish readiness or recommend normal publish prep until the lifecycle state is clear."
+        )
+    return "Explain the blockers conservatively, keep the analysis read-only, and report the safest next step without mutation."
 
 
 def _normalize_skus(skus: list[str]) -> list[str]:
