@@ -113,6 +113,7 @@ def write_bulk_reintake_reports(response: dict, *, report_dir: Path | str | None
 
 def render_bulk_reintake_markdown(response: dict) -> str:
     summary = response.get("summary") or {}
+    lanes = summary.get("by_workflow_lane") or {}
     lines = [
         "# Bulk Reintake Preview",
         "",
@@ -128,7 +129,32 @@ def render_bulk_reintake_markdown(response: dict) -> str:
         f"- Total SKUs: {summary.get('total_skus', 0)}",
         f"- Ready for publish preview: {summary.get('ready_for_publish_preview_count', 0)}",
         f"- Blocked: {summary.get('blocked_count', 0)}",
+        f"- Already listed / sync review: {summary.get('already_listed_or_sync_review_count', 0)}",
+        f"- Live-state remediation required: {summary.get('live_state_remediation_required_count', 0)}",
+        f"- Image-hosting candidates: {summary.get('image_hosting_candidate_count', 0)}",
+        f"- Unknown manual review: {summary.get('unknown_manual_review_count', 0)}",
         f"- External provider called: {not bool(response.get('no_external_provider_called', True))}",
+        "",
+        "## Lane Counts",
+        *_format_counter_lines(lanes),
+        "",
+        "## Top Missing Photo Types",
+        *_format_counter_lines(summary.get("top_missing_photo_types") or {}),
+        "",
+        "## Top Blocker Codes",
+        *_format_counter_lines(summary.get("top_blocker_codes") or {}),
+        "",
+        "## First Candidates To Improve",
+        *_format_sku_lines(summary.get("first_safe_candidates_for_next_dry_run") or []),
+        "",
+        "## Do Not Touch Through Normal Publish Flow",
+        *_format_sku_lines(summary.get("highest_risk_skus_to_defer") or []),
+        "",
+        "## Next Safest Action By Lane",
+        *_lane_action_lines(response.get("per_sku_results") or []),
+        "",
+        "## SKU Tables By Lane",
+        *_lane_table_lines(response.get("per_sku_results") or []),
         "",
         "## Per-SKU Preview",
     ]
@@ -286,12 +312,53 @@ def _publish_diagnostics_summary(diagnostics: dict) -> dict:
 
 
 def _build_summary(results: list[dict]) -> dict:
+    status_counts = counter_dict([result.get("current_local_status") for result in results])
+    quality_counts = counter_dict([result.get("intake_quality_status") for result in results])
+    photo_need_counts = counter_dict([str(bool(result.get("needs_more_photos_for_analysis"))).lower() for result in results])
+    lane_counts = counter_dict([result.get("workflow_lane") for result in results])
+    family_counts = counter_dict([result.get("primary_blocker_family") for result in results])
+    missing_photo_counts = counter_dict([
+        photo_type
+        for result in results
+        for photo_type in result.get("missing_photo_types") or []
+    ])
+    blocker_counts = counter_dict([
+        blocker
+        for result in results
+        for blocker in result.get("blockers") or []
+    ])
+    first_safe = [
+        result["sku"]
+        for result in results
+        if result.get("found")
+        and result.get("ready_for_publish_preview")
+        and result.get("workflow_lane") == "publish_prep_needed"
+    ][:10]
+    high_risk_lanes = {"live_state_remediation_required", "unknown_manual_review"}
+    high_risk = [
+        result["sku"]
+        for result in results
+        if result.get("workflow_lane") in high_risk_lanes
+    ][:20]
     return {
         "total_skus": len(results),
         "found": sum(1 for result in results if result.get("found")),
         "missing": sum(1 for result in results if not result.get("found")),
+        "by_local_status": status_counts,
+        "by_intake_quality_status": quality_counts,
+        "by_needs_more_photos_for_analysis": photo_need_counts,
+        "by_workflow_lane": lane_counts,
+        "by_primary_blocker_family": family_counts,
         "ready_for_publish_preview_count": sum(1 for result in results if result.get("ready_for_publish_preview")),
         "blocked_count": sum(1 for result in results if result.get("blockers")),
+        "already_listed_or_sync_review_count": lane_counts.get("already_listed_or_sync_review", 0),
+        "live_state_remediation_required_count": lane_counts.get("live_state_remediation_required", 0),
+        "image_hosting_candidate_count": lane_counts.get("image_hosting_candidate", 0),
+        "unknown_manual_review_count": lane_counts.get("unknown_manual_review", 0),
+        "top_missing_photo_types": dict(sorted(missing_photo_counts.items(), key=lambda item: (-item[1], item[0]))[:10]),
+        "top_blocker_codes": dict(sorted(blocker_counts.items(), key=lambda item: (-item[1], item[0]))[:10]),
+        "first_safe_candidates_for_next_dry_run": first_safe,
+        "highest_risk_skus_to_defer": high_risk,
     }
 
 
@@ -320,3 +387,71 @@ def _normalize_statuses(statuses: list[str] | None) -> list[str]:
 
 def counter_dict(values: list[Any]) -> dict[str, int]:
     return dict(Counter(str(value) for value in values if value))
+
+
+def _format_counter_lines(values: dict) -> list[str]:
+    if not values:
+        return ["- none"]
+    return [f"- {key}: {value}" for key, value in values.items()]
+
+
+def _format_sku_lines(skus: list[str]) -> list[str]:
+    if not skus:
+        return ["- none"]
+    return [f"- {sku}" for sku in skus]
+
+
+def _lane_action_lines(results: list[dict]) -> list[str]:
+    seen: set[str] = set()
+    lines: list[str] = []
+    for result in results:
+        lane = str(result.get("workflow_lane") or "")
+        if not lane or lane in seen:
+            continue
+        seen.add(lane)
+        action = _lane_default_action(lane)
+        lines.append(f"- {lane}: {action}")
+    return lines or ["- none"]
+
+
+def _lane_default_action(lane: str) -> str:
+    if lane == "already_listed_or_sync_review":
+        return "Review sync/revise/listed-state consistency; do not treat as fresh publish candidates."
+    if lane == "live_state_remediation_required":
+        return "Do not use normal publish flow; investigate stale offer/live inventory/category/condition mismatch."
+    if lane == "condition_policy_review":
+        return "Verify category-condition policy and local/live condition mapping before any publish dry-run."
+    if lane == "image_hosting_candidate":
+        return "Investigate image hosting only after confirming no higher-risk live-state/category/condition blocker exists."
+    if lane == "publish_prep_needed":
+        return "Complete missing publish-prep requirements through read-only preview and manual approval."
+    return "Clarify lifecycle/readiness classification before treating the SKU as publish prep."
+
+
+def _lane_table_lines(results: list[dict]) -> list[str]:
+    grouped: dict[str, list[dict]] = {}
+    for result in results:
+        grouped.setdefault(str(result.get("workflow_lane") or "unknown_manual_review"), []).append(result)
+    if not grouped:
+        return ["- none"]
+    lines: list[str] = []
+    for lane, lane_results in grouped.items():
+        lines.append(f"### {lane}")
+        lines.append("| SKU | Status | Intake Quality | Primary Family | Blockers | Next Safest Action |")
+        lines.append("| --- | --- | --- | --- | --- | --- |")
+        for result in lane_results:
+            blockers = ", ".join(result.get("blockers") or []) or "none"
+            lines.append(
+                "| "
+                + " | ".join([
+                    str(result.get("sku") or ""),
+                    str(result.get("current_local_status") or ""),
+                    str(result.get("intake_quality_status") or ""),
+                    str(result.get("primary_blocker_family") or ""),
+                    blockers,
+                    str(result.get("next_safest_action") or ""),
+                ])
+                + " |"
+            )
+        lines.append("")
+    return lines

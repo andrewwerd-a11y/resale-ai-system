@@ -85,6 +85,10 @@ def test_bulk_reintake_preview_enumerates_status_skus_safely(monkeypatch, tmp_pa
     assert preview["no_ebay_mutation_performed"] is True
     assert preview["no_external_provider_called"] is True
     assert preview["summary"]["total_skus"] == 2
+    assert preview["summary"]["by_local_status"] == {"listed": 1, "export_ready": 1}
+    assert "by_intake_quality_status" in preview["summary"]
+    assert "by_workflow_lane" in preview["summary"]
+    assert "by_primary_blocker_family" in preview["summary"]
     skus = [result["sku"] for result in preview["per_sku_results"]]
     assert skus == ["BK-LISTED", "BK-REINTAKE"]
     first = next(result for result in preview["per_sku_results"] if result["sku"] == "BK-REINTAKE")
@@ -99,6 +103,10 @@ def test_bulk_reintake_preview_enumerates_status_skus_safely(monkeypatch, tmp_pa
     assert (tmp_path / "reports").exists()
     assert preview["json_report_path"].endswith(".json")
     assert preview["markdown_report_path"].endswith(".md")
+    assert "## Executive Summary" in preview["report_markdown"]
+    assert "## Lane Counts" in preview["report_markdown"]
+    assert "## SKU Tables By Lane" in preview["report_markdown"]
+    assert "Do not publish automatically" in preview["report_markdown"]
 
 
 def test_bulk_reintake_preview_handles_empty_status_selection(monkeypatch, tmp_path):
@@ -137,3 +145,77 @@ def test_bulk_reintake_preview_handles_missing_explicit_sku(monkeypatch, tmp_pat
     assert result["primary_blocker_family"] == "missing_local_item"
     assert "missing_local_item" in result["blockers"]
     assert preview["summary"]["missing"] == 1
+
+
+def test_bulk_reintake_preview_rollups_and_markdown_are_lane_safe(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    _block_mutations(monkeypatch)
+    _seed_item(sku="BK-LISTED", status=ItemStatus.LISTED, listing_id="1234567890")
+    _seed_item(sku="BK-LIVE", status=ItemStatus.EXPORT_READY)
+    _seed_item(sku="BK-IMAGE", status=ItemStatus.EXPORT_READY)
+
+    def fake_batch(_session, skus, *, allow_live_readonly=False):
+        results = []
+        for sku in skus:
+            if sku == "BK-LISTED":
+                results.append({
+                    "sku": sku,
+                    "found": True,
+                    "ready_for_publish_preview": False,
+                    "workflow_lane": "already_listed_or_sync_review",
+                    "workflow_hint": "already listed / sync review",
+                    "primary_blocker_family": "sync_review",
+                    "blocker_codes": [],
+                    "recommended_next_action": "Treat this as a listed/sync-review item.",
+                })
+            elif sku == "BK-LIVE":
+                results.append({
+                    "sku": sku,
+                    "found": True,
+                    "ready_for_publish_preview": False,
+                    "workflow_lane": "live_state_remediation_required",
+                    "workflow_hint": "live state remediation required",
+                    "primary_blocker_family": "condition",
+                    "blocker_codes": ["stale_live_inventory_condition_suspected", "local_image_path_only"],
+                    "recommended_next_action": "Do not publish. Review live-state mismatch before image hosting.",
+                })
+            else:
+                results.append({
+                    "sku": sku,
+                    "found": True,
+                    "ready_for_publish_preview": False,
+                    "workflow_lane": "image_hosting_candidate",
+                    "workflow_hint": "image hosting needed before publish preview",
+                    "primary_blocker_family": "images",
+                    "blocker_codes": ["local_image_path_only"],
+                    "recommended_next_action": "Host item images to public URLs before publish preview or publish.",
+                })
+        return {"per_sku_results": results}
+
+    monkeypatch.setattr(
+        "apps.api.src.services.bulk_reintake_preview.build_publish_debug_diagnostics_batch",
+        fake_batch,
+    )
+
+    with Session(sqlite_db.engine) as session:
+        preview = build_bulk_reintake_preview(
+            session,
+            skus=["BK-LISTED", "BK-LIVE", "BK-IMAGE"],
+            statuses=[],
+            report_dir=tmp_path / "reports",
+        )
+
+    summary = preview["summary"]
+    assert summary["already_listed_or_sync_review_count"] == 1
+    assert summary["live_state_remediation_required_count"] == 1
+    assert summary["image_hosting_candidate_count"] == 1
+    assert summary["top_blocker_codes"]["local_image_path_only"] == 2
+    assert summary["top_blocker_codes"]["stale_live_inventory_condition_suspected"] == 1
+    assert "BK-LIVE" in summary["highest_risk_skus_to_defer"]
+    markdown = preview["report_markdown"]
+    assert "Review sync/revise/listed-state consistency; do not treat as fresh publish candidates." in markdown
+    assert "Do not use normal publish flow; investigate stale offer/live inventory/category/condition mismatch." in markdown
+    assert "Do not publish. Review live-state mismatch before image hosting." in markdown
+    assert "Do not publish automatically" in markdown
+    assert "already_listed_or_sync_review" in markdown
+    assert "live_state_remediation_required" in markdown
