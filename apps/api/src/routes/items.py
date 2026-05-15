@@ -26,6 +26,14 @@ from packages.testing.src.e2e_guard import (
 router = APIRouter()
 
 
+class BulkReintakePreviewRequest(BaseModel):
+    skus: list[str] = []
+    statuses: list[str] | None = None
+    run_deep_analysis_preview: bool = False
+    allow_live_readonly: bool = False
+    persist_report: bool = False
+
+
 def _intake_quality_block_detail(item) -> dict | None:
     quality = evaluate_intake_quality(item)
     apply_intake_quality_to_item(item, quality)
@@ -247,6 +255,41 @@ def get_item(sku: str, session: Session = Depends(get_session)):
     if not item:
         raise HTTPException(status_code=404, detail=f"Item {sku} not found")
     return item.model_dump()
+
+
+@router.post("/bulk-reintake-preview")
+def post_bulk_reintake_preview(
+    body: BulkReintakePreviewRequest | None = None,
+    session: Session = Depends(get_session),
+):
+    """Read-only bulk reintake/readiness preview.
+
+    No publish, eBay mutation, repair-plan resolution, approval mutation, item
+    overwrite, or external provider call is performed by default.
+    """
+    from apps.api.src.services.bulk_reintake_preview import build_bulk_reintake_preview
+
+    payload = body or BulkReintakePreviewRequest()
+    skus = parse_sku_list(",".join(payload.skus or []))
+    if is_route_guard_enabled():
+        if not skus:
+            raise HTTPException(
+                status_code=403,
+                detail="Explicit SKUs are required for bulk reintake preview while E2E_ROUTE_GUARD_ENABLED is active.",
+            )
+        try:
+            skus = assert_route_skus_allowed(skus, "items.bulk_reintake_preview", require_non_empty=True)
+        except E2ESafetyError as exc:
+            raise HTTPException(status_code=403, detail=str(exc))
+
+    return build_bulk_reintake_preview(
+        session,
+        skus=skus,
+        statuses=payload.statuses,
+        run_deep_analysis_preview=payload.run_deep_analysis_preview,
+        allow_live_readonly=payload.allow_live_readonly,
+        write_reports=payload.persist_report,
+    )
 
 
 @router.get("/{sku}/intake-quality")

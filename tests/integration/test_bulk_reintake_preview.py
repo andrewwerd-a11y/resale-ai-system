@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 from sqlmodel import Session, create_engine
 
+from apps.api.src.routes import items
 from apps.api.src.services.bulk_reintake_preview import build_bulk_reintake_preview
 from packages.core.src import config as core_config
 from packages.core.src.constants import ItemStatus
@@ -27,6 +30,12 @@ def _configure_temp_db(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(sqlite_db, "engine", engine)
     sqlite_db.init_db()
+
+
+def _client() -> TestClient:
+    app = FastAPI()
+    app.include_router(items.router, prefix="/api/items", tags=["items"])
+    return TestClient(app)
 
 
 def _seed_item(**overrides) -> None:
@@ -219,3 +228,52 @@ def test_bulk_reintake_preview_rollups_and_markdown_are_lane_safe(monkeypatch, t
     assert "Do not publish automatically" in markdown
     assert "already_listed_or_sync_review" in markdown
     assert "live_state_remediation_required" in markdown
+
+
+def test_bulk_reintake_preview_api_returns_read_only_summary_for_explicit_skus(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    _block_mutations(monkeypatch)
+    monkeypatch.setattr(
+        "apps.api.src.services.intake_pipeline.run_deep_analysis_preview",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("provider should not run by default")),
+    )
+    _seed_item(sku="BK-API", status=ItemStatus.EXPORT_READY)
+
+    with _client() as client:
+        resp = client.post(
+            "/api/items/bulk-reintake-preview",
+            json={"skus": ["BK-API"], "statuses": [], "persist_report": False},
+        )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["read_only"] is True
+    assert body["draft_only"] is True
+    assert body["no_publish_performed"] is True
+    assert body["no_ebay_mutation_performed"] is True
+    assert body["manual_approval_required"] is True
+    assert body["no_external_provider_called"] is True
+    assert body["summary"]["total_skus"] == 1
+    assert body["per_sku_results"][0]["sku"] == "BK-API"
+    assert "json_report_path" not in body
+    assert "markdown_report_path" not in body
+
+
+def test_bulk_reintake_preview_api_accepts_status_filters(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    _block_mutations(monkeypatch)
+    _seed_item(sku="BK-API-READY", status=ItemStatus.EXPORT_READY)
+    _seed_item(sku="BK-API-LISTED", status=ItemStatus.LISTED, listing_id="1234567890")
+
+    with _client() as client:
+        resp = client.post(
+            "/api/items/bulk-reintake-preview",
+            json={"statuses": ["listed"], "persist_report": False},
+        )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["selected_statuses"] == ["listed"]
+    assert body["summary"]["total_skus"] == 1
+    assert body["per_sku_results"][0]["sku"] == "BK-API-LISTED"
+    assert body["per_sku_results"][0]["workflow_lane"] == "already_listed_or_sync_review"
