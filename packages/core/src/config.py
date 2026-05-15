@@ -91,6 +91,14 @@ class Settings(BaseSettings):
     intake_provider: str = "deterministic"   # "deterministic" | "claude"
     intake_model: str = ""                   # blank → inherits enrichment_model
 
+    # Image selection limits for intake analysis (category-aware)
+    intake_max_images_default: int = 5
+    intake_max_images_books: int = 6
+    intake_max_images_clothing: int = 6
+    intake_max_images_bags: int = 7
+    intake_max_images_toys: int = 5
+    intake_max_image_bytes_total: int = 10 * 1024 * 1024  # 10 MB
+
     # Notifications (Phase 5)
     smtp_host: str = ""
     smtp_port: int = 587

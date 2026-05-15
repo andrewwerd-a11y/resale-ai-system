@@ -10,8 +10,9 @@ DeterministicDeepAnalysisProvider transparently. This module never raises;
 unavailability is communicated via is_available() and get_readiness().
 
 Image support: local file paths are base64-encoded and sent to Claude Vision
-(up to 3 photos). Hosted URLs are skipped — no external fetches. When no
-readable local photos are found, analysis is text-only from item fields.
+using a category-aware priority ordering. Hosted URLs are skipped — no
+external fetches. When no readable local photos are found, analysis is
+text-only from item fields.
 
 Output contract:
 - should_require_manual_review is ALWAYS forced True regardless of model response.
@@ -25,7 +26,7 @@ import base64
 import importlib.util
 import json
 import logging
-from dataclasses import field
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -53,7 +54,99 @@ _UPDATABLE_FIELDS = (
 _INPUT_PRICE_PER_TOKEN = 3.00 / 1_000_000
 _OUTPUT_PRICE_PER_TOKEN = 15.00 / 1_000_000
 
-_MAX_PHOTOS = 3
+# Category-aware photo priority lists (quality_gate token names, in preference order).
+# Photos earlier in the list are more critical to the analysis.
+_CATEGORY_PHOTO_PRIORITY: dict[str, list[str]] = {
+    "books": [
+        "front_cover", "back_cover", "spine", "title_page",
+        "copyright_publication_page", "condition_flaws", "markings_annotations",
+    ],
+    "clothing": [
+        "front", "back", "brand_tag", "size_tag",
+        "material_care_tag", "measurements", "flaws_wear",
+    ],
+    "bags": [
+        "front_back", "interior", "brand_logo", "serial_date_code",
+        "hardware", "corners_wear", "strap_handle", "authenticity_sensitive_evidence",
+    ],
+    "plush_toys": [
+        "front", "back", "tag_tush_tag", "scale_measurement",
+        "defects_wear", "copyright_manufacturer_tag",
+    ],
+    "shoes": [
+        "pair_front_side", "soles", "size_tag_inside_label",
+        "brand_label", "heels_toes_wear", "material_detail",
+    ],
+    "collectibles_antiques": [
+        "full_object", "maker_marks", "bottom_back",
+        "close_ups", "defects", "scale", "provenance_context",
+    ],
+}
+
+# Quality_gate token → filename keywords (inverse lookup for label inference).
+_TOKEN_FILENAME_KEYWORDS: dict[str, list[str]] = {
+    "front_cover": ["front", "front-cover", "front_cover"],
+    "back_cover": ["back", "back-cover", "back_cover"],
+    "spine": ["spine"],
+    "title_page": ["title", "title-page", "titlepage"],
+    "copyright_publication_page": ["copyright", "publication"],
+    "condition_flaws": ["flaw", "condition", "damage", "wear"],
+    "markings_annotations": ["mark", "annotation", "written", "inscription"],
+    "front": ["front"],
+    "back": ["back"],
+    "brand_tag": ["brand", "brand-tag", "brandtag"],
+    "size_tag": ["size", "size-tag", "sizetag"],
+    "material_care_tag": ["care", "material", "fabric"],
+    "measurements": ["measurement", "measure", "ruler"],
+    "flaws_wear": ["flaw", "wear", "damage"],
+    "pair_front_side": ["pair", "side"],
+    "soles": ["sole", "soles"],
+    "size_tag_inside_label": ["size", "inside", "label"],
+    "brand_label": ["brand", "label"],
+    "heels_toes_wear": ["heel", "toe", "wear"],
+    "material_detail": ["material", "texture", "detail"],
+    "tag_tush_tag": ["tush", "hangtag", "hang-tag"],
+    "scale_measurement": ["scale", "measurement"],
+    "defects_wear": ["defect", "flaw", "wear"],
+    "copyright_manufacturer_tag": ["copyright", "manufacturer"],
+    "front_back": ["front", "back"],
+    "interior": ["interior", "inside", "lining"],
+    "brand_logo": ["brand", "logo"],
+    "serial_date_code": ["serial", "date-code", "datecode"],
+    "hardware": ["hardware", "zipper", "clasp", "buckle"],
+    "corners_wear": ["corner"],
+    "strap_handle": ["strap", "handle"],
+    "authenticity_sensitive_evidence": ["auth", "authenticity", "certificate"],
+    "full_object": ["full", "object", "overview"],
+    "maker_marks": ["maker", "mark", "stamp"],
+    "bottom_back": ["bottom", "base"],
+    "close_ups": ["closeup", "close-up", "detail"],
+    "defects": ["defect", "flaw", "damage"],
+    "scale": ["scale", "ruler"],
+    "provenance_context": ["provenance", "receipt", "cert"],
+}
+
+
+def _infer_token_for_path(path_str: str, category_family: str) -> str | None:
+    """Guess a quality_gate token from a filename using keyword matching."""
+    stem = Path(path_str).stem.lower().replace("-", " ").replace("_", " ")
+    priority = _CATEGORY_PHOTO_PRIORITY.get(category_family, [])
+    for token in priority:
+        keywords = _TOKEN_FILENAME_KEYWORDS.get(token, [])
+        if any(kw in stem for kw in keywords):
+            return token
+    return None
+
+
+@dataclass
+class _ImageSelectionResult:
+    """Outcome of category-aware image selection."""
+    image_blocks: list[dict]
+    used_paths: list[str]
+    selected_photo_types: list[str]
+    skipped_paths: list[str]
+    skipped_reasons: list[str]
+    required_missing: list[str]
 
 _SYSTEM_PROMPT = """\
 You are an expert resale item analyst assisting a human reviewer. You will receive
@@ -197,30 +290,125 @@ class ClaudeDeepAnalysisProvider:
 
     # ── Image helpers ──────────────────────────────────────────────────────────
 
-    def _build_image_blocks(self, image_paths: list[str]) -> tuple[list[dict], list[str]]:
-        """Base64-encode readable local photos. Skip hosted URLs silently."""
+    def _max_images_for_family(self, category_family: str) -> int:
+        s = self._settings
+        mapping = {
+            "books": getattr(s, "intake_max_images_books", 6),
+            "clothing": getattr(s, "intake_max_images_clothing", 6),
+            "bags": getattr(s, "intake_max_images_bags", 7),
+            "plush_toys": getattr(s, "intake_max_images_toys", 5),
+            "shoes": getattr(s, "intake_max_images_default", 5),
+            "collectibles_antiques": getattr(s, "intake_max_images_default", 5),
+        }
+        return mapping.get(category_family, getattr(s, "intake_max_images_default", 5))
+
+    def _select_category_images(
+        self,
+        image_paths: list[str],
+        photo_meta: list,
+        category_family: str,
+    ) -> _ImageSelectionResult:
+        """Select images in category priority order, respecting byte and count caps.
+
+        Priority: explicit PhotoMeta labels > filename keyword inference > order.
+        Hosted URLs and unreadable files are skipped with a logged reason.
+        """
+        max_count = self._max_images_for_family(category_family)
+        max_bytes = getattr(self._settings, "intake_max_image_bytes_total", 10 * 1024 * 1024)
+        priority_tokens = _CATEGORY_PHOTO_PRIORITY.get(category_family, [])
+
+        # Build a label map: path → quality_gate token from PhotoMeta (if labeled).
+        # When multiple tokens share a PhotoType, prefer the first one in the
+        # category priority list so books get "front_cover" not "front" for FRONT.
+        from packages.intake.src.photo_types import QUALITY_GATE_TO_PHOTO_TYPE
+        labeled: dict[str, str] = {}
+        for pm in (photo_meta or []):
+            pt = getattr(pm, "photo_type", None)
+            path_key = getattr(pm, "path", None) or getattr(pm, "local_path", None)
+            if pt and path_key:
+                # Find the highest-priority token in this category that maps to pt.
+                matched_token: str | None = None
+                for tok in priority_tokens:
+                    if QUALITY_GATE_TO_PHOTO_TYPE.get(tok) == pt:
+                        matched_token = tok
+                        break
+                # Fall back to any token mapping if not in priority list.
+                if matched_token is None:
+                    for tok, mapped_pt in QUALITY_GATE_TO_PHOTO_TYPE.items():
+                        if mapped_pt == pt:
+                            matched_token = tok
+                            break
+                if matched_token:
+                    labeled[str(path_key)] = matched_token
+
+        # Sort paths: priority-ordered tokens first, then remaining by list order.
+        def sort_key(p: str) -> tuple[int, int]:
+            token = labeled.get(p) or _infer_token_for_path(p, category_family)
+            if token and token in priority_tokens:
+                return (0, priority_tokens.index(token))
+            return (1, image_paths.index(p) if p in image_paths else 999)
+
+        sorted_paths = sorted(image_paths, key=sort_key)
+
         blocks: list[dict] = []
         used_paths: list[str] = []
-        for path_str in image_paths:
-            if len(blocks) >= _MAX_PHOTOS:
-                break
+        selected_tokens: list[str] = []
+        skipped_paths: list[str] = []
+        skipped_reasons: list[str] = []
+        total_bytes = 0
+
+        for path_str in sorted_paths:
+            if len(blocks) >= max_count:
+                skipped_paths.append(path_str)
+                skipped_reasons.append("count_cap")
+                continue
             if path_str.startswith("http://") or path_str.startswith("https://"):
-                continue  # never fetch external URLs
+                skipped_paths.append(path_str)
+                skipped_reasons.append("hosted_url_skipped")
+                continue
             p = Path(path_str)
             if not p.exists():
+                skipped_paths.append(path_str)
+                skipped_reasons.append("file_not_found")
                 continue
             try:
-                data = base64.standard_b64encode(p.read_bytes()).decode()
-                ext = p.suffix.lower().lstrip(".")
-                media_type = "image/jpeg" if ext in ("jpg", "jpeg") else f"image/{ext}"
-                blocks.append({
-                    "type": "image",
-                    "source": {"type": "base64", "media_type": media_type, "data": data},
-                })
-                used_paths.append(path_str)
+                raw_bytes = p.read_bytes()
             except Exception as exc:
                 logger.warning("Could not read photo %s: %s", path_str, exc)
-        return blocks, used_paths
+                skipped_paths.append(path_str)
+                skipped_reasons.append("read_error")
+                continue
+            if total_bytes + len(raw_bytes) > max_bytes:
+                skipped_paths.append(path_str)
+                skipped_reasons.append("byte_cap")
+                continue
+            data = base64.standard_b64encode(raw_bytes).decode()
+            ext = p.suffix.lower().lstrip(".")
+            media_type = "image/jpeg" if ext in ("jpg", "jpeg") else f"image/{ext}"
+            blocks.append({
+                "type": "image",
+                "source": {"type": "base64", "media_type": media_type, "data": data},
+            })
+            used_paths.append(path_str)
+            token = labeled.get(path_str) or _infer_token_for_path(path_str, category_family)
+            if token:
+                selected_tokens.append(token)
+            total_bytes += len(raw_bytes)
+
+        # Identify required tokens missing from selected set.
+        required_missing = [
+            t for t in priority_tokens[:3]  # top 3 are always required
+            if t not in selected_tokens
+        ]
+
+        return _ImageSelectionResult(
+            image_blocks=blocks,
+            used_paths=used_paths,
+            selected_photo_types=selected_tokens,
+            skipped_paths=skipped_paths,
+            skipped_reasons=skipped_reasons,
+            required_missing=required_missing,
+        )
 
     # ── Prompt construction ────────────────────────────────────────────────────
 
@@ -311,6 +499,7 @@ class ClaudeDeepAnalysisProvider:
         images_sent: int,
         input_tokens: int,
         output_tokens: int,
+        selection: _ImageSelectionResult | None = None,
     ) -> DeepAnalysisResult:
         item = request.item
 
@@ -360,6 +549,9 @@ class ClaudeDeepAnalysisProvider:
             authenticity_flags.append(RiskFlag.AUTHENTICITY_SENSITIVE_BRAND)
 
         needs_more_photos = bool(parsed.get("needs_more_photos", False))
+        # Also flag if required category photo types were missing from selected images.
+        if selection and selection.required_missing and not needs_more_photos:
+            needs_more_photos = True
         if needs_more_photos and RiskFlag.MISSING_REQUIRED_PHOTOS not in publish_risk_flags:
             publish_risk_flags.append(RiskFlag.MISSING_REQUIRED_PHOTOS)
 
@@ -385,6 +577,13 @@ class ClaudeDeepAnalysisProvider:
                 "Uncertain fields require human confirmation: " + ", ".join(uncertain[:5])
             )
 
+        # Merge model-reported missing types with selection-detected missing tokens.
+        model_missing = list(parsed.get("missing_photo_types") or [])
+        if selection:
+            for t in selection.required_missing:
+                if t not in model_missing:
+                    model_missing.append(t)
+
         return DeepAnalysisResult(
             sku=request.sku or item.sku,
             suggested_field_updates=suggestions,
@@ -402,7 +601,7 @@ class ClaudeDeepAnalysisProvider:
             authenticity_flags=authenticity_flags,
             high_value_flags=high_value_flags,
             needs_more_photos=needs_more_photos,
-            missing_photo_types=list(parsed.get("missing_photo_types") or []),
+            missing_photo_types=model_missing,
             publish_risk_flags=publish_risk_flags,
             correction_summary=correction_summary,
             should_require_manual_review=True,
@@ -412,6 +611,10 @@ class ClaudeDeepAnalysisProvider:
             confidence_source=conf_source,
             is_deterministic_fallback=False,
             fallback_warning="",
+            selected_photo_types=selection.selected_photo_types if selection else [],
+            selected_image_count=len(selection.image_blocks) if selection else images_sent,
+            skipped_image_count=len(selection.skipped_paths) if selection else 0,
+            skipped_image_reasons=selection.skipped_reasons if selection else [],
         )
 
     # ── Main entry point ───────────────────────────────────────────────────────
@@ -423,16 +626,24 @@ class ClaudeDeepAnalysisProvider:
         model = _effective_model(settings)
         client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
 
-        # Build image blocks from local paths.
-        image_blocks, used_paths = self._build_image_blocks(list(request.item.image_paths or []))
-        images_sent = len(image_blocks)
+        # Resolve category family from item for image priority ordering.
+        from packages.intake.src.quality_gate import category_family_for_item
+        category_family = category_family_for_item(request.item)
+
+        # Category-aware image selection.
+        selection = self._select_category_images(
+            list(request.item.image_paths or []),
+            list(request.photo_meta or []),
+            category_family,
+        )
+        images_sent = len(selection.image_blocks)
 
         text_parts = self._build_user_message(request)
-        user_content = image_blocks + text_parts  # images first, text last
+        user_content = selection.image_blocks + text_parts  # images first, text last
 
         logger.info(
-            "ClaudeDeepAnalysisProvider: sku=%s model=%s images=%d",
-            request.sku, model, images_sent,
+            "ClaudeDeepAnalysisProvider: sku=%s model=%s images=%d skipped=%d family=%s",
+            request.sku, model, images_sent, len(selection.skipped_paths), category_family,
         )
 
         try:
@@ -462,4 +673,5 @@ class ClaudeDeepAnalysisProvider:
             images_sent=images_sent,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
+            selection=selection,
         )

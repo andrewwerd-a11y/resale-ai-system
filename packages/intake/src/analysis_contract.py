@@ -74,6 +74,11 @@ class DeepAnalysisResult:
     fallback_warning: str = DETERMINISTIC_FALLBACK_WARNING
     # True when a real external API call was made during this analysis.
     external_call_made: bool = False
+    # Image selection metadata (populated by real providers; empty for deterministic).
+    selected_photo_types: list[str] = field(default_factory=list)
+    selected_image_count: int = 0
+    skipped_image_count: int = 0
+    skipped_image_reasons: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return asdict(self)
