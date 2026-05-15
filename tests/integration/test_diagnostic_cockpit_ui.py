@@ -22,6 +22,9 @@ def test_diagnostic_cockpit_page_renders_expected_sections() -> None:
     assert "Diagnostic Cockpit v1" in html
     assert "Run Read-Only Publish Diagnostics" in html
     assert "Preview Bulk Publish" in html
+    assert "Bulk Reintake Preview" in html
+    assert "Run Bulk Reintake Preview" in html
+    assert "/api/items/bulk-reintake-preview" in html
     assert "Recent Operation Events" in html
     assert "Per-SKU Diagnostic History" in html
     assert "Diagnostic Reports" in html
@@ -34,6 +37,8 @@ def test_diagnostic_cockpit_page_renders_expected_sections() -> None:
     assert "Primary blocker family" in html
     assert "Next safest action" in html
     assert "No live eBay mutation" in html
+    assert "no approval mutation" in html.lower()
+    assert "no external provider call by default" in html.lower()
     assert "No external report sending" in html
 
 

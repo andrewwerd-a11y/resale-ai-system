@@ -3936,6 +3936,36 @@ TO-000016</textarea>
           </div>
         </div>
       </div>
+      <div class="report-block">
+        <h2>Bulk Reintake Preview</h2>
+        <div class="section-note">Read-only intake evidence and publish-readiness report. No publish controls, no eBay mutation, no approval mutation, and no external provider call by default.</div>
+        <div class="controls">
+          <div>
+            <label for="bulk-reintake-statuses">Status filters</label>
+            <input id="bulk-reintake-statuses" value="needs_review, export_ready, listed" placeholder="needs_review, export_ready, listed">
+          </div>
+          <div>
+            <label for="bulk-reintake-live-readonly">Live read-only checks</label>
+            <select id="bulk-reintake-live-readonly">
+              <option value="false" selected>Local-only diagnostics</option>
+              <option value="true">Allow live read-only GETs</option>
+            </select>
+          </div>
+          <div style="flex:0 0 auto"><button class="btn btn-purple" onclick="runBulkReintakePreview()">Run Bulk Reintake Preview</button></div>
+        </div>
+        <div id="bulk-reintake-status" class="status-line">No bulk reintake preview run yet.</div>
+        <div id="bulk-reintake-summary" class="summary-grid"></div>
+        <div id="bulk-reintake-lanes" class="data-list"></div>
+        <div id="bulk-reintake-safety"></div>
+        <div id="bulk-reintake-results" class="result-cards"><div class="empty">No bulk reintake preview loaded.</div></div>
+        <div class="report-grid">
+          <div class="report-box">
+            <h3>Reintake Report Markdown</h3>
+            <div class="copy-row"><button class="btn btn-gray" onclick="copyField('bulk-reintake-markdown')">Copy</button><span>Read-only operator report. Do not publish automatically.</span></div>
+            <textarea id="bulk-reintake-markdown" class="text-output" readonly placeholder="Bulk reintake preview markdown will appear here."></textarea>
+          </div>
+        </div>
+      </div>
     </section>
 
     <section class="panel">
@@ -4312,6 +4342,98 @@ async function runBulkPublishPreview() {{
     document.getElementById('batch-preview-markdown').value = '';
     document.getElementById('batch-preview-report-path').value = '';
     setStatus('batch-preview-status', error.message, 'err');
+  }}
+}}
+
+function renderReintakeSummary(summary) {{
+  const target = document.getElementById('bulk-reintake-summary');
+  if (!summary) {{
+    target.innerHTML = '';
+    return;
+  }}
+  const keys = [
+    'total_skus',
+    'ready_for_publish_preview_count',
+    'blocked_count',
+    'already_listed_or_sync_review_count',
+    'live_state_remediation_required_count',
+    'image_hosting_candidate_count',
+    'unknown_manual_review_count',
+  ];
+  target.innerHTML = keys.map(key => `
+    <div class="summary-card">
+      <span class="label">${{esc(key.replaceAll('_', ' '))}}</span>
+      <span class="value">${{esc(summary[key] ?? 0)}}</span>
+    </div>
+  `).join('');
+}}
+
+function renderReintakeLanes(summary) {{
+  const target = document.getElementById('bulk-reintake-lanes');
+  const lanes = Object.entries((summary || {{}}).by_workflow_lane || {{}});
+  if (!lanes.length) {{
+    target.innerHTML = '<span class="tag ok">No workflow lanes loaded</span>';
+    return;
+  }}
+  target.innerHTML = lanes.map(([lane, count]) => `<span class="tag warn">${{esc(lane)}}: ${{esc(count)}}</span>`).join('');
+}}
+
+function renderReintakeResults(results) {{
+  const target = document.getElementById('bulk-reintake-results');
+  if (!results || !results.length) {{
+    target.innerHTML = '<div class="empty">No bulk reintake preview loaded.</div>';
+    return;
+  }}
+  target.innerHTML = results.slice(0, 24).map(result => `
+    <div class="result-card">
+      <h3>${{esc(result.sku || 'Unknown SKU')}} <span class="tag warn">${{esc(result.workflow_lane || '')}}</span></h3>
+      <div class="result-grid">
+        <div class="kv"><div class="k">Current local status</div><div class="v">${{esc(result.current_local_status || '')}}</div></div>
+        <div class="kv"><div class="k">Intake quality</div><div class="v">${{esc(result.intake_quality_status || '')}}</div></div>
+        <div class="kv"><div class="k">Missing photos</div><div class="v">${{esc((result.missing_photo_types || []).join(', ') || 'none')}}</div></div>
+        <div class="kv"><div class="k">Primary blocker family</div><div class="v">${{esc(result.primary_blocker_family || '')}}</div></div>
+        <div class="kv"><div class="k">Blockers</div><div class="v">${{esc((result.blockers || []).join(', ') || 'none')}}</div></div>
+        <div class="kv"><div class="k">Next safest action</div><div class="v">${{esc(result.next_safest_action || '')}}</div></div>
+      </div>
+    </div>
+  `).join('');
+}}
+
+async function runBulkReintakePreview() {{
+  const skus = parseSkus(document.getElementById('batch-skus').value);
+  const statuses = parseStatuses(document.getElementById('bulk-reintake-statuses').value);
+  const allowLiveReadonly = document.getElementById('bulk-reintake-live-readonly').value === 'true';
+  if (!skus.length && !statuses.length) {{
+    setStatus('bulk-reintake-status', 'Enter explicit SKUs or at least one status filter before preview.', 'err');
+    return;
+  }}
+  setStatus('bulk-reintake-status', 'Running read-only bulk reintake preview...', '');
+  document.getElementById('bulk-reintake-results').innerHTML = '<div class="empty">Loading bulk reintake preview...</div>';
+  try {{
+    const resp = await fetch('/api/items/bulk-reintake-preview', {{
+      method: 'POST',
+      headers: {{ 'Content-Type': 'application/json' }},
+      body: JSON.stringify({{ skus, statuses, allow_live_readonly: allowLiveReadonly, persist_report: false }}),
+    }});
+    const body = await resp.json();
+    if (!resp.ok) throw new Error(body.detail || 'Bulk reintake preview failed.');
+    renderReintakeSummary(body.summary || {{}});
+    renderReintakeLanes(body.summary || {{}});
+    renderSafetyFlags('bulk-reintake-safety', body, [
+      body.report_type ? 'Report type: ' + body.report_type : '',
+      body.generated_artifact_warning || '',
+      body.no_external_provider_called ? 'No external provider call' : 'External provider was called',
+    ]);
+    renderReintakeResults(body.per_sku_results || []);
+    document.getElementById('bulk-reintake-markdown').value = body.report_markdown || '';
+    setStatus('bulk-reintake-status', `Loaded bulk reintake preview for ${{body.summary?.total_skus ?? 0}} SKU(s).`, 'ok');
+  }} catch (error) {{
+    renderReintakeSummary(null);
+    document.getElementById('bulk-reintake-lanes').innerHTML = '';
+    document.getElementById('bulk-reintake-safety').innerHTML = '';
+    document.getElementById('bulk-reintake-results').innerHTML = `<div class="empty">Bulk reintake preview failed: ${{esc(error.message)}}</div>`;
+    document.getElementById('bulk-reintake-markdown').value = '';
+    setStatus('bulk-reintake-status', error.message, 'err');
   }}
 }}
 
