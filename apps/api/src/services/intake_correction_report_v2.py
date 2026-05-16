@@ -10,6 +10,10 @@ from __future__ import annotations
 
 from apps.api.src.services.intake_correction_report import build_intake_correction_report
 from apps.api.src.services.intake_pipeline import build_pipeline_snapshot
+from apps.api.src.services.limited_evidence import (
+    annotate_deep_analysis_for_limited_evidence,
+    limited_evidence_state,
+)
 from apps.api.src.services.publish_compatibility import evaluate_publish_compatibility
 from apps.api.src.services.publish_readiness import evaluate_publish_readiness
 from packages.core.src.constants import Platform
@@ -51,6 +55,7 @@ def build_correction_report_v2(
     *,
     platform: str = Platform.EBAY,
     user_context: str | None = None,
+    allow_limited_evidence: bool = False,
     photo_meta: list[PhotoMeta] | None = None,
 ) -> dict:
     resolved_photo_meta = list(photo_meta) if photo_meta is not None else None
@@ -70,9 +75,10 @@ def build_correction_report_v2(
     )
     readiness = evaluate_publish_readiness(item).as_dict()
     compatibility = evaluate_publish_compatibility(item, strict_condition_policy=True)
+    limited_state = limited_evidence_state(quality, allow_limited_evidence=allow_limited_evidence)
 
     deep: DeepAnalysisResult | None = None
-    if quality.should_run_deep_analysis:
+    if quality.should_run_deep_analysis or limited_state["limited_evidence_used"]:
         deep = run_deep_analysis_preview(
             item,
             identity=identity,
@@ -81,6 +87,11 @@ def build_correction_report_v2(
             user_context=user_context,
             current_publish_blockers=readiness.get("blockers") or [],
             photo_meta=resolved_photo_meta,
+        )
+        deep = annotate_deep_analysis_for_limited_evidence(
+            deep,
+            quality=quality,
+            allow_limited_evidence=allow_limited_evidence,
         )
 
     proposal = None
@@ -169,6 +180,7 @@ def build_correction_report_v2(
         "read_only": True,
         "draft_only": True,
         "manual_approval_required": True,
+        **limited_state,
     }
 
 

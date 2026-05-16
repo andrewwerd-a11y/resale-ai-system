@@ -107,6 +107,9 @@ def test_bulk_reintake_preview_enumerates_status_skus_safely(monkeypatch, tmp_pa
     assert "missing_photo_types" in first
     assert "missing_required_photo_types" in first
     assert "missing_recommended_photo_types" in first
+    assert "can_generate_limited_evidence_draft" in first
+    assert "limited_evidence_allowed_for_draft_only" in first
+    assert "publish_still_blocked" in first
     assert first["operator_photo_evidence"]["deep_analysis_image_selection_available"] is False
     assert first["workflow_lane"]
     assert first["primary_blocker_family"]
@@ -119,6 +122,7 @@ def test_bulk_reintake_preview_enumerates_status_skus_safely(monkeypatch, tmp_pa
     assert "## Lane Counts" in preview["report_markdown"]
     assert "## SKU Tables By Lane" in preview["report_markdown"]
     assert "Do not publish automatically" in preview["report_markdown"]
+    assert "Optional: generate limited-evidence draft for review only; publish remains blocked." in preview["report_markdown"]
 
 
 def test_bulk_reintake_preview_handles_empty_status_selection(monkeypatch, tmp_path):

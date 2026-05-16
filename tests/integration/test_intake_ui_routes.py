@@ -51,4 +51,9 @@ def test_intake_pipeline_cockpit_ui_uses_operator_evidence_sections():
     assert "Save all labels" in body
     assert "collectAllPhotoMetadataUpdates()" in body
     assert "Unsaved changes" in body
+    assert "Generate limited-evidence draft" in body
+    assert "Use this only to create a rough draft." in body
+    assert "This does not approve or publish the item." in body
+    assert "Missing required evidence will still block publish." in body
+    assert "generateLimitedEvidenceDraft()" in body
     assert "Save label" not in body

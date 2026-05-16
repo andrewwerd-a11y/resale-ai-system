@@ -318,6 +318,7 @@ def get_intake_pipeline_status(
     platform: str = "ebay",
     user_context: str | None = None,
     run_deep_analysis: bool = False,
+    allow_limited_evidence: bool = False,
     session: Session = Depends(get_session),
 ):
     """Read-only snapshot of the staged intake pipeline.
@@ -336,6 +337,7 @@ def get_intake_pipeline_status(
         platform=platform,
         user_context=user_context,
         run_deep_analysis=run_deep_analysis,
+        allow_limited_evidence=allow_limited_evidence,
         photo_meta=load_photo_metadata(session, item),
     )
 
@@ -415,6 +417,7 @@ def get_marketplace_requirements_endpoint(
 class _DeepAnalysisRequest(BaseModel):
     user_context: str | None = None
     platform: str = "ebay"
+    allow_limited_evidence: bool = False
 
 
 @router.post("/{sku}/deep-analysis-preview")
@@ -425,9 +428,15 @@ def post_deep_analysis_preview(
 ):
     """Deterministic deep-analysis preview. Never persists, never publishes."""
     from packages.intake.src.analysis_contract import run_deep_analysis_preview
+    from packages.intake.src.quality_gate import evaluate_intake_quality
     from packages.intake.src.category_resolver import resolve_categories
     from packages.intake.src.identity_scan import run_first_pass_identity
     from packages.intake.src.marketplace_requirements import get_marketplace_requirements
+    from apps.api.src.services.limited_evidence import (
+        annotate_deep_analysis_for_limited_evidence,
+        limited_evidence_block_detail,
+        limited_evidence_state,
+    )
     from apps.api.src.services.publish_readiness import evaluate_publish_readiness
     from apps.api.src.services.photo_metadata import load_photo_metadata
 
@@ -437,6 +446,12 @@ def post_deep_analysis_preview(
         raise HTTPException(status_code=404, detail=f"Item {sku} not found")
     platform = (body.platform if body else None) or "ebay"
     user_context = body.user_context if body else None
+    allow_limited_evidence = bool(body.allow_limited_evidence) if body else False
+    photo_meta = load_photo_metadata(session, item)
+    quality = evaluate_intake_quality(item, photo_meta=photo_meta)
+    limited_state = limited_evidence_state(quality, allow_limited_evidence=allow_limited_evidence)
+    if quality.missing_required_photo_types and not allow_limited_evidence:
+        raise HTTPException(status_code=409, detail=limited_evidence_block_detail(quality, sku=sku))
     identity = run_first_pass_identity(item, user_context=user_context)
     resolution = resolve_categories(item, identity=identity)
     selected = None
@@ -462,7 +477,12 @@ def post_deep_analysis_preview(
         marketplace_requirements=requirements,
         user_context=user_context,
         current_publish_blockers=evaluate_publish_readiness(item).as_dict().get("blockers") or [],
-        photo_meta=load_photo_metadata(session, item),
+        photo_meta=photo_meta,
+    )
+    result = annotate_deep_analysis_for_limited_evidence(
+        result,
+        quality=quality,
+        allow_limited_evidence=allow_limited_evidence,
     )
     return result.to_dict() | {
         "no_ebay_mutation_performed": True,
@@ -473,6 +493,8 @@ def post_deep_analysis_preview(
         "manual_approval_required": True,
         "external_provider_disabled": not _ext_enabled,
         "configured_provider": _ext_provider,
+        "publish_approval_blocked": True,
+        **limited_state,
     }
 
 
@@ -481,6 +503,7 @@ def get_correction_report_v2(
     sku: str,
     platform: str = "ebay",
     user_context: str | None = None,
+    allow_limited_evidence: bool = False,
     session: Session = Depends(get_session),
 ):
     """Read-only correction report v2 with staged-intake results.
@@ -498,6 +521,7 @@ def get_correction_report_v2(
         item,
         platform=platform,
         user_context=user_context,
+        allow_limited_evidence=allow_limited_evidence,
         photo_meta=load_photo_metadata(session, item),
     )
 
@@ -527,6 +551,7 @@ def post_reanalysis_preview(
 
 class _PlatformDraftsRequest(BaseModel):
     platforms: list[str] | None = None
+    allow_limited_evidence: bool = False
 
 
 @router.post("/{sku}/platform-drafts")
@@ -537,12 +562,22 @@ def post_platform_drafts(
 ):
     """Generate per-platform listing drafts. Never publishes."""
     from packages.intake.src.platform_translation import translate_item_for_platforms
+    from packages.intake.src.quality_gate import evaluate_intake_quality
+    from apps.api.src.services.limited_evidence import limited_evidence_state
+    from apps.api.src.services.photo_metadata import load_photo_metadata
 
     repo = ItemRepository(session)
     item = repo.get_by_sku(sku)
     if not item:
         raise HTTPException(status_code=404, detail=f"Item {sku} not found")
     platforms = body.platforms if (body and body.platforms) else None
+    allow_limited_evidence = bool(body.allow_limited_evidence) if body else False
+    photo_meta = load_photo_metadata(session, item)
+    quality = evaluate_intake_quality(item, photo_meta=photo_meta)
+    limited_state = limited_evidence_state(
+        quality,
+        allow_limited_evidence=allow_limited_evidence,
+    )
     drafts = translate_item_for_platforms(item, platforms=platforms)
     return {
         "sku": sku,
@@ -553,6 +588,8 @@ def post_platform_drafts(
         "read_only": True,
         "draft_only": True,
         "manual_approval_required": True,
+        "publish_approval_blocked": True,
+        **limited_state,
     }
 
 

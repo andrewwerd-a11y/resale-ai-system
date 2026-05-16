@@ -124,6 +124,10 @@ def _intake_pipeline_cockpit_html(sku: str) -> str:
   <div id='evidence-summary' style='font-size:12px;line-height:1.45;color:#666'>Loading intake evidence...</div>
   <div id='photo-metadata-summary' style='margin-top:14px;font-size:12px;line-height:1.45'></div>
 </section>
+<section id='limited-evidence-panel'>
+  <h2>Limited-evidence draft</h2>
+  <div id='limited-evidence-summary' style='font-size:12px;line-height:1.45;color:#666'>Checking whether a rough draft is available...</div>
+</section>
 <script>
 const SKU = {sku!r};
 const DEFAULT_PHOTO_TYPE_OPTIONS = {_photo_type_options_json()};
@@ -183,6 +187,36 @@ function metadataErrorMessage(detail) {{
   if (!detail) return 'Photo label save failed.';
   if (typeof detail === 'string') return detail;
   return detail.detail || detail.message || JSON.stringify(detail);
+}}
+function renderLimitedEvidenceSection(report) {{
+  const missingRequired = (report.operator_photo_evidence || {{}}).missing_required_photo_types || [];
+  if (!missingRequired.length) {{
+    return `
+      <div style="color:#666">Required evidence is complete. Limited-evidence draft mode is not needed.</div>
+    `;
+  }}
+  const warningText = report.operator_warning || 'This draft was generated with incomplete evidence. It is not publish-ready and cannot be approved/published until required evidence blockers are resolved.';
+  const recommendedText = ((report.operator_photo_evidence || {{}}).missing_recommended_photo_types || []).join(', ') || 'none';
+  return `
+    <div style="border:1px solid #e2c46d;background:#fff8e1;border-radius:6px;padding:10px">
+      <div style="font-weight:600;color:#6f4d00">Generate limited-evidence draft</div>
+      <div style="margin-top:6px;color:#5b4a11">Use this only to create a rough draft.</div>
+      <div style="margin-top:4px;color:#5b4a11">This does not approve or publish the item.</div>
+      <div style="margin-top:4px;color:#5b4a11">Missing required evidence will still block publish.</div>
+      <div style="margin-top:8px"><strong>Required evidence still missing:</strong> ${{escapeHtml(missingRequired.join(', '))}}</div>
+      <div style="margin-top:4px"><strong>Recommended evidence still missing:</strong> ${{escapeHtml(recommendedText)}}</div>
+      <div style="margin-top:8px;color:#5b4a11">${{escapeHtml(warningText)}}</div>
+      <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+        <button id="btn-limited-draft" onclick="generateLimitedEvidenceDraft()">Generate limited-evidence draft</button>
+        <span class="badge warn">draft-only; local review continues</span>
+      </div>
+    </div>
+  `;
+}}
+function updateLimitedEvidenceSection(report) {{
+  const target = document.getElementById('limited-evidence-summary');
+  if (!target) return;
+  target.innerHTML = renderLimitedEvidenceSection(report || {{ operator_photo_evidence: {{ missing_required_photo_types: [] }} }});
 }}
 function renderPhotoMetadataSection(sku, photos, missingPhotoTypes, metadataNote) {{
   if (!photos || !photos.length) {{
@@ -293,6 +327,7 @@ async function saveAllPhotoMetadataLabels(sku) {{
     const report = await show(fetch(`/api/items/${{sku}}/correction-report-v2`));
     if (report) {{
       document.getElementById('evidence-summary').innerHTML = renderCorrectionReportSummary(sku, report);
+      updateLimitedEvidenceSection(report);
       await loadPhotoMetadataAndRender(sku, report);
     }}
   }} catch (error) {{
@@ -317,12 +352,16 @@ function renderCorrectionReportSummary(sku, report) {{
   const selectionSummary = selectionAvailable
     ? `<div style="margin-top:8px"><strong>Analysis image selection:</strong> selected ${{selectedCount ?? 0}} image(s), skipped ${{skippedCount ?? 0}}.</div>`
     : '<div style="margin-top:8px;color:#666">Deep analysis image-selection metadata is not available yet. Intake-quality evidence below is still current.</div>';
+  const limitedDraftSummary = report.limited_evidence_used
+    ? `<div style="margin-top:10px;border:1px solid #e2c46d;background:#fff8e1;border-radius:6px;padding:8px;color:#5b4a11">${{escapeHtml(report.operator_warning || '')}}</div>`
+    : '';
   return `
     <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap">
       <h3 style="margin:0;font-size:15px">Operator evidence for ${{escapeHtml(sku)}}</h3>
       <span class="badge ${{needsMorePhotos ? 'warn' : 'ok'}}">${{escapeHtml(qualityStatus)}}</span>
     </div>
     <div style="margin-top:8px;color:#333">${{escapeHtml(qualityReason || 'No additional intake-quality note.')}}</div>
+    ${{limitedDraftSummary}}
     <div style="margin-top:12px">
       <strong>Next photos needed</strong>
       ${{formatList(nextPhotos, needsMorePhotos ? 'No specific photo types listed yet.' : 'No additional photos requested by intake quality.')}}
@@ -348,11 +387,43 @@ async function loadInitialEvidence() {{
     if (!resp.ok) throw new Error(metadataErrorMessage(body));
     report = body;
     document.getElementById('evidence-summary').innerHTML = renderCorrectionReportSummary(SKU, body);
+    updateLimitedEvidenceSection(body);
   }} catch (error) {{
     document.getElementById('evidence-summary').innerHTML =
       `<div style="color:#666">Correction report unavailable on initial load: ${{escapeHtml(error.message)}}. Photo labels are still available below.</div>`;
+    updateLimitedEvidenceSection(null);
   }}
   await loadPhotoMetadataAndRender(SKU, report || {{ operator_photo_evidence: {{ missing_photo_types: [] }} }});
+}}
+async function generateLimitedEvidenceDraft() {{
+  const button = document.getElementById('btn-limited-draft');
+  if (button) button.disabled = true;
+  try {{
+    const resp = await fetch(`/api/items/${{SKU}}/deep-analysis-preview`, {{
+      method: 'POST',
+      headers: {{'content-type':'application/json'}},
+      body: JSON.stringify({{ allow_limited_evidence: true }})
+    }});
+    const body = await resp.json();
+    document.getElementById('out').textContent = JSON.stringify(body, null, 2);
+    if (!resp.ok) throw new Error(metadataErrorMessage(body));
+    if (body) {{
+      const reportResp = await fetch(`/api/items/${{SKU}}/correction-report-v2?allow_limited_evidence=true`);
+      const report = await reportResp.json();
+      if (!reportResp.ok) throw new Error(metadataErrorMessage(report));
+      document.getElementById('evidence-summary').innerHTML = renderCorrectionReportSummary(SKU, report);
+      updateLimitedEvidenceSection(report);
+      await loadPhotoMetadataAndRender(SKU, report);
+    }}
+  }} catch (error) {{
+    const target = document.getElementById('limited-evidence-summary');
+    if (target) {{
+      target.innerHTML = `<div style="color:#800">Limited-evidence draft failed: ${{escapeHtml(error.message || error)}}</div>`;
+    }}
+  }} finally {{
+    const refreshed = document.getElementById('btn-limited-draft');
+    if (refreshed) refreshed.disabled = false;
+  }}
 }}
 async function show(promise) {{
   const out = document.getElementById('out');
@@ -371,9 +442,11 @@ document.getElementById('btn-report').onclick = async () => {{
   const body = await show(fetch(`/api/items/${{SKU}}/correction-report-v2`));
   if (!body) {{
     document.getElementById('evidence-summary').innerHTML = '<div style="color:#666">Correction report unavailable. Photo labels remain available below.</div>';
+    updateLimitedEvidenceSection(null);
     return;
   }}
   document.getElementById('evidence-summary').innerHTML = renderCorrectionReportSummary(SKU, body);
+  updateLimitedEvidenceSection(body);
   await loadPhotoMetadataAndRender(SKU, body);
 }};
 document.getElementById('btn-readiness').onclick = () =>

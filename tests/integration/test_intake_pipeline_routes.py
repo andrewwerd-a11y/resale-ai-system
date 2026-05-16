@@ -54,6 +54,23 @@ def _ready_book(**overrides) -> Item:
     return Item(**base)
 
 
+def _limited_book(**overrides) -> Item:
+    base = dict(
+        sku="BK-LIMIT",
+        status=ItemStatus.PENDING_INTAKE,
+        category_key="books",
+        category_label="Books",
+        title_final="Thin Evidence Book",
+        brand="Penguin",
+        condition_label="Good",
+        condition_id="5000",
+        confidence_score=0.55,
+        image_paths=["front-cover.jpg"],
+    )
+    base.update(overrides)
+    return Item(**base)
+
+
 def test_intake_pipeline_status_returns_all_stages(monkeypatch, tmp_path):
     _configure_db(monkeypatch, tmp_path)
     _seed(_ready_book())
@@ -137,6 +154,64 @@ def test_deep_analysis_preview_endpoint_never_publishes(monkeypatch, tmp_path):
     assert body["provider"] == "deterministic-fallback"
     assert body["should_block_publish_approval"] is True
     assert body["publish_risk_flags"]
+
+
+def test_deep_analysis_preview_blocks_without_limited_evidence_flag(monkeypatch, tmp_path):
+    _configure_db(monkeypatch, tmp_path)
+    _seed(_limited_book())
+
+    with _client() as client:
+        resp = client.post("/api/items/BK-LIMIT/deep-analysis-preview", json={})
+
+    assert resp.status_code == 409
+    detail = resp.json()["detail"]
+    assert detail["code"] == "intake_quality_blocked"
+    assert detail["limited_evidence_draft_available"] is True
+    assert "required evidence" in detail["message"].lower()
+
+
+def test_deep_analysis_preview_allows_limited_evidence_draft_with_warning(monkeypatch, tmp_path):
+    _configure_db(monkeypatch, tmp_path)
+    _seed(_limited_book())
+
+    with _client() as client:
+        resp = client.post(
+            "/api/items/BK-LIMIT/deep-analysis-preview",
+            json={"allow_limited_evidence": True},
+        )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["limited_evidence_mode"] is True
+    assert body["limited_evidence_used"] is True
+    assert body["draft_quality"] == "incomplete"
+    assert body["confidence_source"] == "limited_evidence"
+    assert body["missing_required_photo_types"]
+    assert body["operator_warning"].startswith("This draft was generated with incomplete evidence.")
+    assert body["publish_approval_blocked"] is True
+    assert body["manual_approval_required"] is True
+    assert body["no_publish_performed"] is True
+    assert body["no_ebay_mutation_performed"] is True
+    assert body["should_block_publish_approval"] is True
+
+
+def test_intake_pipeline_status_can_run_limited_evidence_preview(monkeypatch, tmp_path):
+    _configure_db(monkeypatch, tmp_path)
+    _seed(_limited_book())
+
+    with _client() as client:
+        resp = client.get(
+            "/api/items/BK-LIMIT/intake-pipeline-status?run_deep_analysis=true&allow_limited_evidence=true"
+        )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["limited_evidence_mode"] is True
+    assert body["limited_evidence_used"] is True
+    assert body["draft_quality"] == "incomplete"
+    assert body["publish_approval_blocked"] is True
+    assert body["stages"]["DEEP_ANALYSIS"] is not None
+    assert body["stages"]["DEEP_ANALYSIS"]["confidence_source"] == "limited_evidence"
 
 
 def test_404_for_unknown_sku(monkeypatch, tmp_path):

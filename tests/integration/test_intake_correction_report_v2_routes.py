@@ -107,6 +107,28 @@ def test_correction_report_v2_groups_actions_for_missing_photos(monkeypatch, tmp
     assert body["manual_approval_required"] is True
 
 
+def test_correction_report_v2_allows_limited_evidence_draft_annotations(monkeypatch, tmp_path):
+    _configure_db(monkeypatch, tmp_path)
+    _seed(_ready_book(image_paths=["front-cover.jpg"]))
+
+    with _client() as client:
+        resp = client.get("/api/items/BK-V2/correction-report-v2?allow_limited_evidence=true")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["limited_evidence_mode"] is True
+    assert body["limited_evidence_used"] is True
+    assert body["draft_quality"] == "incomplete"
+    assert body["confidence_source"] == "limited_evidence"
+    assert body["deep_analysis_preview"] is not None
+    assert body["deep_analysis_preview"]["confidence_source"] == "limited_evidence"
+    assert body["operator_warning"].startswith("This draft was generated with incomplete evidence.")
+    assert body["publish_approval_blocked"] is True
+    assert body["manual_approval_required"] is True
+    assert body["missing_required_photo_types"]
+    assert body["missing_recommended_photo_types"] == []
+
+
 def test_correction_report_v2_uses_stored_photo_labels(monkeypatch, tmp_path):
     _configure_db(monkeypatch, tmp_path)
     _seed(

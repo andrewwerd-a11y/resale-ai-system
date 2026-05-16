@@ -175,6 +175,11 @@ def render_bulk_reintake_markdown(response: dict) -> str:
         missing = ", ".join(result.get("missing_photo_types") or []) or "none"
         missing_required = ", ".join(result.get("missing_required_photo_types") or []) or "none"
         missing_recommended = ", ".join(result.get("missing_recommended_photo_types") or []) or "none"
+        limited_evidence_note = (
+            "Optional: generate limited-evidence draft for review only; publish remains blocked."
+            if result.get("can_generate_limited_evidence_draft")
+            else "none"
+        )
         lines.append(
             f"- {result.get('sku')}: status={result.get('current_local_status') or ''}; "
             f"category={result.get('category') or ''}; "
@@ -183,6 +188,7 @@ def render_bulk_reintake_markdown(response: dict) -> str:
             f"missing_photo_types={missing}; "
             f"missing_required_photo_types={missing_required}; "
             f"missing_recommended_photo_types={missing_recommended}; "
+            f"limited_evidence_draft_option={limited_evidence_note}; "
             f"photo_metadata_status={result.get('photo_metadata_status') or ''}; "
             f"photo_label_recommendation={_photo_label_recommendation(result)}; "
             f"workflow_lane={result.get('workflow_lane') or ''}; "
@@ -250,6 +256,9 @@ def _build_sku_preview(
             "blockers": list(diagnostics.get("blocker_codes") or ["missing_local_item"]),
             "next_safest_action": diagnostics.get("recommended_next_action") or "Create or import the local item record before reintake review.",
             "no_external_provider_called": True,
+            "can_generate_limited_evidence_draft": False,
+            "limited_evidence_allowed_for_draft_only": False,
+            "publish_still_blocked": True,
         }
 
     quality = evaluate_intake_quality(item).as_dict()
@@ -331,6 +340,9 @@ def _build_sku_preview(
         "blockers": list(diagnostics.get("blocker_codes") or []),
         "next_safest_action": diagnostics.get("recommended_next_action") or "Review diagnostics manually before any publish attempt.",
         "no_external_provider_called": bool(pipeline.get("no_external_provider_called")),
+        "can_generate_limited_evidence_draft": bool(quality.get("missing_required_photo_types")),
+        "limited_evidence_allowed_for_draft_only": bool(quality.get("missing_required_photo_types")),
+        "publish_still_blocked": bool(quality.get("missing_required_photo_types")) or not bool(readiness.get("ready")),
     }
 
 

@@ -7,6 +7,10 @@ endpoint and by correction-report v2 in slice 3.
 """
 from __future__ import annotations
 
+from apps.api.src.services.limited_evidence import (
+    annotate_deep_analysis_for_limited_evidence,
+    limited_evidence_state,
+)
 from packages.core.src.constants import Platform
 from packages.domain.src.entities.item import Item
 from packages.intake.src.analysis_contract import (
@@ -56,6 +60,7 @@ def build_pipeline_snapshot(
     platform: str = Platform.EBAY,
     user_context: str | None = None,
     run_deep_analysis: bool = False,
+    allow_limited_evidence: bool = False,
     photo_meta: list[PhotoMeta] | None = None,
 ) -> dict:
     """Return a stage-by-stage snapshot of the intake pipeline.
@@ -76,8 +81,9 @@ def build_pipeline_snapshot(
         category_id=(top_candidate.category_id if top_candidate else None),
     )
     readiness = evaluate_publish_readiness(item).as_dict()
+    limited_state = limited_evidence_state(quality, allow_limited_evidence=allow_limited_evidence)
     deep_result: DeepAnalysisResult | None = None
-    if run_deep_analysis and quality.should_run_deep_analysis:
+    if run_deep_analysis and (quality.should_run_deep_analysis or limited_state["limited_evidence_used"]):
         deep_result = run_deep_analysis_preview(
             item,
             identity=identity,
@@ -86,6 +92,11 @@ def build_pipeline_snapshot(
             user_context=user_context,
             current_publish_blockers=readiness.get("blockers") or [],
             photo_meta=resolved_photo_meta,
+        )
+        deep_result = annotate_deep_analysis_for_limited_evidence(
+            deep_result,
+            quality=quality,
+            allow_limited_evidence=allow_limited_evidence,
         )
 
     stages = {
@@ -120,4 +131,6 @@ def build_pipeline_snapshot(
         "read_only": True,
         "draft_only": True,
         "manual_approval_required": True,
+        **limited_state,
+        "publish_approval_blocked": bool(quality.should_block_publish_approval or limited_state["limited_evidence_used"]),
     }

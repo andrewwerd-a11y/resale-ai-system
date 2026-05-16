@@ -4,7 +4,9 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlmodel import create_engine
 
-from apps.api.src.routes import items, review
+from sqlmodel import Session
+
+from apps.api.src.routes import items, listings, review
 from packages.core.src import config as core_config
 from packages.core.src.constants import ItemStatus
 from packages.data.src.db import sqlite as sqlite_db
@@ -16,6 +18,7 @@ def _client() -> TestClient:
     app = FastAPI()
     app.include_router(items.router, prefix="/api/items")
     app.include_router(review.router, prefix="/api/review")
+    app.include_router(listings.router, prefix="/api/listings")
     return TestClient(app)
 
 
@@ -31,8 +34,6 @@ def _configure_db(monkeypatch, tmp_path):
 
 
 def _seed(item: Item):
-    from sqlmodel import Session
-
     with Session(sqlite_db.engine) as session:
         ItemRepository(session).upsert(item)
 
@@ -237,3 +238,64 @@ def test_clothing_quality_uses_stored_photo_labels(monkeypatch, tmp_path):
     assert "brand tag" not in after_missing
     assert "size tag" not in after_missing
     assert "material/care tag" not in after_recommended
+
+
+def test_limited_evidence_draft_still_keeps_approval_and_publish_blocked(monkeypatch, tmp_path):
+    _configure_db(monkeypatch, tmp_path)
+    _seed(
+        Item(
+            sku="BK-LIMITED",
+            status=ItemStatus.NEEDS_REVIEW,
+            category_key="books",
+            category_label="Books",
+            title_final="Book",
+            condition_label="Good",
+            condition_id="5000",
+            image_paths=["front-cover.jpg"],
+            needs_review=True,
+            listing_id="",
+            offer_id="",
+        )
+    )
+
+    with _client() as client:
+        draft_resp = client.post(
+            "/api/items/BK-LIMITED/deep-analysis-preview",
+            json={"allow_limited_evidence": True},
+        )
+        approve_resp = client.post("/api/review/BK-LIMITED/approve")
+        edit_resp = client.patch("/api/review/BK-LIMITED/edit", json={"title_final": "Edited Book"})
+        bulk_resp = client.post("/api/items/bulk-approve", json={"skus": ["BK-LIMITED"]})
+        readiness_resp = client.get("/api/listings/BK-LIMITED/publish-readiness")
+        preview_resp = client.get("/api/listings/BK-LIMITED/publish-preview")
+
+    assert draft_resp.status_code == 200
+    draft_body = draft_resp.json()
+    assert draft_body["limited_evidence_used"] is True
+    assert draft_body["publish_approval_blocked"] is True
+    assert draft_body["manual_approval_required"] is True
+
+    assert approve_resp.status_code == 409
+    assert approve_resp.json()["detail"]["code"] == "intake_quality_blocked"
+
+    assert edit_resp.status_code == 409
+    assert edit_resp.json()["detail"]["code"] == "intake_quality_blocked"
+
+    assert bulk_resp.status_code == 200
+    assert bulk_resp.json()["updated"] == 0
+    assert bulk_resp.json()["blocked"][0]["code"] == "intake_quality_blocked"
+
+    assert readiness_resp.status_code == 200
+    readiness = readiness_resp.json()
+    assert readiness["ready"] is False
+
+    assert preview_resp.status_code == 200
+    preview = preview_resp.json()
+    assert preview["would_publish"] is False
+
+    with Session(sqlite_db.engine) as session:
+        item = ItemRepository(session).get_by_sku("BK-LIMITED")
+        assert item is not None
+        assert item.status == ItemStatus.NEEDS_REVIEW
+        assert not item.listing_id
+        assert not item.offer_id
