@@ -10,6 +10,83 @@ from packages.domain.src.entities.item import Item
 from packages.intake.src.photo_types import PhotoMeta, parse_photo_inputs
 from packages.intake.src.pipeline_types import PhotoLabelSource, PhotoSource, PhotoType
 
+PHOTO_TYPE_OPTIONS = [
+    {"value": PhotoType.FRONT, "label": "Front cover"},
+    {"value": PhotoType.BACK, "label": "Back cover"},
+    {"value": PhotoType.SPINE, "label": "Spine"},
+    {"value": PhotoType.TITLE_PAGE, "label": "Title page"},
+    {"value": PhotoType.COPYRIGHT_PAGE, "label": "Copyright/publication page"},
+    {"value": PhotoType.FLAW, "label": "Condition/flaws"},
+    {"value": PhotoType.BRAND_TAG, "label": "Brand tag"},
+    {"value": PhotoType.SIZE_TAG, "label": "Size tag"},
+    {"value": PhotoType.MATERIAL_CARE_TAG, "label": "Material/care tag"},
+    {"value": PhotoType.TUSH_TAG, "label": "Tag/tush tag"},
+    {"value": PhotoType.MEASUREMENT, "label": "Measurement"},
+    {"value": PhotoType.SCALE, "label": "Scale/measurement"},
+    {"value": PhotoType.LABEL, "label": "Label/logo"},
+    {"value": PhotoType.TAG, "label": "Tag"},
+    {"value": PhotoType.DETAIL, "label": "Detail"},
+    {"value": PhotoType.INTERIOR, "label": "Interior"},
+    {"value": PhotoType.SOLE, "label": "Soles"},
+    {"value": PhotoType.HARDWARE, "label": "Hardware"},
+    {"value": PhotoType.CORNERS_WEAR, "label": "Corners/wear"},
+    {"value": PhotoType.SERIAL_OR_DATE_CODE, "label": "Serial/date code"},
+    {"value": PhotoType.MAKER_MARK, "label": "Maker mark"},
+    {"value": PhotoType.SIDE, "label": "Side"},
+    {"value": PhotoType.UNKNOWN, "label": "Unknown / unlabeled"},
+]
+
+PHOTO_TYPE_ALIASES = {
+    "front cover": PhotoType.FRONT,
+    "front_cover": PhotoType.FRONT,
+    "back cover": PhotoType.BACK,
+    "back_cover": PhotoType.BACK,
+    "title page": PhotoType.TITLE_PAGE,
+    "title_page": PhotoType.TITLE_PAGE,
+    "copyright/publication page": PhotoType.COPYRIGHT_PAGE,
+    "copyright publication page": PhotoType.COPYRIGHT_PAGE,
+    "copyright_publication_page": PhotoType.COPYRIGHT_PAGE,
+    "condition/flaws": PhotoType.FLAW,
+    "condition flaws": PhotoType.FLAW,
+    "condition_flaws": PhotoType.FLAW,
+    "flaws/wear": PhotoType.FLAW,
+    "flaws wear": PhotoType.FLAW,
+    "flaws_wear": PhotoType.FLAW,
+    "brand tag": PhotoType.BRAND_TAG,
+    "size tag": PhotoType.SIZE_TAG,
+    "material/care tag": PhotoType.MATERIAL_CARE_TAG,
+    "material care tag": PhotoType.MATERIAL_CARE_TAG,
+    "tag/tush tag": PhotoType.TUSH_TAG,
+    "tag tush tag": PhotoType.TUSH_TAG,
+    "scale/measurement": PhotoType.SCALE,
+    "scale measurement": PhotoType.SCALE,
+    "scale_measurement": PhotoType.SCALE,
+}
+
+
+def photo_type_options() -> list[dict]:
+    return [dict(option) for option in PHOTO_TYPE_OPTIONS]
+
+
+def photo_type_option_labels() -> dict[str, str]:
+    return {str(option["value"]): str(option["label"]) for option in PHOTO_TYPE_OPTIONS}
+
+
+def valid_photo_type_hint() -> str:
+    return ", ".join(f"{option['value']} ({option['label']})" for option in PHOTO_TYPE_OPTIONS)
+
+
+def normalize_photo_type_input(value: str) -> str | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    if raw in PhotoType.ALL:
+        return raw
+    folded = raw.lower().replace("-", " ").replace("_", " ")
+    if folded in PHOTO_TYPE_ALIASES:
+        return PHOTO_TYPE_ALIASES[folded]
+    return None
+
 
 def load_photo_metadata(session: Session, item: Item) -> list[PhotoMeta]:
     repo = ItemPhotoMetadataRepository(session)
@@ -86,6 +163,7 @@ def photo_metadata_response(session: Session, item: Item) -> dict:
     return {
         "sku": item.sku,
         "photos": [photo_meta_to_api_dict(meta) for meta in metas],
+        "photo_type_options": photo_type_options(),
         "local_only": True,
         "no_ebay_mutation_performed": True,
         "no_publish_performed": True,

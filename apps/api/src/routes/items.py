@@ -1097,8 +1097,12 @@ def patch_photo_metadata(
     body: PhotoMetadataUpdateBody,
     session: Session = Depends(get_session),
 ):
-    from apps.api.src.services.photo_metadata import photo_metadata_response, upsert_photo_labels
-    from packages.intake.src.pipeline_types import PhotoType
+    from apps.api.src.services.photo_metadata import (
+        normalize_photo_type_input,
+        photo_metadata_response,
+        upsert_photo_labels,
+        valid_photo_type_hint,
+    )
 
     try:
         assert_route_sku_allowed(sku, "items.patch_photo_metadata")
@@ -1113,13 +1117,22 @@ def patch_photo_metadata(
     image_paths = set(_image_paths_to_list(item.image_paths))
     updates: list[dict] = []
     for entry in body.updates or []:
-        photo_type = str(entry.photo_type or "").strip()
+        raw_photo_type = str(entry.photo_type or "").strip()
+        photo_type = normalize_photo_type_input(raw_photo_type)
         image_path = str(entry.image_path or "").strip()
-        if photo_type not in PhotoType.ALL:
-            raise HTTPException(status_code=422, detail=f"Invalid photo_type: {photo_type}")
+        if not photo_type:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"Invalid photo_type: {raw_photo_type}. "
+                    f"Use a valid internal value or friendly label. Valid options: {valid_photo_type_hint()}"
+                ),
+            )
         if image_path not in image_paths:
             raise HTTPException(status_code=404, detail=f"Image path not found on item: {image_path}")
-        updates.append(entry.model_dump())
+        payload = entry.model_dump()
+        payload["photo_type"] = photo_type
+        updates.append(payload)
 
     upsert_photo_labels(session, item, updates)
     return photo_metadata_response(session, item)

@@ -20,7 +20,10 @@ def test_intake_queue_ui_uses_operator_evidence_sections():
     assert "Photo labels" in body
     assert "/photos/metadata" in body
     assert "local-only labels; no publish or approval changes" in body
-    assert "title_page" in body
+    assert "Title page" in body
+    assert "Front cover" in body
+    assert '"value": "title_page"' in body
+    assert "Cover/display image" in body
 
 
 def test_intake_pipeline_cockpit_ui_uses_operator_evidence_sections():
@@ -40,3 +43,8 @@ def test_intake_pipeline_cockpit_ui_uses_operator_evidence_sections():
     assert "Photo labels" in body
     assert "/photos/metadata" in body
     assert "local-only labels; no publish or approval changes" in body
+    assert "loadInitialEvidence()" in body
+    assert "Loading intake evidence" in body
+    assert "Title page" in body
+    assert '"value": "title_page"' in body
+    assert "Display image means the first image shown locally" in body

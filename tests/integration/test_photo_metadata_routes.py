@@ -69,6 +69,7 @@ def test_get_photo_metadata_works_without_stored_labels(monkeypatch, tmp_path):
     assert body["no_publish_performed"] is True
     assert body["manual_approval_required"] is True
     assert [photo["image_path"] for photo in body["photos"]] == ["front-cover.jpg", "spine.jpg", "flaw.jpg"]
+    assert {"value": "title_page", "label": "Title page"} in body["photo_type_options"]
 
 
 def test_patch_photo_metadata_labels_front_cover_spine_and_flaw(monkeypatch, tmp_path):
@@ -96,6 +97,22 @@ def test_patch_photo_metadata_labels_front_cover_spine_and_flaw(monkeypatch, tmp
     assert photos["flaw.jpg"]["photo_type"] == "flaw"
 
 
+def test_patch_photo_metadata_accepts_friendly_title_page_label(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    _block_ebay_calls(monkeypatch)
+    _seed_item()
+
+    with _client() as client:
+        resp = client.patch(
+            "/api/items/BK-ROUTE/photos/metadata",
+            json={"updates": [{"image_path": "front-cover.jpg", "photo_type": "title page"}]},
+        )
+
+    assert resp.status_code == 200
+    photos = {photo["image_path"]: photo for photo in resp.json()["photos"]}
+    assert photos["front-cover.jpg"]["photo_type"] == "title_page"
+
+
 def test_patch_photo_metadata_rejects_invalid_photo_type(monkeypatch, tmp_path):
     _configure_temp_db(monkeypatch, tmp_path)
     _seed_item()
@@ -107,7 +124,10 @@ def test_patch_photo_metadata_rejects_invalid_photo_type(monkeypatch, tmp_path):
         )
 
     assert resp.status_code == 422
-    assert "Invalid photo_type" in resp.json()["detail"]
+    detail = resp.json()["detail"]
+    assert "Invalid photo_type" in detail
+    assert "friendly label" in detail
+    assert "title_page (Title page)" in detail
 
 
 def test_photo_metadata_update_does_not_change_item_status(monkeypatch, tmp_path):
