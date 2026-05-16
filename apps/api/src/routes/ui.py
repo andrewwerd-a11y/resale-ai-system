@@ -4,10 +4,17 @@ All data is fetched from the /api/* endpoints via JavaScript.
 """
 from __future__ import annotations
 
+import json
+
 from fastapi import APIRouter
 from fastapi.responses import HTMLResponse
+from packages.intake.src.pipeline_types import PhotoType
 
 router = APIRouter()
+
+
+def _photo_type_options_json() -> str:
+    return json.dumps(PhotoType.ALL)
 
 
 @router.get("/listings", response_class=HTMLResponse)
@@ -115,9 +122,11 @@ def _intake_pipeline_cockpit_html(sku: str) -> str:
 <section id='evidence-panel' style='display:none'>
   <h2>Operator photo evidence</h2>
   <div id='evidence-summary' style='font-size:12px;line-height:1.45'></div>
+  <div id='photo-metadata-summary' style='margin-top:14px;font-size:12px;line-height:1.45'></div>
 </section>
 <script>
 const SKU = {sku!r};
+const PHOTO_TYPE_OPTIONS = {_photo_type_options_json()};
 function escapeHtml(value) {{
   return String(value ?? '')
     .replaceAll('&', '&amp;')
@@ -130,6 +139,88 @@ function formatList(items, emptyText) {{
   return items && items.length
     ? `<ul style="margin:6px 0 0 18px;padding:0">${{items.map(item => `<li>${{escapeHtml(item)}}</li>`).join('')}}</ul>`
     : `<div style="color:#666;margin-top:6px">${{escapeHtml(emptyText)}}</div>`;
+}}
+function renderPhotoTypeOptions(selected) {{
+  return PHOTO_TYPE_OPTIONS.map(function(opt) {{
+    const picked = opt === selected ? ' selected' : '';
+    return `<option value="${{escapeHtml(opt)}}"${{picked}}>${{escapeHtml(opt)}}</option>`;
+  }}).join('');
+}}
+function renderPhotoMetadataSection(sku, photos, missingPhotoTypes) {{
+  if (!photos || !photos.length) {{
+    return `
+      <div style="margin-top:12px">
+        <strong>Photo labels</strong>
+        <div style="margin-top:6px;color:#666">No photos available to label.</div>
+      </div>
+    `;
+  }}
+  return `
+    <div style="margin-top:12px">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap">
+        <strong>Photo labels</strong>
+        <span class="badge ok">local-only labels; no publish or approval changes</span>
+      </div>
+      <div style="margin-top:6px;color:#333">Current missing photo types: ${{escapeHtml((missingPhotoTypes || []).join(', ') || 'none')}}</div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;margin-top:10px">
+        ${{photos.map(function(photo) {{
+          const thumb = `/api/items/${{sku}}/image?path=${{encodeURIComponent(photo.image_path)}}`;
+          return `
+            <div style="border:1px solid #ddd;border-radius:6px;padding:8px;background:#fafafa">
+              <img src="${{thumb}}" alt="photo" style="width:100%;aspect-ratio:1;object-fit:cover;border-radius:4px;border:1px solid #ddd" onerror="this.style.display='none'">
+              <div style="margin-top:6px;font-size:11px;word-break:break-word">${{escapeHtml(photo.image_path || '')}}</div>
+              <label style="margin-top:8px;font-size:11px;color:#666;display:block">Photo type</label>
+              <select data-image-path="${{escapeHtml(photo.image_path || '')}}" style="width:100%;margin-top:4px">
+                ${{renderPhotoTypeOptions(photo.photo_type || 'unknown')}}
+              </select>
+              <div style="margin-top:6px;font-size:11px;color:#666">Source: ${{escapeHtml(photo.label_source || photo.source || 'unknown')}} | Confidence: ${{escapeHtml(photo.confidence ?? '')}}</div>
+              <button style="margin-top:8px;padding:5px 8px;cursor:pointer" onclick="savePhotoMetadataLabel('${{sku}}', this)">Save label</button>
+            </div>
+          `;
+        }}).join('')}}
+      </div>
+    </div>
+  `;
+}}
+async function loadPhotoMetadataAndRender(sku, report) {{
+  const target = document.getElementById('photo-metadata-summary');
+  try {{
+    const resp = await fetch(`/api/items/${{sku}}/photos/metadata`);
+    const body = await resp.json();
+    if (!resp.ok) throw new Error(body.detail || 'Photo metadata failed.');
+    target.innerHTML = renderPhotoMetadataSection(sku, body.photos || [], (report.operator_photo_evidence || {{}}).missing_photo_types || []);
+  }} catch (error) {{
+    target.innerHTML = `<div style="margin-top:12px;color:#800">Photo metadata unavailable: ${{escapeHtml(error.message)}}</div>`;
+  }}
+}}
+async function savePhotoMetadataLabel(sku, button) {{
+  const card = button.closest('div[style*="border:1px solid #ddd"]');
+  const select = card ? card.querySelector('select[data-image-path]') : null;
+  if (!select) return;
+  button.disabled = true;
+  try {{
+    const resp = await fetch(`/api/items/${{sku}}/photos/metadata`, {{
+      method: 'PATCH',
+      headers: {{'Content-Type':'application/json'}},
+      body: JSON.stringify({{
+        updates: [{{
+          image_path: select.getAttribute('data-image-path'),
+          photo_type: select.value
+        }}]
+      }})
+    }});
+    const body = await resp.json();
+    if (!resp.ok) throw new Error(body.detail || 'Photo label save failed.');
+    const report = await show(fetch(`/api/items/${{sku}}/correction-report-v2`));
+    if (report) {{
+      document.getElementById('evidence-summary').innerHTML = renderCorrectionReportSummary(sku, report);
+      await loadPhotoMetadataAndRender(sku, report);
+    }}
+  }} catch (error) {{
+    alert(error.message);
+  }} finally {{
+    button.disabled = false;
+  }}
 }}
 function renderCorrectionReportSummary(sku, report) {{
   const evidence = report.operator_photo_evidence || {{}};
@@ -187,6 +278,7 @@ document.getElementById('btn-report').onclick = async () => {{
   }}
   document.getElementById('evidence-panel').style.display = 'block';
   document.getElementById('evidence-summary').innerHTML = renderCorrectionReportSummary(SKU, body);
+  await loadPhotoMetadataAndRender(SKU, body);
 }};
 document.getElementById('btn-readiness').onclick = () =>
   show(fetch(`/api/items/${{SKU}}/correction-report`));
@@ -1224,6 +1316,7 @@ def _intake_html() -> str:
 </section>
 </main>
 <script>
+const PHOTO_TYPE_OPTIONS = {_photo_type_options_json()};
 function escapeHtml(value) {{
   return String(value ?? '')
     .replaceAll('&', '&amp;')
@@ -1236,6 +1329,48 @@ function formatList(items, emptyText) {{
   return items && items.length
     ? `<ul style="margin:6px 0 0 18px;padding:0">${{items.map(item => `<li>${{escapeHtml(item)}}</li>`).join('')}}</ul>`
     : `<div style="color:#888780;margin-top:6px">${{escapeHtml(emptyText)}}</div>`;
+}}
+function renderPhotoTypeOptions(selected) {{
+  return PHOTO_TYPE_OPTIONS.map(function(opt) {{
+    const picked = opt === selected ? ' selected' : '';
+    return `<option value="${{escapeHtml(opt)}}"${{picked}}>${{escapeHtml(opt)}}</option>`;
+  }}).join('');
+}}
+function renderPhotoMetadataSection(sku, photos, missingPhotoTypes) {{
+  if (!photos || !photos.length) {{
+    return `
+      <div style="margin-top:12px">
+        <strong>Photo labels</strong>
+        <div style="margin-top:6px;color:#888780">No photos available to label.</div>
+      </div>
+    `;
+  }}
+  return `
+    <div style="margin-top:12px">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap">
+        <strong>Photo labels</strong>
+        <span class="badge approved">local-only labels; no publish or approval changes</span>
+      </div>
+      <div style="margin-top:6px;color:#c9c6bc">Current missing photo types: ${{escapeHtml((missingPhotoTypes || []).join(', ') || 'none')}}</div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;margin-top:10px">
+        ${{photos.map(function(photo) {{
+          const thumb = `/api/items/${{sku}}/image?path=${{encodeURIComponent(photo.image_path)}}`;
+          return `
+            <div style="border:1px solid #2c2c2a;border-radius:6px;padding:8px;background:#111110">
+              <img src="${{thumb}}" alt="photo" style="width:100%;aspect-ratio:1;object-fit:cover;border-radius:4px;border:1px solid #2c2c2a" onerror="this.style.display='none'">
+              <div style="margin-top:6px;font-size:11px;word-break:break-word">${{escapeHtml(photo.image_path || '')}}</div>
+              <label style="margin-top:8px">Photo type</label>
+              <select data-image-path="${{escapeHtml(photo.image_path || '')}}" style="margin-top:4px">
+                ${{renderPhotoTypeOptions(photo.photo_type || 'unknown')}}
+              </select>
+              <div style="margin-top:6px;font-size:11px;color:#888780">Source: ${{escapeHtml(photo.label_source || photo.source || 'unknown')}} | Confidence: ${{escapeHtml(photo.confidence ?? '')}}</div>
+              <button class="btn btn-gray" style="margin-top:8px;font-size:11px;padding:4px 10px" onclick="savePhotoMetadataLabel('${{sku}}', this)">Save label</button>
+            </div>
+          `;
+        }}).join('')}}
+      </div>
+    </div>
+  `;
 }}
 function renderCorrectionReportSummary(sku, report) {{
   const evidence = report.operator_photo_evidence || {{}};
@@ -1349,12 +1484,42 @@ async function analyzeOne(sku, btn) {{
 async function showCorrectionReport(sku) {{
   const r = await fetch(`/api/items/${{sku}}/correction-report-v2`);
   const d = await r.json();
+  const metadataResp = await fetch(`/api/items/${{sku}}/photos/metadata`);
+  const metadataBody = await metadataResp.json();
   const panel = document.getElementById('correction-report-panel');
   const summary = document.getElementById('correction-report-summary');
   const el = document.getElementById('correction-report');
   panel.style.display = 'block';
-  summary.innerHTML = renderCorrectionReportSummary(sku, d);
+  const metadataHtml = metadataResp.ok
+    ? renderPhotoMetadataSection(sku, metadataBody.photos || [], (d.operator_photo_evidence || {{}}).missing_photo_types || [])
+    : `<div style="margin-top:12px;color:#f09595">Photo metadata unavailable: ${{escapeHtml(metadataBody.detail || 'unknown error')}}</div>`;
+  summary.innerHTML = renderCorrectionReportSummary(sku, d) + metadataHtml;
   el.textContent = JSON.stringify(d, null, 2);
+}}
+async function savePhotoMetadataLabel(sku, button) {{
+  const card = button.closest('div[style*="border:1px solid"]');
+  const select = card ? card.querySelector('select[data-image-path]') : null;
+  if (!select) return;
+  button.disabled = true;
+  try {{
+    const resp = await fetch(`/api/items/${{sku}}/photos/metadata`, {{
+      method: 'PATCH',
+      headers: {{'Content-Type':'application/json'}},
+      body: JSON.stringify({{
+        updates: [{{
+          image_path: select.getAttribute('data-image-path'),
+          photo_type: select.value
+        }}]
+      }})
+    }});
+    const body = await resp.json();
+    if (!resp.ok) throw new Error(body.detail || 'Photo label save failed.');
+    await showCorrectionReport(sku);
+  }} catch (error) {{
+    alert(error.message);
+  }} finally {{
+    button.disabled = false;
+  }}
 }}
 load();
 </script>

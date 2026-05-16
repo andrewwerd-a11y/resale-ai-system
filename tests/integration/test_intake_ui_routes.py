@@ -17,6 +17,10 @@ def test_intake_queue_ui_uses_operator_evidence_sections():
     assert "Evidence needed" in body
     assert "/correction-report-v2" in body
     assert "operator_photo_evidence" in body
+    assert "Photo labels" in body
+    assert "/photos/metadata" in body
+    assert "local-only labels; no publish or approval changes" in body
+    assert "title_page" in body
 
 
 def test_intake_pipeline_cockpit_ui_uses_operator_evidence_sections():
@@ -33,3 +37,6 @@ def test_intake_pipeline_cockpit_ui_uses_operator_evidence_sections():
     assert "Evidence needed" in body
     assert "/correction-report-v2" in body
     assert "operator_photo_evidence" in body
+    assert "Photo labels" in body
+    assert "/photos/metadata" in body
+    assert "local-only labels; no publish or approval changes" in body
