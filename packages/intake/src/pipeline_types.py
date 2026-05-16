@@ -155,6 +155,15 @@ class PhotoSource:
     ALL = [LOCAL, HOSTED, UPLOADED, GENERATED]
 
 
+class PhotoLabelSource:
+    USER_LABELED = "user_labeled"
+    MODEL_LABELED = "model_labeled"
+    FILENAME_INFERRED = "filename_inferred"
+    UNKNOWN = "unknown"
+
+    ALL = [USER_LABELED, MODEL_LABELED, FILENAME_INFERRED, UNKNOWN]
+
+
 class ProviderKind:
     """How a result was produced."""
     DETERMINISTIC_FALLBACK = "deterministic_fallback"

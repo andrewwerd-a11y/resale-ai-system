@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Iterable
 
 from packages.domain.src.entities.item import Item
-from packages.intake.src.pipeline_types import PhotoSource, PhotoType
+from packages.intake.src.pipeline_types import PhotoLabelSource, PhotoSource, PhotoType
 
 
 # Mapping from internal photo_type tokens (also used by quality_gate.py) to
@@ -94,11 +94,15 @@ class PhotoMeta:
     path: str
     photo_type: str = PhotoType.UNKNOWN
     source: str = PhotoSource.LOCAL
+    label_source: str = PhotoLabelSource.UNKNOWN
     confidence: float = 0.0
     user_labeled: bool = False
     model_labeled: bool = False
+    is_cover: bool = False
+    sort_order: int | None = None
     notes: str | None = None
     created_at: str | None = None
+    updated_at: str | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -170,10 +174,14 @@ def parse_photo_inputs(
                 path=path_str,
                 photo_type=photo_type,
                 source=PhotoSource.LOCAL,
+                label_source=PhotoLabelSource.FILENAME_INFERRED if photo_type != PhotoType.UNKNOWN else PhotoLabelSource.UNKNOWN,
                 confidence=confidence,
                 user_labeled=False,
                 model_labeled=photo_type != PhotoType.UNKNOWN,
+                is_cover=(len(out) == 0),
+                sort_order=len(out),
                 created_at=datetime.utcnow().isoformat() if photo_type != PhotoType.UNKNOWN else None,
+                updated_at=datetime.utcnow().isoformat() if photo_type != PhotoType.UNKNOWN else None,
             )
         )
     # Explicit-only entries (no matching image_path) — preserve them too.
@@ -210,11 +218,15 @@ def merge_user_photo_labels(
             path=path,
             photo_type=photo_type,
             source=previous.source if previous else PhotoSource.LOCAL,
+            label_source=PhotoLabelSource.USER_LABELED,
             confidence=confidence,
             user_labeled=True,
             model_labeled=previous.model_labeled if previous else False,
+            is_cover=previous.is_cover if previous else False,
+            sort_order=previous.sort_order if previous else None,
             notes=notes if notes is not None else (previous.notes if previous else None),
             created_at=(previous.created_at if previous else datetime.utcnow().isoformat()),
+            updated_at=datetime.utcnow().isoformat(),
         )
         by_path[path] = merged
     return list(by_path.values())
