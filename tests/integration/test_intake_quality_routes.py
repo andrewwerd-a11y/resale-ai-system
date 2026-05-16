@@ -147,3 +147,89 @@ def test_bulk_approve_reports_blocked_items_without_approving(monkeypatch, tmp_p
     body = resp.json()
     assert body["updated"] == 0
     assert body["blocked"][0]["code"] == "intake_quality_blocked"
+
+
+def test_book_quality_uses_stored_photo_labels(monkeypatch, tmp_path):
+    _configure_db(monkeypatch, tmp_path)
+    _seed(
+        Item(
+            sku="BK-LABELS",
+            status=ItemStatus.PENDING_INTAKE,
+            category_key="books",
+            category_label="Books",
+            title_final="Reference Book",
+            condition_label="Good",
+            condition_id="5000",
+            image_paths=["a.jpg", "b.jpg", "c.jpg", "d.jpg", "e.jpg"],
+        )
+    )
+
+    with _client() as client:
+        before = client.get("/api/items/BK-LABELS/intake-quality")
+        update = client.patch(
+            "/api/items/BK-LABELS/photos/metadata",
+            json={
+                "updates": [
+                    {"image_path": "a.jpg", "photo_type": "front"},
+                    {"image_path": "b.jpg", "photo_type": "back"},
+                    {"image_path": "c.jpg", "photo_type": "spine"},
+                    {"image_path": "d.jpg", "photo_type": "title_page"},
+                    {"image_path": "e.jpg", "photo_type": "copyright_page"},
+                ]
+            },
+        )
+        after = client.get("/api/items/BK-LABELS/intake-quality")
+
+    assert before.status_code == 200
+    assert update.status_code == 200
+    assert after.status_code == 200
+    before_missing = set(before.json()["missing_photo_types"])
+    after_missing = set(after.json()["missing_photo_types"])
+    assert "spine" in before_missing
+    assert "title page" in before_missing
+    assert "copyright/publication page" in before_missing
+    assert "spine" not in after_missing
+    assert "title page" not in after_missing
+    assert "copyright/publication page" not in after_missing
+
+
+def test_clothing_quality_uses_stored_photo_labels(monkeypatch, tmp_path):
+    _configure_db(monkeypatch, tmp_path)
+    _seed(
+        Item(
+            sku="CL-LABELS",
+            status=ItemStatus.PENDING_INTAKE,
+            category_key="clothing",
+            category_label="Clothing",
+            title_final="Jacket",
+            condition_label="Good",
+            condition_id="3000",
+            image_paths=["front.jpg", "brand.jpg", "size.jpg", "care.jpg"],
+        )
+    )
+
+    with _client() as client:
+        before = client.get("/api/items/CL-LABELS/intake-quality")
+        update = client.patch(
+            "/api/items/CL-LABELS/photos/metadata",
+            json={
+                "updates": [
+                    {"image_path": "brand.jpg", "photo_type": "brand_tag"},
+                    {"image_path": "size.jpg", "photo_type": "size_tag"},
+                    {"image_path": "care.jpg", "photo_type": "material_care_tag"},
+                ]
+            },
+        )
+        after = client.get("/api/items/CL-LABELS/intake-quality")
+
+    assert before.status_code == 200
+    assert update.status_code == 200
+    assert after.status_code == 200
+    before_missing = set(before.json()["missing_photo_types"])
+    after_missing = set(after.json()["missing_photo_types"])
+    assert "brand tag" in before_missing
+    assert "size tag" in before_missing
+    assert "material/care tag" in before_missing
+    assert "brand tag" not in after_missing
+    assert "size tag" not in after_missing
+    assert "material/care tag" not in after_missing

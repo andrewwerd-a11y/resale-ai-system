@@ -17,6 +17,7 @@ from typing import Any
 from sqlmodel import Session, select
 
 from apps.api.src.services.intake_pipeline import build_pipeline_snapshot
+from apps.api.src.services.photo_metadata import load_photo_metadata, photo_metadata_rollup
 from apps.api.src.services.publish_debug_diagnostics import (
     MAX_BATCH_SKUS,
     build_publish_debug_diagnostics_batch,
@@ -235,12 +236,17 @@ def _build_sku_preview(
         }
 
     quality = evaluate_intake_quality(item).as_dict()
+    photo_meta = load_photo_metadata(repo.session, item)
+    quality = evaluate_intake_quality(item, photo_meta=photo_meta).as_dict()
     pipeline = build_pipeline_snapshot(
         item,
         run_deep_analysis=run_deep_analysis_preview,
+        photo_meta=photo_meta,
     )
     readiness = evaluate_publish_readiness(item).as_dict()
     deep = (pipeline.get("stages") or {}).get("deep_analysis")
+    metadata_rollup = photo_metadata_rollup(photo_meta)
+    missing_after_labels = list(quality.get("missing_photo_types") or [])
     return {
         "sku": sku,
         "found": True,
@@ -249,6 +255,7 @@ def _build_sku_preview(
         "intake_quality_status": quality.get("intake_quality_status"),
         "needs_more_photos_for_analysis": bool(quality.get("needs_more_photos_for_analysis")),
         "missing_photo_types": list(quality.get("missing_photo_types") or []),
+        "missing_photo_types_after_labels": missing_after_labels,
         "correction_report_v2_summary": {
             "available": True,
             "publish_approval_blocked": bool(
@@ -272,6 +279,7 @@ def _build_sku_preview(
             "skipped_image_reasons": list((deep or {}).get("skipped_image_reasons") or []),
             "deep_analysis_image_selection_available": deep is not None,
         },
+        **metadata_rollup,
         "intake_pipeline_status": {
             "available": True,
             "category_family": pipeline.get("category_family"),

@@ -106,6 +106,43 @@ def test_correction_report_v2_groups_actions_for_missing_photos(monkeypatch, tmp
     assert body["manual_approval_required"] is True
 
 
+def test_correction_report_v2_uses_stored_photo_labels(monkeypatch, tmp_path):
+    _configure_db(monkeypatch, tmp_path)
+    _seed(
+        _ready_book(
+            image_paths=["img1.jpg", "img2.jpg", "img3.jpg", "img4.jpg", "img5.jpg"],
+        )
+    )
+
+    with _client() as client:
+        before = client.get("/api/items/BK-V2/correction-report-v2")
+        patch = client.patch(
+            "/api/items/BK-V2/photos/metadata",
+            json={
+                "updates": [
+                    {"image_path": "img1.jpg", "photo_type": "front"},
+                    {"image_path": "img2.jpg", "photo_type": "back"},
+                    {"image_path": "img3.jpg", "photo_type": "spine"},
+                    {"image_path": "img4.jpg", "photo_type": "title_page"},
+                    {"image_path": "img5.jpg", "photo_type": "copyright_page"},
+                ]
+            },
+        )
+        after = client.get("/api/items/BK-V2/correction-report-v2")
+
+    assert before.status_code == 200
+    assert patch.status_code == 200
+    assert after.status_code == 200
+    before_missing = set(before.json()["operator_photo_evidence"]["missing_photo_types"])
+    after_missing = set(after.json()["operator_photo_evidence"]["missing_photo_types"])
+    assert "spine" in before_missing
+    assert "title page" in before_missing
+    assert "copyright/publication page" in before_missing
+    assert "spine" not in after_missing
+    assert "title page" not in after_missing
+    assert "copyright/publication page" not in after_missing
+
+
 def test_correction_report_v2_flags_malformed_condition_id(monkeypatch, tmp_path):
     _configure_db(monkeypatch, tmp_path)
     _seed(_ready_book(condition_id="[3000, 4000]"))

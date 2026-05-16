@@ -28,6 +28,7 @@ from packages.intake.src.marketplace_requirements import (
 )
 from packages.intake.src.photo_types import (
     PhotoCoverageSummary,
+    PhotoMeta,
     parse_photo_inputs,
     summarize_photo_coverage,
 )
@@ -55,16 +56,17 @@ def build_pipeline_snapshot(
     platform: str = Platform.EBAY,
     user_context: str | None = None,
     run_deep_analysis: bool = False,
+    photo_meta: list[PhotoMeta] | None = None,
 ) -> dict:
     """Return a stage-by-stage snapshot of the intake pipeline.
 
     Read-only. The optional ``run_deep_analysis`` flag opts into running the
     deterministic deep-analysis preview as well — also read-only.
     """
-    photo_meta = parse_photo_inputs(item)
+    resolved_photo_meta = list(photo_meta) if photo_meta is not None else parse_photo_inputs(item)
     family = category_family_for_item(item)
-    coverage: PhotoCoverageSummary = summarize_photo_coverage(item, family, photo_meta)
-    quality: IntakeQualityResult = evaluate_intake_quality(item)
+    coverage: PhotoCoverageSummary = summarize_photo_coverage(item, family, resolved_photo_meta)
+    quality: IntakeQualityResult = evaluate_intake_quality(item, photo_meta=resolved_photo_meta)
     identity: IdentityScanResult = run_first_pass_identity(item, user_context=user_context)
     resolution: CategoryResolution = resolve_categories(item, identity=identity)
     top_candidate = _select_top_candidate(resolution)
@@ -83,6 +85,7 @@ def build_pipeline_snapshot(
             marketplace_requirements=requirements,
             user_context=user_context,
             current_publish_blockers=readiness.get("blockers") or [],
+            photo_meta=resolved_photo_meta,
         )
 
     stages = {

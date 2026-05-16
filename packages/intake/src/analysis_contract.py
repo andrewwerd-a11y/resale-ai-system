@@ -234,14 +234,16 @@ def run_deep_analysis_preview(
     marketplace_requirements: MarketplaceRequirements | None = None,
     user_context: str | None = None,
     current_publish_blockers: list[str] | None = None,
+    photo_meta: list[PhotoMeta] | None = None,
     provider: DeepAnalysisProvider | None = None,
 ) -> DeepAnalysisResult:
+    resolved_photo_meta = list(photo_meta) if photo_meta is not None else parse_photo_inputs(item)
     chosen = _select_provider(provider)
     request = DeepAnalysisRequest(
         sku=item.sku,
         canonical_schema_version=EXTRACTION_SCHEMA_VERSION,
         item=item,
-        photo_meta=parse_photo_inputs(item),
+        photo_meta=resolved_photo_meta,
         user_context=user_context,
         identity=identity,
         selected_category=selected_category,

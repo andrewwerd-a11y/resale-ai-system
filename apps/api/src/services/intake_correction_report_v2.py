@@ -25,6 +25,7 @@ from packages.intake.src.correction_pipeline import (
 from packages.intake.src.identity_scan import run_first_pass_identity
 from packages.intake.src.marketplace_requirements import get_marketplace_requirements
 from packages.intake.src.pipeline_types import IntakePipelineStage
+from packages.intake.src.photo_types import PhotoMeta
 from packages.intake.src.quality_gate import evaluate_intake_quality
 
 
@@ -50,8 +51,10 @@ def build_correction_report_v2(
     *,
     platform: str = Platform.EBAY,
     user_context: str | None = None,
+    photo_meta: list[PhotoMeta] | None = None,
 ) -> dict:
-    quality = evaluate_intake_quality(item)
+    resolved_photo_meta = list(photo_meta) if photo_meta is not None else None
+    quality = evaluate_intake_quality(item, photo_meta=resolved_photo_meta)
     identity = run_first_pass_identity(item, user_context=user_context)
     resolution = resolve_categories(item, identity=identity)
     selected = None
@@ -77,6 +80,7 @@ def build_correction_report_v2(
             marketplace_requirements=requirements,
             user_context=user_context,
             current_publish_blockers=readiness.get("blockers") or [],
+            photo_meta=resolved_photo_meta,
         )
 
     proposal = None

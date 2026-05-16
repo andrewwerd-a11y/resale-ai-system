@@ -294,11 +294,13 @@ def post_bulk_reintake_preview(
 
 @router.get("/{sku}/intake-quality")
 def get_intake_quality(sku: str, session: Session = Depends(get_session)):
+    from apps.api.src.services.photo_metadata import load_photo_metadata
     repo = ItemRepository(session)
     item = repo.get_by_sku(sku)
     if not item:
         raise HTTPException(status_code=404, detail=f"Item {sku} not found")
-    return evaluate_intake_quality(item).as_dict() | {"sku": sku, "no_ebay_mutation_performed": True}
+    quality = evaluate_intake_quality(item, photo_meta=load_photo_metadata(session, item)).as_dict()
+    return quality | {"sku": sku, "no_ebay_mutation_performed": True}
 
 
 @router.get("/{sku}/correction-report")
@@ -323,6 +325,7 @@ def get_intake_pipeline_status(
     Never publishes, never mutates, never calls external paid providers.
     """
     from apps.api.src.services.intake_pipeline import build_pipeline_snapshot
+    from apps.api.src.services.photo_metadata import load_photo_metadata
 
     repo = ItemRepository(session)
     item = repo.get_by_sku(sku)
@@ -333,6 +336,7 @@ def get_intake_pipeline_status(
         platform=platform,
         user_context=user_context,
         run_deep_analysis=run_deep_analysis,
+        photo_meta=load_photo_metadata(session, item),
     )
 
 
@@ -425,6 +429,7 @@ def post_deep_analysis_preview(
     from packages.intake.src.identity_scan import run_first_pass_identity
     from packages.intake.src.marketplace_requirements import get_marketplace_requirements
     from apps.api.src.services.publish_readiness import evaluate_publish_readiness
+    from apps.api.src.services.photo_metadata import load_photo_metadata
 
     repo = ItemRepository(session)
     item = repo.get_by_sku(sku)
@@ -457,6 +462,7 @@ def post_deep_analysis_preview(
         marketplace_requirements=requirements,
         user_context=user_context,
         current_publish_blockers=evaluate_publish_readiness(item).as_dict().get("blockers") or [],
+        photo_meta=load_photo_metadata(session, item),
     )
     return result.to_dict() | {
         "no_ebay_mutation_performed": True,
@@ -482,12 +488,18 @@ def get_correction_report_v2(
     Never publishes, never mutates, never calls external paid providers.
     """
     from apps.api.src.services.intake_correction_report_v2 import build_correction_report_v2
+    from apps.api.src.services.photo_metadata import load_photo_metadata
 
     repo = ItemRepository(session)
     item = repo.get_by_sku(sku)
     if not item:
         raise HTTPException(status_code=404, detail=f"Item {sku} not found")
-    return build_correction_report_v2(item, platform=platform, user_context=user_context)
+    return build_correction_report_v2(
+        item,
+        platform=platform,
+        user_context=user_context,
+        photo_meta=load_photo_metadata(session, item),
+    )
 
 
 class _ReanalysisPreviewRequest(BaseModel):
