@@ -985,6 +985,7 @@ async def upload_photos(
     """Upload one or more photos, append their URLs to image_paths."""
     try:
         assert_route_sku_allowed(sku, "items.upload_photos")
+        from apps.api.src.services.photo_metadata import sync_photo_metadata_cover_order
         repo = ItemRepository(session)
         item = repo.get_by_sku(sku)
         if not item:
@@ -1013,6 +1014,7 @@ async def upload_photos(
         if new_urls:
             item.image_paths = paths + new_urls
             repo.upsert(item)
+            sync_photo_metadata_cover_order(session, sku=str(item.sku or sku), ordered_paths=_image_paths_to_list(item.image_paths))
             paths = _image_paths_to_list(item.image_paths)
         return {"image_paths": paths}
     except E2ESafetyError as exc:
@@ -1025,6 +1027,17 @@ async def upload_photos(
 
 class PhotoUrlBody(BaseModel):
     url: str
+
+
+class PhotoMetadataUpdateEntry(BaseModel):
+    image_path: str
+    photo_type: str
+    confidence: float | None = None
+    notes: str | None = None
+
+
+class PhotoMetadataUpdateBody(BaseModel):
+    updates: list[PhotoMetadataUpdateEntry]
 
 
 def _image_paths_to_list(value) -> list[str]:
@@ -1055,6 +1068,51 @@ def _dedupe_preserve_order(values: list[str]) -> list[str]:
     return ordered
 
 
+@router.get("/{sku}/photos/metadata")
+def get_photo_metadata(sku: str, session: Session = Depends(get_session)):
+    from apps.api.src.services.photo_metadata import photo_metadata_response
+
+    repo = ItemRepository(session)
+    item = repo.get_by_sku(sku)
+    if not item:
+        raise HTTPException(status_code=404, detail=f"Item {sku} not found")
+    return photo_metadata_response(session, item)
+
+
+@router.patch("/{sku}/photos/metadata")
+def patch_photo_metadata(
+    sku: str,
+    body: PhotoMetadataUpdateBody,
+    session: Session = Depends(get_session),
+):
+    from apps.api.src.services.photo_metadata import photo_metadata_response, upsert_photo_labels
+    from packages.intake.src.pipeline_types import PhotoType
+
+    try:
+        assert_route_sku_allowed(sku, "items.patch_photo_metadata")
+    except E2ESafetyError as exc:
+        raise HTTPException(status_code=403, detail=str(exc))
+
+    repo = ItemRepository(session)
+    item = repo.get_by_sku(sku)
+    if not item:
+        raise HTTPException(status_code=404, detail=f"Item {sku} not found")
+
+    image_paths = set(_image_paths_to_list(item.image_paths))
+    updates: list[dict] = []
+    for entry in body.updates or []:
+        photo_type = str(entry.photo_type or "").strip()
+        image_path = str(entry.image_path or "").strip()
+        if photo_type not in PhotoType.ALL:
+            raise HTTPException(status_code=422, detail=f"Invalid photo_type: {photo_type}")
+        if image_path not in image_paths:
+            raise HTTPException(status_code=404, detail=f"Image path not found on item: {image_path}")
+        updates.append(entry.model_dump())
+
+    upsert_photo_labels(session, item, updates)
+    return photo_metadata_response(session, item)
+
+
 @router.post("/{sku}/photos/host")
 def host_existing_photos(
     sku: str,
@@ -1064,6 +1122,7 @@ def host_existing_photos(
     """Upload one item's existing local photos to Cloudinary and persist hosted URLs."""
     try:
         assert_route_sku_allowed(sku, "items.host_existing_photos")
+        from apps.api.src.services.photo_metadata import sync_photo_metadata_cover_order
         repo = ItemRepository(session)
         item = repo.get_by_sku(sku)
         if not item:
@@ -1205,6 +1264,7 @@ def host_existing_photos(
             if deduped_urls != hosted_urls:
                 item.image_paths = local_photo_paths + deduped_urls
                 repo.upsert(item)
+                sync_photo_metadata_cover_order(session, sku=str(item.sku or sku), ordered_paths=_image_paths_to_list(item.image_paths))
             record_success(
                 session,
                 operation_name="photo_hosting",
@@ -1265,6 +1325,7 @@ def host_existing_photos(
         merged_paths = _dedupe_preserve_order(local_photo_paths + uploaded_urls)
         item.image_paths = merged_paths
         repo.upsert(item)
+        sync_photo_metadata_cover_order(session, sku=str(item.sku or sku), ordered_paths=_image_paths_to_list(item.image_paths))
         record_success(
             session,
             operation_name="photo_hosting",
@@ -1316,6 +1377,7 @@ def delete_photo(sku: str, body: PhotoUrlBody, session: Session = Depends(get_se
     """Remove a photo URL from image_paths (does not delete from Cloudinary)."""
     try:
         assert_route_sku_allowed(sku, "items.delete_photo")
+        from apps.api.src.services.photo_metadata import delete_photo_metadata_for_path, sync_photo_metadata_cover_order
         repo = ItemRepository(session)
         item = repo.get_by_sku(sku)
         if not item:
@@ -1324,6 +1386,8 @@ def delete_photo(sku: str, body: PhotoUrlBody, session: Session = Depends(get_se
         paths = [p for p in _image_paths_to_list(item.image_paths) if p != body.url]
         item.image_paths = paths
         repo.upsert(item)
+        delete_photo_metadata_for_path(session, sku=str(item.sku or sku), image_path=body.url)
+        sync_photo_metadata_cover_order(session, sku=str(item.sku or sku), ordered_paths=paths)
         return {"image_paths": paths}
     except E2ESafetyError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
@@ -1338,6 +1402,7 @@ def set_cover_photo(sku: str, body: PhotoUrlBody, session: Session = Depends(get
     """Move a photo URL to index 0 in image_paths."""
     try:
         assert_route_sku_allowed(sku, "items.set_cover_photo")
+        from apps.api.src.services.photo_metadata import sync_photo_metadata_cover_order
         repo = ItemRepository(session)
         item = repo.get_by_sku(sku)
         if not item:
@@ -1351,6 +1416,7 @@ def set_cover_photo(sku: str, body: PhotoUrlBody, session: Session = Depends(get
         paths.insert(0, body.url)
         item.image_paths = paths
         repo.upsert(item)
+        sync_photo_metadata_cover_order(session, sku=str(item.sku or sku), ordered_paths=paths)
         return {"image_paths": paths}
     except E2ESafetyError as exc:
         raise HTTPException(status_code=403, detail=str(exc))

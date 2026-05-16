@@ -77,6 +77,7 @@ def test_single_sku_guarded_mutation_routes_allow_approved_and_block_non_approve
             {"files": [("files", ("p.jpg", b"fake", "image/jpeg"))]},
         ),
         ("POST", "/api/items/{sku}/photos/host", {}),
+        ("PATCH", "/api/items/{sku}/photos/metadata", {"json": {"updates": [{"image_path": "https://example.test/p.jpg", "photo_type": "front"}]}}),
         ("DELETE", "/api/items/{sku}/photos", {"json": {"url": "https://example.test/p.jpg"}}),
         ("POST", "/api/items/{sku}/photos/set-cover", {"json": {"url": "https://example.test/p.jpg"}}),
         ("POST", "/api/ebay/repair-queue/{sku}/recheck-readiness", {}),
