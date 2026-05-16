@@ -427,6 +427,7 @@ def post_deep_analysis_preview(
     session: Session = Depends(get_session),
 ):
     """Deterministic deep-analysis preview. Never persists, never publishes."""
+    from apps.api.src.services.confidence_explanation import build_confidence_explanation
     from packages.intake.src.analysis_contract import run_deep_analysis_preview
     from packages.intake.src.quality_gate import evaluate_intake_quality
     from packages.intake.src.category_resolver import resolve_categories
@@ -484,6 +485,13 @@ def post_deep_analysis_preview(
         quality=quality,
         allow_limited_evidence=allow_limited_evidence,
     )
+    confidence_fields = build_confidence_explanation(
+        item,
+        quality=quality,
+        identity=identity,
+        resolution=resolution,
+        limited_evidence_used=bool(limited_state["limited_evidence_used"]),
+    )
     return result.to_dict() | {
         "no_ebay_mutation_performed": True,
         "no_external_provider_called": not result.external_call_made,
@@ -494,6 +502,7 @@ def post_deep_analysis_preview(
         "external_provider_disabled": not _ext_enabled,
         "configured_provider": _ext_provider,
         "publish_approval_blocked": True,
+        **confidence_fields,
         **limited_state,
     }
 

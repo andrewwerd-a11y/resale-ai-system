@@ -71,6 +71,11 @@ def test_correction_report_v2_includes_all_sections(monkeypatch, tmp_path):
     assert body["marketplace_requirements"]["platform"] == "ebay"
     assert body["deep_analysis_preview"] is not None
     assert "grouped_next_actions" in body
+    assert body["extraction_confidence"] == 0.85
+    assert body["category_confidence"] != body["extraction_confidence"]
+    assert body["photo_evidence_confidence"] is not None
+    assert body["confidence_explanation"]
+    assert "Category has not been operator-confirmed." in body["confidence_warnings"]
 
 
 def test_correction_report_v2_groups_actions_for_missing_photos(monkeypatch, tmp_path):
@@ -123,6 +128,7 @@ def test_correction_report_v2_allows_limited_evidence_draft_annotations(monkeypa
     assert body["deep_analysis_preview"] is not None
     assert body["deep_analysis_preview"]["confidence_source"] == "limited_evidence"
     assert body["operator_warning"].startswith("This draft was generated with incomplete evidence.")
+    assert "Draft was generated with incomplete evidence." in body["confidence_warnings"]
     assert body["publish_approval_blocked"] is True
     assert body["manual_approval_required"] is True
     assert body["missing_required_photo_types"]

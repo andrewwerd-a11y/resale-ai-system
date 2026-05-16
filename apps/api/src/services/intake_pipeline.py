@@ -11,6 +11,7 @@ from apps.api.src.services.limited_evidence import (
     annotate_deep_analysis_for_limited_evidence,
     limited_evidence_state,
 )
+from apps.api.src.services.confidence_explanation import build_confidence_explanation
 from packages.core.src.constants import Platform
 from packages.domain.src.entities.item import Item
 from packages.intake.src.analysis_contract import (
@@ -82,6 +83,13 @@ def build_pipeline_snapshot(
     )
     readiness = evaluate_publish_readiness(item).as_dict()
     limited_state = limited_evidence_state(quality, allow_limited_evidence=allow_limited_evidence)
+    confidence_fields = build_confidence_explanation(
+        item,
+        quality=quality,
+        identity=identity,
+        resolution=resolution,
+        limited_evidence_used=bool(limited_state["limited_evidence_used"]),
+    )
     deep_result: DeepAnalysisResult | None = None
     if run_deep_analysis and (quality.should_run_deep_analysis or limited_state["limited_evidence_used"]):
         deep_result = run_deep_analysis_preview(
@@ -131,6 +139,7 @@ def build_pipeline_snapshot(
         "read_only": True,
         "draft_only": True,
         "manual_approval_required": True,
+        **confidence_fields,
         **limited_state,
         "publish_approval_blocked": bool(quality.should_block_publish_approval or limited_state["limited_evidence_used"]),
     }

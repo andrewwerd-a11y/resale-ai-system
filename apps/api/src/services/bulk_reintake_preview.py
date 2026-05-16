@@ -183,11 +183,15 @@ def render_bulk_reintake_markdown(response: dict) -> str:
         lines.append(
             f"- {result.get('sku')}: status={result.get('current_local_status') or ''}; "
             f"category={result.get('category') or ''}; "
+            f"extraction_confidence={result.get('extraction_confidence')}; "
+            f"category_confidence={result.get('category_confidence')}; "
+            f"photo_evidence_confidence={result.get('photo_evidence_confidence')}; "
             f"intake_quality_status={result.get('intake_quality_status') or ''}; "
             f"needs_more_photos_for_analysis={result.get('needs_more_photos_for_analysis')}; "
             f"missing_photo_types={missing}; "
             f"missing_required_photo_types={missing_required}; "
             f"missing_recommended_photo_types={missing_recommended}; "
+            f"confidence_warnings={', '.join(result.get('confidence_warnings') or []) or 'none'}; "
             f"limited_evidence_draft_option={limited_evidence_note}; "
             f"photo_metadata_status={result.get('photo_metadata_status') or ''}; "
             f"photo_label_recommendation={_photo_label_recommendation(result)}; "
@@ -264,7 +268,8 @@ def _build_sku_preview(
     quality = evaluate_intake_quality(item).as_dict()
     photo_meta = load_photo_metadata(repo.session, item)
     quality_before_labels = evaluate_intake_quality(item).as_dict()
-    quality = evaluate_intake_quality(item, photo_meta=photo_meta).as_dict()
+    quality_result = evaluate_intake_quality(item, photo_meta=photo_meta)
+    quality = quality_result.as_dict()
     pipeline = build_pipeline_snapshot(
         item,
         run_deep_analysis=run_deep_analysis_preview,
@@ -275,11 +280,26 @@ def _build_sku_preview(
     metadata_rollup = photo_metadata_rollup(photo_meta)
     missing_before_labels = list(quality_before_labels.get("missing_photo_types") or [])
     missing_after_labels = list(quality.get("missing_photo_types") or [])
+    confidence_fields = {
+        key: pipeline.get(key)
+        for key in [
+            "extraction_confidence",
+            "extraction_confidence_source",
+            "category_confidence",
+            "category_confidence_source",
+            "photo_evidence_confidence",
+            "confidence_explanation",
+            "confidence_warnings",
+            "operator_verified_identity",
+            "operator_verified_category",
+        ]
+    }
     return {
         "sku": sku,
         "found": True,
         "current_local_status": str(item.status or ""),
         "category": str(item.category_key or item.ebay_category_name or item.ebay_category_id or ""),
+        **confidence_fields,
         "intake_quality_status": quality.get("intake_quality_status"),
         "needs_more_photos_for_analysis": bool(quality.get("needs_more_photos_for_analysis")),
         "missing_photo_types": list(quality.get("missing_photo_types") or []),

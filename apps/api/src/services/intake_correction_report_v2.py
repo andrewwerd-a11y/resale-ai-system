@@ -14,6 +14,7 @@ from apps.api.src.services.limited_evidence import (
     annotate_deep_analysis_for_limited_evidence,
     limited_evidence_state,
 )
+from apps.api.src.services.confidence_explanation import build_confidence_explanation
 from apps.api.src.services.publish_compatibility import evaluate_publish_compatibility
 from apps.api.src.services.publish_readiness import evaluate_publish_readiness
 from packages.core.src.constants import Platform
@@ -76,6 +77,13 @@ def build_correction_report_v2(
     readiness = evaluate_publish_readiness(item).as_dict()
     compatibility = evaluate_publish_compatibility(item, strict_condition_policy=True)
     limited_state = limited_evidence_state(quality, allow_limited_evidence=allow_limited_evidence)
+    confidence_fields = build_confidence_explanation(
+        item,
+        quality=quality,
+        identity=identity,
+        resolution=resolution,
+        limited_evidence_used=bool(limited_state["limited_evidence_used"]),
+    )
 
     deep: DeepAnalysisResult | None = None
     if quality.should_run_deep_analysis or limited_state["limited_evidence_used"]:
@@ -180,6 +188,7 @@ def build_correction_report_v2(
         "read_only": True,
         "draft_only": True,
         "manual_approval_required": True,
+        **confidence_fields,
         **limited_state,
     }
 

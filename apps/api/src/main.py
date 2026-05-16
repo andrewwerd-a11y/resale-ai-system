@@ -204,7 +204,7 @@ def _dashboard_html() -> str:
     <a class="card" href="/inventory">
       <div class="num" id="stat-total">...</div><div class="label">Total items</div></a>
     <a class="card hconf" href="/bulk-approve">
-      <div class="num" id="stat-hconf">...</div><div class="label">High confidence pending</div></a>
+      <div class="num" id="stat-hconf">...</div><div class="label">High extraction confidence pending</div></a>
     <a class="card pub" href="/inventory?status=approved">
       <div class="num" id="stat-pub">...</div><div class="label">Ready to publish</div></a>
     <a class="card" href="/inventory?status=listed" style="border-color:#501313">
@@ -214,7 +214,7 @@ def _dashboard_html() -> str:
   <div class="section">
     <h2>Recent items</h2>
     <table id="recent-table">
-      <thead><tr><th>SKU</th><th>Title</th><th>Category</th><th>Status</th><th>Confidence</th><th>Est. Price</th></tr></thead>
+      <thead><tr><th>SKU</th><th>Title</th><th>Category</th><th>Status</th><th>Extraction Confidence</th><th>Est. Price</th></tr></thead>
       <tbody id="recent-body"><tr><td colspan="6" style="color:#888780">Loading...</td></tr></tbody>
     </table>
   </div>

@@ -55,5 +55,10 @@ def test_intake_pipeline_cockpit_ui_uses_operator_evidence_sections():
     assert "Use this only to create a rough draft." in body
     assert "This does not approve or publish the item." in body
     assert "Missing required evidence will still block publish." in body
+    assert "Extraction confidence" in body
+    assert "Category confidence" in body
+    assert "Photo evidence confidence" in body
+    assert "This is not category confidence, photo evidence confidence, pricing confidence, or publish readiness." in body
+    assert "Confidence warnings" in body
     assert "generateLimitedEvidenceDraft()" in body
     assert "Save label" not in body

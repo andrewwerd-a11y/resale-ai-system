@@ -188,6 +188,44 @@ function metadataErrorMessage(detail) {{
   if (typeof detail === 'string') return detail;
   return detail.detail || detail.message || JSON.stringify(detail);
 }}
+function formatConfidenceValue(value) {{
+  if (value === null || value === undefined || value === '') return 'n/a';
+  return `${{Math.round(Number(value) * 100)}}%`;
+}}
+function renderConfidenceSummary(report) {{
+  const warnings = report.confidence_warnings || [];
+  return `
+    <div style="margin-top:12px;border:1px solid #2c2c2a;border-radius:6px;padding:10px;background:#111110">
+      <div style="font-weight:600;color:#f1efe8">Confidence semantics</div>
+      <div style="margin-top:6px;color:#888780;font-size:12px">This is not category confidence, photo evidence confidence, pricing confidence, or publish readiness.</div>
+      <div style="margin-top:8px"><strong>Extraction confidence:</strong> ${{escapeHtml(formatConfidenceValue(report.extraction_confidence))}}</div>
+      <div style="margin-top:4px"><strong>Category confidence:</strong> ${{escapeHtml(formatConfidenceValue(report.category_confidence))}} <span style="color:#888780">(${{escapeHtml(report.category_confidence_source || 'unknown')}})</span></div>
+      <div style="margin-top:4px"><strong>Photo evidence confidence:</strong> ${{escapeHtml(formatConfidenceValue(report.photo_evidence_confidence))}}</div>
+      <div style="margin-top:6px;color:#c9c6bc">${{escapeHtml(report.confidence_explanation || '')}}</div>
+      <div style="margin-top:8px"><strong>Confidence warnings</strong></div>
+      ${{formatList(warnings, 'No additional confidence warnings right now.')}}
+    </div>
+  `;
+}}
+function formatConfidenceValue(value) {{
+  if (value === null || value === undefined || value === '') return 'n/a';
+  return `${{Math.round(Number(value) * 100)}}%`;
+}}
+function renderConfidenceSummary(report) {{
+  const warnings = report.confidence_warnings || [];
+  return `
+    <div style="margin-top:12px;border:1px solid #ddd;border-radius:6px;padding:10px;background:#fafafa">
+      <div style="font-weight:600;color:#333">Confidence semantics</div>
+      <div style="margin-top:6px;color:#666;font-size:12px">This is not category confidence, photo evidence confidence, pricing confidence, or publish readiness.</div>
+      <div style="margin-top:8px"><strong>Extraction confidence:</strong> ${{escapeHtml(formatConfidenceValue(report.extraction_confidence))}}</div>
+      <div style="margin-top:4px"><strong>Category confidence:</strong> ${{escapeHtml(formatConfidenceValue(report.category_confidence))}} <span style="color:#666">(${{escapeHtml(report.category_confidence_source || 'unknown')}})</span></div>
+      <div style="margin-top:4px"><strong>Photo evidence confidence:</strong> ${{escapeHtml(formatConfidenceValue(report.photo_evidence_confidence))}}</div>
+      <div style="margin-top:6px;color:#333">${{escapeHtml(report.confidence_explanation || '')}}</div>
+      <div style="margin-top:8px"><strong>Confidence warnings</strong></div>
+      ${{formatList(warnings, 'No additional confidence warnings right now.')}}
+    </div>
+  `;
+}}
 function renderLimitedEvidenceSection(report) {{
   const missingRequired = (report.operator_photo_evidence || {{}}).missing_required_photo_types || [];
   if (!missingRequired.length) {{
@@ -362,6 +400,7 @@ function renderCorrectionReportSummary(sku, report) {{
     </div>
     <div style="margin-top:8px;color:#333">${{escapeHtml(qualityReason || 'No additional intake-quality note.')}}</div>
     ${{limitedDraftSummary}}
+    ${{renderConfidenceSummary(report)}}
     <div style="margin-top:12px">
       <strong>Next photos needed</strong>
       ${{formatList(nextPhotos, needsMorePhotos ? 'No specific photo types listed yet.' : 'No additional photos requested by intake quality.')}}
@@ -652,9 +691,10 @@ function renderDetailPanel(it) {
     + '<div style="margin-bottom:8px"><span class="badge ' + (it.status || '') + '">' + (it.status || '') + '</span></div>'
     + (reasons ? '<div style="margin-bottom:10px">' + reasons + '</div>' : '')
     + '<div style="margin-bottom:10px">'
-    + '<span style="font-size:12px;color:#888780">Confidence: </span>'
+    + '<span style="font-size:12px;color:#888780">Extraction confidence: </span>'
     + '<span style="font-size:12px;color:' + confColor + '">' + confPct + '%</span>'
     + enrichBadge + '</div>'
+    + '<div style="margin:-4px 0 10px 0;font-size:11px;color:#888780">This is not category confidence, photo evidence confidence, pricing confidence, or publish readiness.</div>'
     + enrichNotes
     + (imgs ? '<div class="dp-imgs">' + imgs + '</div>' : '')
     + '<div style="border-top:1px solid #2c2c2a;padding-top:12px;margin-bottom:14px">' + fieldRows + '</div>'
@@ -808,7 +848,7 @@ function renderList() {{
       <div class="meta">
         <span>${{it.category_label || it.category_key}}</span>
         <span>·</span>
-        <span>Confidence: ${{conf}}</span>
+        <span>Extraction confidence: ${{conf}}</span>
       </div>
       <div style="margin-top:6px;font-size:11px;color:#fac775">${{reasons}}</div>
     </div>`;
@@ -922,11 +962,12 @@ function renderDetail(it) {{
     <div style="font-size:12px;color:#888780;margin-bottom:12px">${{it.category_label || it.category_key}}</div>
     <div style="margin-bottom:10px">${{reasons}}</div>
     <div style="margin-bottom:8px">
-      <span style="font-size:12px;color:#888780">Confidence: </span>
+      <span style="font-size:12px;color:#888780">Extraction confidence: </span>
       <span style="font-size:12px;color:${{confColor}}">${{confPct}}%</span>
       ${{enrichBadge}}
       <div class="conf-bar"><div class="conf-fill" style="width:${{confPct}}%;background:${{confColor}}"></div></div>
     </div>
+    <div style="margin-top:-2px;margin-bottom:10px;font-size:11px;color:#888780">This is not category confidence, photo evidence confidence, pricing confidence, or publish readiness.</div>
     ${{enrichNotes}}
     ${{catIntelHtml}}
     <div class="images">${{imgs}}</div>
@@ -1106,21 +1147,22 @@ def _inventory_html() -> str:
     <option value="rejected">Rejected</option>
   </select>
   <select id="conf-filter" onchange="filterItems()" style="width:170px">
-    <option value="">All confidence</option>
-    <option value="high">High (&ge;85%)</option>
-    <option value="medium">Medium (72&#8209;84%)</option>
-    <option value="low">Low (&lt;72%)</option>
+    <option value="">All extraction confidence</option>
+    <option value="high">High extraction (&ge;85%)</option>
+    <option value="medium">Medium extraction (72&#8209;84%)</option>
+    <option value="low">Low extraction (&lt;72%)</option>
   </select>
   <button class="btn btn-green" onclick="bulkApproveHighConf()" style="font-size:12px;padding:5px 12px">
-    Bulk approve high confidence
+    Bulk approve high extraction confidence
   </button>
+  <span style="font-size:11px;color:#888780">Approval still depends on evidence and blockers, not extraction confidence alone.</span>
   <span id="count" style="font-size:12px;color:#888780"></span>
 </div>
 <table>
   <thead><tr>
     <th>SKU</th><th>Title</th><th>Category</th><th>Brand</th>
     <th>Size</th><th>Condition</th><th>Status</th>
-    <th>Confidence</th><th>Est. Price</th><th>List Price</th>
+    <th>Extraction Confidence</th><th>Est. Price</th><th>List Price</th>
   </tr></thead>
   <tbody id="inv-body"><tr><td colspan="10" style="color:#888780">Loading...</td></tr></tbody>
 </table>
@@ -1193,8 +1235,8 @@ async function bulkApproveHighConf() {{
     (it.confidence_score || 0) >= 0.85 &&
     ['analyzed','approved','needs_review'].includes(it.status)
   );
-  if (!targets.length) {{ alert('No high confidence items found to approve.'); return; }}
-  if (!confirm(`Approve ${{targets.length}} high confidence items?`)) return;
+  if (!targets.length) {{ alert('No high extraction confidence items found to approve. Evidence and blockers still govern approval.'); return; }}
+  if (!confirm(`Approve ${{targets.length}} high extraction confidence items? Evidence and blockers still govern approval.`)) return;
   const r = await fetch('/api/items/bulk-approve', {{
     method: 'POST',
     headers: {{'Content-Type': 'application/json'}},
@@ -1561,6 +1603,7 @@ function renderPhotoMetadataSection(sku, photos, missingPhotoTypes, metadataNote
 function renderCorrectionReportSummary(sku, report) {{
   const evidence = report.operator_photo_evidence || {{}};
   const nextPhotos = evidence.missing_photo_types || [];
+  const recommendedPhotos = evidence.missing_recommended_photo_types || [];
   const selectedTypes = evidence.selected_photo_types || [];
   const skippedReasons = evidence.skipped_image_reasons || [];
   const selectionAvailable = evidence.deep_analysis_image_selection_available;
@@ -1578,6 +1621,7 @@ function renderCorrectionReportSummary(sku, report) {{
       <span class="badge ${{needsMorePhotos ? 'needs_review' : 'approved'}}">${{escapeHtml(qualityStatus)}}</span>
     </div>
     <div style="margin-top:8px;color:#c9c6bc">${{escapeHtml(qualityReason || 'No additional intake-quality note.')}}</div>
+    ${{renderConfidenceSummary(report)}}
     <div style="margin-top:12px">
       <strong>Next photos needed</strong>
       ${{formatList(nextPhotos, needsMorePhotos ? 'No specific photo types listed yet.' : 'No additional photos requested by intake quality.')}}
@@ -1585,6 +1629,8 @@ function renderCorrectionReportSummary(sku, report) {{
     <div style="margin-top:12px">
       <strong>Evidence needed</strong>
       <div style="margin-top:6px">Intake quality asks for more photos: <strong>${{needsMorePhotos ? 'yes' : 'no'}}</strong></div>
+      <div style="margin-top:8px"><strong>Recommended next photos:</strong></div>
+      ${{formatList(recommendedPhotos, 'No additional recommended photo evidence right now.')}}
       ${{selectionSummary}}
       <div style="margin-top:8px"><strong>Selected photo types:</strong></div>
       ${{formatList(selectedTypes, selectionAvailable ? 'No selected photo types were reported.' : 'Selection details will appear after deep analysis runs.')}}
@@ -1745,7 +1791,7 @@ th input[type=checkbox], td input[type=checkbox] {{ width:auto; cursor:pointer; 
 
 <div class="filter-bar">
   <div class="slider-wrap">
-    <label>Min confidence:</label>
+    <label>Min extraction confidence:</label>
     <input type="range" id="conf-slider" min="0" max="100" value="0"
            oninput="document.getElementById('conf-val').textContent=this.value+'%'; applyFilters()">
     <span id="conf-val" style="font-size:12px;color:#f1efe8;min-width:38px">0%</span>
@@ -1764,6 +1810,7 @@ th input[type=checkbox], td input[type=checkbox] {{ width:auto; cursor:pointer; 
     <option value="rejected">Rejected</option>
   </select>
   <span id="filter-count" style="font-size:12px;color:#888780"></span>
+  <span style="font-size:11px;color:#888780">Extraction confidence is not category confidence, photo evidence confidence, or publish readiness.</span>
 </div>
 
 <div class="action-bar">
@@ -1781,7 +1828,7 @@ th input[type=checkbox], td input[type=checkbox] {{ width:auto; cursor:pointer; 
   <thead><tr>
     <th style="width:32px"></th>
     <th>SKU</th><th>Title</th><th>Category</th>
-    <th>Confidence</th><th>Est. Price</th><th>List Price</th><th>Status</th>
+    <th>Extraction Confidence</th><th>Est. Price</th><th>List Price</th><th>Status</th>
   </tr></thead>
   <tbody id="bulk-body"><tr><td colspan="8" style="color:#888780">Loading...</td></tr></tbody>
 </table>

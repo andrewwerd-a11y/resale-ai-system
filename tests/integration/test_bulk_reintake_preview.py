@@ -104,6 +104,11 @@ def test_bulk_reintake_preview_enumerates_status_skus_safely(monkeypatch, tmp_pa
     first = next(result for result in preview["per_sku_results"] if result["sku"] == "BK-REINTAKE")
     assert first["intake_quality_status"]
     assert "needs_more_photos_for_analysis" in first
+    assert "extraction_confidence" in first
+    assert first["category_confidence_source"]
+    assert first["photo_evidence_confidence"] is not None
+    assert first["confidence_explanation"]
+    assert "confidence_warnings" in first
     assert "missing_photo_types" in first
     assert "missing_required_photo_types" in first
     assert "missing_recommended_photo_types" in first
@@ -123,6 +128,10 @@ def test_bulk_reintake_preview_enumerates_status_skus_safely(monkeypatch, tmp_pa
     assert "## SKU Tables By Lane" in preview["report_markdown"]
     assert "Do not publish automatically" in preview["report_markdown"]
     assert "Optional: generate limited-evidence draft for review only; publish remains blocked." in preview["report_markdown"]
+    assert "extraction_confidence=" in preview["report_markdown"]
+    assert "category_confidence=" in preview["report_markdown"]
+    assert "photo_evidence_confidence=" in preview["report_markdown"]
+    assert "confidence_warnings=" in preview["report_markdown"]
 
 
 def test_bulk_reintake_preview_handles_empty_status_selection(monkeypatch, tmp_path):

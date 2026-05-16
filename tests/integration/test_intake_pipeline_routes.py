@@ -82,6 +82,13 @@ def test_intake_pipeline_status_returns_all_stages(monkeypatch, tmp_path):
     body = resp.json()
     assert body["no_ebay_mutation_performed"] is True
     assert body["no_external_provider_called"] is True
+    assert body["extraction_confidence"] == 0.85
+    assert body["extraction_confidence_source"] == "phase1_vision_model_self_report"
+    assert body["category_confidence"] != body["extraction_confidence"]
+    assert body["category_confidence_source"]
+    assert body["photo_evidence_confidence"] is not None
+    assert body["confidence_explanation"]
+    assert "Category has not been operator-confirmed." in body["confidence_warnings"]
     stages = body["stages"]
     assert stages["PHOTO_INTAKE"]["total_photos"] == 6
     assert stages["FIRST_PASS_IDENTITY"]["decision"] == "READY_FOR_DEEP_ANALYSIS"
@@ -188,6 +195,7 @@ def test_deep_analysis_preview_allows_limited_evidence_draft_with_warning(monkey
     assert body["confidence_source"] == "limited_evidence"
     assert body["missing_required_photo_types"]
     assert body["operator_warning"].startswith("This draft was generated with incomplete evidence.")
+    assert "Draft was generated with incomplete evidence." in body["confidence_warnings"]
     assert body["publish_approval_blocked"] is True
     assert body["manual_approval_required"] is True
     assert body["no_publish_performed"] is True
@@ -212,6 +220,23 @@ def test_intake_pipeline_status_can_run_limited_evidence_preview(monkeypatch, tm
     assert body["publish_approval_blocked"] is True
     assert body["stages"]["DEEP_ANALYSIS"] is not None
     assert body["stages"]["DEEP_ANALYSIS"]["confidence_source"] == "limited_evidence"
+
+
+def test_intake_pipeline_warns_when_high_extraction_confidence_has_low_photo_evidence(monkeypatch, tmp_path):
+    _configure_db(monkeypatch, tmp_path)
+    _seed(_limited_book(confidence_score=0.9))
+
+    with _client() as client:
+        resp = client.get("/api/items/BK-LIMIT/intake-pipeline-status")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["extraction_confidence"] == 0.9
+    assert body["photo_evidence_confidence"] < 0.55
+    assert (
+        "High extraction confidence does not mean category or publish readiness is confirmed."
+        in body["confidence_warnings"]
+    )
 
 
 def test_404_for_unknown_sku(monkeypatch, tmp_path):
