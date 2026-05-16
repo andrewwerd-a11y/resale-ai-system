@@ -90,3 +90,10 @@ def test_summarize_photo_coverage_unknown_family_has_no_requirements():
     summary = summarize_photo_coverage(item, "unknown")
     assert summary.missing_required_photo_types == []
     assert summary.missing_recommended_photo_types == []
+
+
+def test_summarize_photo_coverage_books_with_title_page_only_marks_copyright_recommended():
+    item = _item(image_paths=["front-cover.jpg", "back-cover.jpg", "spine.jpg", "title-page.jpg", "condition-flaws.jpg"])
+    summary = summarize_photo_coverage(item, "books")
+    assert summary.missing_required_photo_types == []
+    assert "copyright/publication page" in summary.missing_recommended_photo_types

@@ -9,8 +9,9 @@ from packages.data.src.repositories.item_photo_metadata_repo import ItemPhotoMet
 from packages.domain.src.entities.item import Item
 from packages.intake.src.photo_types import PhotoMeta, parse_photo_inputs
 from packages.intake.src.pipeline_types import PhotoLabelSource, PhotoSource, PhotoType
+from packages.intake.src.quality_gate import category_family_for_item
 
-PHOTO_TYPE_OPTIONS = [
+ALL_PHOTO_TYPE_OPTIONS = [
     {"value": PhotoType.FRONT, "label": "Front cover"},
     {"value": PhotoType.BACK, "label": "Back cover"},
     {"value": PhotoType.SPINE, "label": "Spine"},
@@ -36,6 +37,73 @@ PHOTO_TYPE_OPTIONS = [
     {"value": PhotoType.UNKNOWN, "label": "Unknown / unlabeled"},
 ]
 
+COMPACT_GENERIC_PHOTO_TYPE_OPTIONS = [
+    {"value": PhotoType.FRONT, "label": "Front / full object"},
+    {"value": PhotoType.BACK, "label": "Back / underside"},
+    {"value": PhotoType.DETAIL, "label": "Detail / close-up"},
+    {"value": PhotoType.FLAW, "label": "Condition / defects"},
+    {"value": PhotoType.MEASUREMENT, "label": "Measurement"},
+    {"value": PhotoType.LABEL, "label": "Label / maker mark"},
+    {"value": PhotoType.TAG, "label": "Tag / code"},
+    {"value": PhotoType.UNKNOWN, "label": "Unknown / unlabeled"},
+]
+
+CATEGORY_PHOTO_TYPE_OPTIONS = {
+    "books": [
+        {"value": PhotoType.FRONT, "label": "Front cover"},
+        {"value": PhotoType.BACK, "label": "Back cover"},
+        {"value": PhotoType.SPINE, "label": "Spine"},
+        {"value": PhotoType.TITLE_PAGE, "label": "Title page"},
+        {"value": PhotoType.COPYRIGHT_PAGE, "label": "Copyright/publication page"},
+        {"value": PhotoType.FLAW, "label": "Condition/flaws"},
+        {"value": PhotoType.DETAIL, "label": "Markings/annotations"},
+        {"value": PhotoType.DETAIL, "label": "Interior/sample page"},
+        {"value": PhotoType.UNKNOWN, "label": "Unknown / unlabeled"},
+    ],
+    "clothing": [
+        {"value": PhotoType.FRONT, "label": "Front"},
+        {"value": PhotoType.BACK, "label": "Back"},
+        {"value": PhotoType.BRAND_TAG, "label": "Brand tag"},
+        {"value": PhotoType.SIZE_TAG, "label": "Size tag"},
+        {"value": PhotoType.MATERIAL_CARE_TAG, "label": "Material/care tag"},
+        {"value": PhotoType.MEASUREMENT, "label": "Measurements"},
+        {"value": PhotoType.FLAW, "label": "Flaws/wear"},
+        {"value": PhotoType.DETAIL, "label": "Detail"},
+        {"value": PhotoType.UNKNOWN, "label": "Unknown / unlabeled"},
+    ],
+    "plush_toys": [
+        {"value": PhotoType.FRONT, "label": "Front"},
+        {"value": PhotoType.BACK, "label": "Back"},
+        {"value": PhotoType.TUSH_TAG, "label": "Tag/tush tag"},
+        {"value": PhotoType.SCALE, "label": "Scale/measurement"},
+        {"value": PhotoType.FLAW, "label": "Defects/wear"},
+        {"value": PhotoType.TAG, "label": "Copyright/manufacturer tag"},
+        {"value": PhotoType.DETAIL, "label": "Detail"},
+        {"value": PhotoType.UNKNOWN, "label": "Unknown / unlabeled"},
+    ],
+    "bags": [
+        {"value": PhotoType.FRONT, "label": "Front/back"},
+        {"value": PhotoType.INTERIOR, "label": "Interior"},
+        {"value": PhotoType.LABEL, "label": "Brand/logo"},
+        {"value": PhotoType.SERIAL_OR_DATE_CODE, "label": "Serial/date code"},
+        {"value": PhotoType.HARDWARE, "label": "Hardware"},
+        {"value": PhotoType.CORNERS_WEAR, "label": "Corners/wear"},
+        {"value": PhotoType.DETAIL, "label": "Strap/handle"},
+        {"value": PhotoType.SERIAL_OR_DATE_CODE, "label": "Authenticity evidence"},
+        {"value": PhotoType.UNKNOWN, "label": "Unknown / unlabeled"},
+    ],
+    "collectibles_antiques": [
+        {"value": PhotoType.FRONT, "label": "Full object"},
+        {"value": PhotoType.MAKER_MARK, "label": "Maker marks"},
+        {"value": PhotoType.BACK, "label": "Bottom/back"},
+        {"value": PhotoType.DETAIL, "label": "Close-ups"},
+        {"value": PhotoType.FLAW, "label": "Defects"},
+        {"value": PhotoType.SCALE, "label": "Scale"},
+        {"value": PhotoType.DETAIL, "label": "Provenance/context"},
+        {"value": PhotoType.UNKNOWN, "label": "Unknown / unlabeled"},
+    ],
+}
+
 PHOTO_TYPE_ALIASES = {
     "front cover": PhotoType.FRONT,
     "front_cover": PhotoType.FRONT,
@@ -56,8 +124,25 @@ PHOTO_TYPE_ALIASES = {
     "size tag": PhotoType.SIZE_TAG,
     "material/care tag": PhotoType.MATERIAL_CARE_TAG,
     "material care tag": PhotoType.MATERIAL_CARE_TAG,
+    "measurements": PhotoType.MEASUREMENT,
+    "measurement": PhotoType.MEASUREMENT,
     "tag/tush tag": PhotoType.TUSH_TAG,
     "tag tush tag": PhotoType.TUSH_TAG,
+    "markings/annotations": PhotoType.DETAIL,
+    "markings annotations": PhotoType.DETAIL,
+    "interior/sample page": PhotoType.DETAIL,
+    "interior sample page": PhotoType.DETAIL,
+    "copyright/manufacturer tag": PhotoType.TAG,
+    "copyright manufacturer tag": PhotoType.TAG,
+    "authenticity evidence": PhotoType.SERIAL_OR_DATE_CODE,
+    "front/back": PhotoType.FRONT,
+    "full object": PhotoType.FRONT,
+    "provenance/context": PhotoType.DETAIL,
+    "provenance context": PhotoType.DETAIL,
+    "brand/logo": PhotoType.LABEL,
+    "brand logo": PhotoType.LABEL,
+    "strap/handle": PhotoType.DETAIL,
+    "strap handle": PhotoType.DETAIL,
     "scale/measurement": PhotoType.SCALE,
     "scale measurement": PhotoType.SCALE,
     "scale_measurement": PhotoType.SCALE,
@@ -65,15 +150,24 @@ PHOTO_TYPE_ALIASES = {
 
 
 def photo_type_options() -> list[dict]:
-    return [dict(option) for option in PHOTO_TYPE_OPTIONS]
+    return [dict(option) for option in ALL_PHOTO_TYPE_OPTIONS]
+
+
+def photo_type_options_for_item(item: Item | None) -> tuple[str, list[dict]]:
+    family = category_family_for_item(item) if item is not None else "unknown"
+    options = CATEGORY_PHOTO_TYPE_OPTIONS.get(family, COMPACT_GENERIC_PHOTO_TYPE_OPTIONS)
+    return family, [dict(option) for option in options]
 
 
 def photo_type_option_labels() -> dict[str, str]:
-    return {str(option["value"]): str(option["label"]) for option in PHOTO_TYPE_OPTIONS}
+    labels: dict[str, str] = {}
+    for option in ALL_PHOTO_TYPE_OPTIONS:
+        labels.setdefault(str(option["value"]), str(option["label"]))
+    return labels
 
 
 def valid_photo_type_hint() -> str:
-    return ", ".join(f"{option['value']} ({option['label']})" for option in PHOTO_TYPE_OPTIONS)
+    return ", ".join(f"{option['value']} ({option['label']})" for option in ALL_PHOTO_TYPE_OPTIONS)
 
 
 def normalize_photo_type_input(value: str) -> str | None:
@@ -160,10 +254,12 @@ def sync_photo_metadata_cover_order(session: Session, *, sku: str, ordered_paths
 
 def photo_metadata_response(session: Session, item: Item) -> dict:
     metas = load_photo_metadata(session, item)
+    category_family, options = photo_type_options_for_item(item)
     return {
         "sku": item.sku,
+        "category_family": category_family,
         "photos": [photo_meta_to_api_dict(meta) for meta in metas],
-        "photo_type_options": photo_type_options(),
+        "photo_type_options": options,
         "local_only": True,
         "no_ebay_mutation_performed": True,
         "no_publish_performed": True,

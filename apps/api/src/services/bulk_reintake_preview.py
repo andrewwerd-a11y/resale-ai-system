@@ -173,12 +173,16 @@ def render_bulk_reintake_markdown(response: dict) -> str:
     for result in response.get("per_sku_results") or []:
         blockers = ", ".join(result.get("blockers") or []) or "none"
         missing = ", ".join(result.get("missing_photo_types") or []) or "none"
+        missing_required = ", ".join(result.get("missing_required_photo_types") or []) or "none"
+        missing_recommended = ", ".join(result.get("missing_recommended_photo_types") or []) or "none"
         lines.append(
             f"- {result.get('sku')}: status={result.get('current_local_status') or ''}; "
             f"category={result.get('category') or ''}; "
             f"intake_quality_status={result.get('intake_quality_status') or ''}; "
             f"needs_more_photos_for_analysis={result.get('needs_more_photos_for_analysis')}; "
             f"missing_photo_types={missing}; "
+            f"missing_required_photo_types={missing_required}; "
+            f"missing_recommended_photo_types={missing_recommended}; "
             f"photo_metadata_status={result.get('photo_metadata_status') or ''}; "
             f"photo_label_recommendation={_photo_label_recommendation(result)}; "
             f"workflow_lane={result.get('workflow_lane') or ''}; "
@@ -270,6 +274,9 @@ def _build_sku_preview(
         "intake_quality_status": quality.get("intake_quality_status"),
         "needs_more_photos_for_analysis": bool(quality.get("needs_more_photos_for_analysis")),
         "missing_photo_types": list(quality.get("missing_photo_types") or []),
+        "missing_required_photo_types": list(quality.get("missing_required_photo_types") or []),
+        "missing_recommended_photo_types": list(quality.get("missing_recommended_photo_types") or []),
+        "missing_optional_photo_types": list(quality.get("missing_optional_photo_types") or []),
         "missing_photo_types_before_labels": missing_before_labels,
         "missing_photo_types_after_labels": missing_after_labels,
         "correction_report_v2_summary": {
@@ -289,6 +296,9 @@ def _build_sku_preview(
             "intake_quality_status": quality.get("intake_quality_status"),
             "needs_more_photos_for_analysis": bool(quality.get("needs_more_photos_for_analysis")),
             "missing_photo_types": list(quality.get("missing_photo_types") or []),
+            "missing_required_photo_types": list(quality.get("missing_required_photo_types") or []),
+            "missing_recommended_photo_types": list(quality.get("missing_recommended_photo_types") or []),
+            "missing_optional_photo_types": list(quality.get("missing_optional_photo_types") or []),
             "selected_photo_types": list((deep or {}).get("selected_photo_types") or []),
             "selected_image_count": (deep or {}).get("selected_image_count"),
             "skipped_image_count": (deep or {}).get("skipped_image_count"),

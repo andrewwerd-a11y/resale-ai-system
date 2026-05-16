@@ -246,27 +246,21 @@ def summarize_photo_coverage(
     """
     # Local import to avoid circulars.
     from packages.intake.src.quality_gate import (
-        OPTIONAL_WHEN_NOT_PRESENT,
-        PHOTO_REQUIREMENTS,
         PHOTO_TYPE_LABELS,
+        evaluate_photo_evidence_requirements,
         infer_present_photo_types,
     )
 
-    required_tokens = PHOTO_REQUIREMENTS.get(category_family, [])
     metas = list(photo_meta) if photo_meta is not None else parse_photo_inputs(item)
     present_tokens = infer_present_photo_types(item, photo_meta=metas)
 
-    # Required = required and not optional, Recommended = optional set members.
-    missing_required: list[str] = []
-    missing_recommended: list[str] = []
-    for token in required_tokens:
-        if token in present_tokens:
-            continue
-        label = PHOTO_TYPE_LABELS.get(token, token)
-        if token in OPTIONAL_WHEN_NOT_PRESENT:
-            missing_recommended.append(label)
-        else:
-            missing_required.append(label)
+    missing_required_tokens, missing_recommended_tokens, _missing_optional_tokens = evaluate_photo_evidence_requirements(
+        item,
+        family=category_family,
+        present=present_tokens,
+    )
+    missing_required = [PHOTO_TYPE_LABELS.get(token, token) for token in missing_required_tokens]
+    missing_recommended = [PHOTO_TYPE_LABELS.get(token, token) for token in missing_recommended_tokens]
 
     present_labels = sorted(
         PHOTO_TYPE_LABELS.get(token, token) for token in present_tokens

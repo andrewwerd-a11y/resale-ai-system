@@ -105,6 +105,8 @@ def test_bulk_reintake_preview_enumerates_status_skus_safely(monkeypatch, tmp_pa
     assert first["intake_quality_status"]
     assert "needs_more_photos_for_analysis" in first
     assert "missing_photo_types" in first
+    assert "missing_required_photo_types" in first
+    assert "missing_recommended_photo_types" in first
     assert first["operator_photo_evidence"]["deep_analysis_image_selection_available"] is False
     assert first["workflow_lane"]
     assert first["primary_blocker_family"]
@@ -327,3 +329,5 @@ def test_bulk_reintake_preview_includes_photo_metadata_rollups(monkeypatch, tmp_
     assert "## Label Before Reanalysis" in markdown
     assert "Label photos before reanalysis." in markdown
     assert "photo_metadata_status=partial_labels" in markdown
+    assert "missing_required_photo_types=" in markdown
+    assert "missing_recommended_photo_types=" in markdown

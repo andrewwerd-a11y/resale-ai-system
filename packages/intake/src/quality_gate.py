@@ -7,60 +7,37 @@ from packages.core.src.constants import IntakeQualityStatus, ReviewTrigger
 from packages.domain.src.entities.item import Item
 
 
-PHOTO_REQUIREMENTS: dict[str, list[str]] = {
-    "books": [
-        "front_cover",
-        "back_cover",
-        "spine",
-        "title_page",
-        "copyright_publication_page",
-        "condition_flaws",
-        "markings_annotations",
-    ],
-    "clothing": [
-        "front",
-        "back",
-        "brand_tag",
-        "size_tag",
-        "material_care_tag",
-        "measurements",
-        "flaws_wear",
-    ],
-    "shoes": [
-        "pair_front_side",
-        "soles",
-        "size_tag_inside_label",
-        "brand_label",
-        "heels_toes_wear",
-        "material_detail",
-    ],
-    "plush_toys": [
-        "front",
-        "back",
-        "tag_tush_tag",
-        "scale_measurement",
-        "defects_wear",
-        "copyright_manufacturer_tag",
-    ],
-    "bags": [
-        "front_back",
-        "interior",
-        "brand_logo",
-        "serial_date_code",
-        "hardware",
-        "corners_wear",
-        "strap_handle",
-        "authenticity_sensitive_evidence",
-    ],
-    "collectibles_antiques": [
-        "full_object",
-        "maker_marks",
-        "bottom_back",
-        "close_ups",
-        "defects",
-        "scale",
-        "provenance_context",
-    ],
+PHOTO_REQUIREMENTS: dict[str, dict[str, list[str]]] = {
+    "books": {
+        "required": ["front_cover", "back_cover", "spine", "condition_flaws"],
+        "recommended": ["title_page", "copyright_publication_page"],
+        "optional": ["markings_annotations"],
+    },
+    "clothing": {
+        "required": ["front", "back", "brand_tag", "size_tag"],
+        "recommended": ["material_care_tag", "measurements", "flaws_wear"],
+        "optional": [],
+    },
+    "shoes": {
+        "required": ["pair_front_side", "soles", "size_tag_inside_label", "brand_label"],
+        "recommended": ["heels_toes_wear", "material_detail"],
+        "optional": [],
+    },
+    "plush_toys": {
+        "required": ["front", "back", "tag_tush_tag"],
+        "recommended": ["scale_measurement", "defects_wear", "copyright_manufacturer_tag"],
+        "optional": [],
+    },
+    "bags": {
+        "required": ["front_back", "interior", "brand_logo"],
+        "recommended": ["serial_date_code", "hardware", "corners_wear", "strap_handle", "authenticity_sensitive_evidence"],
+        "optional": [],
+    },
+    "collectibles_antiques": {
+        "required": ["full_object", "bottom_back"],
+        "recommended": ["maker_marks", "close_ups", "defects", "scale"],
+        "optional": ["provenance_context"],
+    },
 }
 
 OPTIONAL_WHEN_NOT_PRESENT = {
@@ -159,6 +136,9 @@ class IntakeQualityResult:
     intake_quality_status: str
     has_enough_photos: bool
     missing_photo_types: list[str] = field(default_factory=list)
+    missing_required_photo_types: list[str] = field(default_factory=list)
+    missing_recommended_photo_types: list[str] = field(default_factory=list)
+    missing_optional_photo_types: list[str] = field(default_factory=list)
     confidence: float = 0.0
     reason: str = ""
     suggested_next_uploads: list[str] = field(default_factory=list)
@@ -168,12 +148,17 @@ class IntakeQualityResult:
     category_family: str = "unknown"
     present_photo_types: list[str] = field(default_factory=list)
     required_photo_types: list[str] = field(default_factory=list)
+    recommended_photo_types: list[str] = field(default_factory=list)
+    optional_photo_types: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict:
         return {
             "intake_quality_status": self.intake_quality_status,
             "has_enough_photos": self.has_enough_photos,
             "missing_photo_types": self.missing_photo_types,
+            "missing_required_photo_types": self.missing_required_photo_types,
+            "missing_recommended_photo_types": self.missing_recommended_photo_types,
+            "missing_optional_photo_types": self.missing_optional_photo_types,
             "confidence": self.confidence,
             "reason": self.reason,
             "suggested_next_uploads": self.suggested_next_uploads,
@@ -183,6 +168,8 @@ class IntakeQualityResult:
             "category_family": self.category_family,
             "present_photo_types": self.present_photo_types,
             "required_photo_types": self.required_photo_types,
+            "recommended_photo_types": self.recommended_photo_types,
+            "optional_photo_types": self.optional_photo_types,
         }
 
 
@@ -191,12 +178,19 @@ def evaluate_intake_quality(
     photo_meta: list | None = None,
 ) -> IntakeQualityResult:
     family = category_family_for_item(item)
-    required = PHOTO_REQUIREMENTS.get(family, [])
+    template = photo_requirement_template(family)
+    required = list(template.get("required", []))
+    recommended = list(template.get("recommended", []))
+    optional = list(template.get("optional", []))
     present = infer_present_photo_types(item, photo_meta=photo_meta)
-    missing = [photo_type for photo_type in required if photo_type not in present and not _optional_photo_satisfied(item, photo_type)]
-    missing_labels = [_label(photo_type) for photo_type in missing]
-    has_enough_photos = bool(required) and not missing
-    confidence = _confidence(item, missing, required)
+    missing_required, missing_recommended, missing_optional = evaluate_photo_evidence_requirements(
+        item,
+        family=family,
+        present=present,
+    )
+    missing_labels = [_label(photo_type) for photo_type in missing_required]
+    has_enough_photos = bool(required or recommended or optional) and not missing_required
+    confidence = _confidence(item, missing_required, required)
     review_reasons = {str(reason) for reason in (item.review_reasons or [])}
 
     status = IntakeQualityStatus.READY_FOR_DEEP_ANALYSIS
@@ -210,7 +204,7 @@ def evaluate_intake_quality(
     elif confidence < 0.55 or ReviewTrigger.LOW_CONFIDENCE in review_reasons:
         status = IntakeQualityStatus.LOW_CONFIDENCE_HOLD
         reason = "Existing item confidence is too low; collect stronger photos before deep analysis."
-    elif missing:
+    elif missing_required:
         status = IntakeQualityStatus.NEEDS_MORE_PHOTOS
         reason = "Missing required category-family photo coverage for reliable deep analysis."
     elif not _has_condition_context(item) and _post_analysis_item(item):
@@ -219,22 +213,76 @@ def evaluate_intake_quality(
     elif _needs_user_context(item):
         status = IntakeQualityStatus.NEEDS_USER_CONTEXT
         reason = "Operator context is required before deep analysis."
+    elif missing_recommended:
+        reason = "Required photo coverage is sufficient; recommended evidence could improve confidence and review quality."
 
     should_run = status == IntakeQualityStatus.READY_FOR_DEEP_ANALYSIS
     return IntakeQualityResult(
         intake_quality_status=status,
         has_enough_photos=has_enough_photos,
         missing_photo_types=missing_labels,
+        missing_required_photo_types=[_label(photo_type) for photo_type in missing_required],
+        missing_recommended_photo_types=[_label(photo_type) for photo_type in missing_recommended],
+        missing_optional_photo_types=[_label(photo_type) for photo_type in missing_optional],
         confidence=confidence,
         reason=reason,
-        suggested_next_uploads=missing_labels,
+        suggested_next_uploads=[
+            *[_label(photo_type) for photo_type in missing_required],
+            *[_label(photo_type) for photo_type in missing_recommended],
+        ],
         should_run_deep_analysis=should_run,
         should_block_publish_approval=not should_run,
-        needs_more_photos_for_analysis=bool(missing),
+        needs_more_photos_for_analysis=bool(missing_required),
         category_family=family,
         present_photo_types=sorted(_label(photo_type) for photo_type in present),
         required_photo_types=[_label(photo_type) for photo_type in required],
+        recommended_photo_types=[_label(photo_type) for photo_type in recommended],
+        optional_photo_types=[_label(photo_type) for photo_type in optional],
     )
+
+
+def photo_requirement_template(category_family: str) -> dict[str, list[str]]:
+    return PHOTO_REQUIREMENTS.get(category_family, {"required": [], "recommended": [], "optional": []})
+
+
+def evaluate_photo_evidence_requirements(
+    item: Item,
+    *,
+    family: str,
+    present: set[str],
+) -> tuple[list[str], list[str], list[str]]:
+    template = photo_requirement_template(family)
+    required = list(template.get("required", []))
+    recommended = list(template.get("recommended", []))
+    optional = list(template.get("optional", []))
+    missing_required = [
+        photo_type
+        for photo_type in required
+        if photo_type not in present and not _optional_photo_satisfied(item, photo_type)
+    ]
+    missing_recommended = [
+        photo_type
+        for photo_type in recommended
+        if photo_type not in present and not _optional_photo_satisfied(item, photo_type)
+    ]
+    missing_optional = [
+        photo_type
+        for photo_type in optional
+        if photo_type not in present and not _optional_photo_satisfied(item, photo_type)
+    ]
+    if family == "books":
+        publication_tokens = ["title_page", "copyright_publication_page"]
+        present_publication = [token for token in publication_tokens if token in present]
+        if not present_publication:
+            for token in publication_tokens:
+                if token not in missing_required:
+                    missing_required.append(token)
+            missing_recommended = [token for token in missing_recommended if token not in publication_tokens]
+        else:
+            for token in publication_tokens:
+                if token not in present and token not in missing_recommended:
+                    missing_recommended.append(token)
+    return missing_required, missing_recommended, missing_optional
 
 
 def category_family_for_item(item: Item) -> str:

@@ -128,6 +128,8 @@ def _intake_pipeline_cockpit_html(sku: str) -> str:
 const SKU = {sku!r};
 const DEFAULT_PHOTO_TYPE_OPTIONS = {_photo_type_options_json()};
 let photoTypeOptions = DEFAULT_PHOTO_TYPE_OPTIONS.slice();
+let photoMetadataDraftSelections = {{}};
+let photoMetadataServerSelections = {{}};
 function escapeHtml(value) {{
   return String(value ?? '')
     .replaceAll('&', '&amp;')
@@ -144,6 +146,32 @@ function formatList(items, emptyText) {{
 function photoTypeLabel(value) {{
   const match = photoTypeOptions.find(function(opt) {{ return opt.value === value; }});
   return match ? match.label : (value || 'unknown');
+}}
+function currentPhotoSelection(photo) {{
+  const path = String(photo.image_path || '');
+  return photoMetadataDraftSelections[path] ?? photoMetadataServerSelections[path] ?? photo.photo_type ?? 'unknown';
+}}
+function hasUnsavedPhotoChanges() {{
+  return Object.keys(photoMetadataDraftSelections).some(function(path) {{
+    return photoMetadataDraftSelections[path] !== (photoMetadataServerSelections[path] || 'unknown');
+  }});
+}}
+function updatePhotoMetadataSaveState() {{
+  const indicator = document.getElementById('photo-metadata-unsaved');
+  const button = document.getElementById('photo-metadata-save-all');
+  if (indicator) {{
+    indicator.textContent = hasUnsavedPhotoChanges() ? 'Unsaved changes' : 'All labels saved';
+    indicator.style.color = hasUnsavedPhotoChanges() ? '#8a5a00' : '#666';
+  }}
+  if (button) {{
+    button.disabled = !hasUnsavedPhotoChanges();
+  }}
+}}
+function setPhotoMetadataFeedback(message, tone) {{
+  const target = document.getElementById('photo-metadata-feedback');
+  if (!target) return;
+  target.textContent = message || '';
+  target.style.color = tone === 'error' ? '#800' : (tone === 'ok' ? '#060' : '#666');
 }}
 function renderPhotoTypeOptions(selected) {{
   return photoTypeOptions.map(function(opt) {{
@@ -173,6 +201,11 @@ function renderPhotoMetadataSection(sku, photos, missingPhotoTypes, metadataNote
         <strong>Photo labels</strong>
         <span class="badge ok">local-only labels; no publish or approval changes</span>
       </div>
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-top:8px">
+        <div id="photo-metadata-unsaved" style="font-size:12px;color:#666">All labels saved</div>
+        <button id="photo-metadata-save-all" style="padding:6px 10px;cursor:pointer" onclick="saveAllPhotoMetadataLabels('${{sku}}')" disabled>Save all labels</button>
+      </div>
+      <div id="photo-metadata-feedback" style="margin-top:6px;font-size:12px;color:#666"></div>
       <div style="margin-top:6px;color:#666">Dropdown labels are friendly. Saved values stay aligned to the internal photo-type enum.</div>
       ${{metadataNote ? `<div style="margin-top:6px;color:#666">${{escapeHtml(metadataNote)}}</div>` : ''}}
       <div style="margin-top:6px;color:#333">Current missing photo types: ${{escapeHtml((missingPhotoTypes || []).join(', ') || 'none')}}</div>
@@ -184,19 +217,30 @@ function renderPhotoMetadataSection(sku, photos, missingPhotoTypes, metadataNote
               <img src="${{thumb}}" alt="photo" style="width:100%;aspect-ratio:1;object-fit:cover;border-radius:4px;border:1px solid #ddd" onerror="this.style.display='none'">
               <div style="margin-top:6px;font-size:11px;word-break:break-word">${{escapeHtml(photo.image_path || '')}}</div>
               <label style="margin-top:8px;font-size:11px;color:#666;display:block">Photo type</label>
-              <select data-image-path="${{escapeHtml(photo.image_path || '')}}" style="width:100%;margin-top:4px">
-                ${{renderPhotoTypeOptions(photo.photo_type || 'unknown')}}
+              <select data-image-path="${{escapeHtml(photo.image_path || '')}}" onchange="trackPhotoMetadataChange(this)" style="width:100%;margin-top:4px">
+                ${{renderPhotoTypeOptions(currentPhotoSelection(photo))}}
               </select>
-              <div style="margin-top:6px;font-size:11px;color:#333">Current label: ${{escapeHtml(photoTypeLabel(photo.photo_type || 'unknown'))}}</div>
+              <div data-current-label="true" style="margin-top:6px;font-size:11px;color:#333">Current label: ${{escapeHtml(photoTypeLabel(currentPhotoSelection(photo)))}}</div>
               <div style="margin-top:4px;font-size:11px;color:#666">Source: ${{escapeHtml(photo.label_source || photo.source || 'unknown')}} | Confidence: ${{escapeHtml(photo.confidence ?? '')}}</div>
               <div style="margin-top:4px;font-size:11px;color:#666">Cover/display image: <strong>${{photo.is_cover ? 'yes' : 'no'}}</strong></div>
-              <button style="margin-top:8px;padding:5px 8px;cursor:pointer" onclick="savePhotoMetadataLabel('${{sku}}', this)">Save label</button>
             </div>
           `;
         }}).join('')}}
       </div>
     </div>
   `;
+}}
+function trackPhotoMetadataChange(select) {{
+  const path = String(select.getAttribute('data-image-path') || '');
+  if (!path) return;
+  photoMetadataDraftSelections[path] = select.value;
+  const card = select.closest('div[style*="border:1px solid #ddd"]');
+  const labelNode = card ? card.querySelector('[data-current-label="true"]') : null;
+  if (labelNode) {{
+    labelNode.textContent = `Current label: ${{photoTypeLabel(select.value)}}`;
+  }}
+  setPhotoMetadataFeedback('', '');
+  updatePhotoMetadataSaveState();
 }}
 async function loadPhotoMetadataAndRender(sku, report) {{
   const target = document.getElementById('photo-metadata-summary');
@@ -207,48 +251,61 @@ async function loadPhotoMetadataAndRender(sku, report) {{
     photoTypeOptions = Array.isArray(body.photo_type_options) && body.photo_type_options.length
       ? body.photo_type_options
       : DEFAULT_PHOTO_TYPE_OPTIONS.slice();
+    photoMetadataServerSelections = Object.fromEntries((body.photos || []).map(function(photo) {{
+      return [String(photo.image_path || ''), String(photo.photo_type || 'unknown')];
+    }}));
     target.innerHTML = renderPhotoMetadataSection(
       sku,
       body.photos || [],
-      (report.operator_photo_evidence || {{}}).missing_photo_types || [],
+      (report.operator_photo_evidence || {{}}).missing_required_photo_types || (report.operator_photo_evidence || {{}}).missing_photo_types || [],
       'Display image means the first image shown locally. It does not rename the selected photo type.'
     );
+    updatePhotoMetadataSaveState();
   }} catch (error) {{
     target.innerHTML = `<div style="margin-top:12px;color:#800">Photo metadata unavailable: ${{escapeHtml(error.message)}}</div>`;
   }}
 }}
-async function savePhotoMetadataLabel(sku, button) {{
-  const card = button.closest('div[style*="border:1px solid #ddd"]');
-  const select = card ? card.querySelector('select[data-image-path]') : null;
-  if (!select) return;
+function collectAllPhotoMetadataUpdates() {{
+  return Array.from(document.querySelectorAll('#photo-metadata-summary select[data-image-path]')).map(function(select) {{
+    return {{
+      image_path: select.getAttribute('data-image-path'),
+      photo_type: select.value
+    }};
+  }});
+}}
+async function saveAllPhotoMetadataLabels(sku) {{
+  const button = document.getElementById('photo-metadata-save-all');
+  if (!button) return;
+  const updates = collectAllPhotoMetadataUpdates();
+  if (!updates.length) return;
   button.disabled = true;
+  setPhotoMetadataFeedback('Saving local photo labels...', '');
   try {{
     const resp = await fetch(`/api/items/${{sku}}/photos/metadata`, {{
       method: 'PATCH',
       headers: {{'Content-Type':'application/json'}},
-      body: JSON.stringify({{
-        updates: [{{
-          image_path: select.getAttribute('data-image-path'),
-          photo_type: select.value
-        }}]
-      }})
+      body: JSON.stringify({{ updates }})
     }});
     const body = await resp.json();
     if (!resp.ok) throw new Error(metadataErrorMessage(body));
+    photoMetadataDraftSelections = {{}};
+    setPhotoMetadataFeedback('Photo labels saved locally.', 'ok');
     const report = await show(fetch(`/api/items/${{sku}}/correction-report-v2`));
     if (report) {{
       document.getElementById('evidence-summary').innerHTML = renderCorrectionReportSummary(sku, report);
       await loadPhotoMetadataAndRender(sku, report);
     }}
   }} catch (error) {{
-    alert(error.message);
+    setPhotoMetadataFeedback(error.message, 'error');
+    updatePhotoMetadataSaveState();
   }} finally {{
-    button.disabled = false;
+    updatePhotoMetadataSaveState();
   }}
 }}
 function renderCorrectionReportSummary(sku, report) {{
   const evidence = report.operator_photo_evidence || {{}};
-  const nextPhotos = evidence.missing_photo_types || [];
+  const nextPhotos = evidence.missing_required_photo_types || evidence.missing_photo_types || [];
+  const recommendedPhotos = evidence.missing_recommended_photo_types || [];
   const selectedTypes = evidence.selected_photo_types || [];
   const skippedReasons = evidence.skipped_image_reasons || [];
   const selectionAvailable = evidence.deep_analysis_image_selection_available;
@@ -273,6 +330,8 @@ function renderCorrectionReportSummary(sku, report) {{
     <div style="margin-top:12px">
       <strong>Evidence needed</strong>
       <div style="margin-top:6px">Intake quality asks for more photos: <strong>${{needsMorePhotos ? 'yes' : 'no'}}</strong></div>
+      <div style="margin-top:8px"><strong>Recommended next photos:</strong></div>
+      ${{formatList(recommendedPhotos, 'No additional recommended photo evidence right now.')}}
       ${{selectionSummary}}
       <div style="margin-top:8px"><strong>Selected photo types:</strong></div>
       ${{formatList(selectedTypes, selectionAvailable ? 'No selected photo types were reported.' : 'Selection details will appear after deep analysis runs.')}}

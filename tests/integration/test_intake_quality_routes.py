@@ -58,15 +58,17 @@ def test_intake_quality_endpoint_and_correction_report_are_read_only(monkeypatch
 
     assert quality_resp.status_code == 200
     quality = quality_resp.json()
-    assert quality["intake_quality_status"] == "NEEDS_MORE_PHOTOS"
-    assert quality["needs_more_photos_for_analysis"] is True
-    assert "copyright/publication page" in quality["missing_photo_types"]
+    assert quality["intake_quality_status"] == "READY_FOR_DEEP_ANALYSIS"
+    assert quality["needs_more_photos_for_analysis"] is False
+    assert quality["missing_photo_types"] == []
+    assert "copyright/publication page" in quality["missing_recommended_photo_types"]
 
     assert report_resp.status_code == 200
     report = report_resp.json()
     assert report["no_ebay_mutation_performed"] is True
     assert report["missing_photo_checklist"] == quality["missing_photo_types"]
-    assert report["next_action_sequence"][0]["group"] == "Add more photos before analysis"
+    assert report["next_action_sequence"]
+    assert all(entry["group"] != "Add more photos before analysis" for entry in report["next_action_sequence"])
 
 
 def test_analyze_blocks_before_provider_when_intake_quality_not_ready(monkeypatch, tmp_path):
@@ -227,9 +229,11 @@ def test_clothing_quality_uses_stored_photo_labels(monkeypatch, tmp_path):
     assert after.status_code == 200
     before_missing = set(before.json()["missing_photo_types"])
     after_missing = set(after.json()["missing_photo_types"])
+    before_recommended = set(before.json()["missing_recommended_photo_types"])
+    after_recommended = set(after.json()["missing_recommended_photo_types"])
     assert "brand tag" in before_missing
     assert "size tag" in before_missing
-    assert "material/care tag" in before_missing
+    assert "material/care tag" in before_recommended
     assert "brand tag" not in after_missing
     assert "size tag" not in after_missing
-    assert "material/care tag" not in after_missing
+    assert "material/care tag" not in after_recommended

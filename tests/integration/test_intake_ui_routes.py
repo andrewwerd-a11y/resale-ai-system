@@ -48,3 +48,7 @@ def test_intake_pipeline_cockpit_ui_uses_operator_evidence_sections():
     assert "Title page" in body
     assert '"value": "title_page"' in body
     assert "Display image means the first image shown locally" in body
+    assert "Save all labels" in body
+    assert "collectAllPhotoMetadataUpdates()" in body
+    assert "Unsaved changes" in body
+    assert "Save label" not in body

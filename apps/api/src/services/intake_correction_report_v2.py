@@ -177,11 +177,15 @@ def _build_operator_photo_evidence(*, quality: dict, deep: dict | None) -> dict:
         "intake_quality_status": quality.get("intake_quality_status"),
         "needs_more_photos_for_analysis": bool(quality.get("needs_more_photos_for_analysis")),
         "missing_photo_types": list(quality.get("missing_photo_types") or []),
+        "missing_required_photo_types": list(quality.get("missing_required_photo_types") or []),
+        "missing_recommended_photo_types": list(quality.get("missing_recommended_photo_types") or []),
+        "missing_optional_photo_types": list(quality.get("missing_optional_photo_types") or []),
         "selected_photo_types": list((deep or {}).get("selected_photo_types") or []),
         "selected_image_count": (deep or {}).get("selected_image_count"),
         "skipped_image_count": (deep or {}).get("skipped_image_count"),
         "skipped_image_reasons": list((deep or {}).get("skipped_image_reasons") or []),
         "deep_analysis_image_selection_available": deep is not None,
+        "missing_photo_types_compatibility_note": "missing_photo_types contains required blockers for backward compatibility.",
     }
 
 

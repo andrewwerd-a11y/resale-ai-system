@@ -20,7 +20,26 @@ def _item(**overrides) -> Item:
     return Item(**base)
 
 
-def test_book_missing_copyright_page_blocks_deep_analysis():
+def test_book_missing_both_publication_evidence_photos_blocks_deep_analysis():
+    result = evaluate_intake_quality(
+        _item(
+            image_paths=[
+                "front-cover.jpg",
+                "back-cover.jpg",
+                "spine.jpg",
+                "condition-flaws.jpg",
+            ],
+        )
+    )
+
+    assert result.intake_quality_status == IntakeQualityStatus.NEEDS_MORE_PHOTOS
+    assert "title page" in result.missing_required_photo_types
+    assert "copyright/publication page" in result.missing_photo_types
+    assert result.should_run_deep_analysis is False
+    assert result.needs_more_photos_for_analysis is True
+
+
+def test_book_missing_only_copyright_page_is_recommended_not_blocking():
     result = evaluate_intake_quality(
         _item(
             image_paths=[
@@ -33,10 +52,10 @@ def test_book_missing_copyright_page_blocks_deep_analysis():
         )
     )
 
-    assert result.intake_quality_status == IntakeQualityStatus.NEEDS_MORE_PHOTOS
-    assert "copyright/publication page" in result.missing_photo_types
-    assert result.should_run_deep_analysis is False
-    assert result.needs_more_photos_for_analysis is True
+    assert result.intake_quality_status == IntakeQualityStatus.READY_FOR_DEEP_ANALYSIS
+    assert result.needs_more_photos_for_analysis is False
+    assert result.missing_photo_types == []
+    assert "copyright/publication page" in result.missing_recommended_photo_types
 
 
 def test_clothing_missing_size_and_material_tags_blocks():
@@ -57,7 +76,28 @@ def test_clothing_missing_size_and_material_tags_blocks():
 
     assert result.intake_quality_status == IntakeQualityStatus.NEEDS_MORE_PHOTOS
     assert "size tag" in result.missing_photo_types
-    assert "material/care tag" in result.missing_photo_types
+    assert "material/care tag" in result.missing_recommended_photo_types
+
+
+def test_missing_recommended_only_photo_does_not_block_analysis():
+    result = evaluate_intake_quality(
+        _item(
+            sku="CL-REC",
+            category_key="clothing",
+            category_label="Clothing",
+            image_paths=[
+                "front.jpg",
+                "back.jpg",
+                "brand-tag.jpg",
+                "size-tag.jpg",
+            ],
+        )
+    )
+
+    assert result.intake_quality_status == IntakeQualityStatus.READY_FOR_DEEP_ANALYSIS
+    assert result.needs_more_photos_for_analysis is False
+    assert result.missing_required_photo_types == []
+    assert "material/care tag" in result.missing_recommended_photo_types
 
 
 def test_plush_missing_tag_photo_blocks():
@@ -101,7 +141,8 @@ def test_bag_missing_authenticity_detail_photos_requires_review():
     )
 
     assert result.intake_quality_status == IntakeQualityStatus.NEEDS_AUTHENTICITY_REVIEW
-    assert "authenticity-sensitive evidence" in result.missing_photo_types
+    assert "authenticity-sensitive evidence" in result.missing_recommended_photo_types
+    assert result.needs_more_photos_for_analysis is False
     assert result.should_block_publish_approval is True
 
 

@@ -85,22 +85,23 @@ def test_correction_report_v2_groups_actions_for_missing_photos(monkeypatch, tmp
     assert "Needs more photos" in groups
     assert body["should_run_deep_analysis"] is False
     assert body["publish_approval_blocked"] is True
-    assert body["operator_photo_evidence"] == {
-        "intake_quality_status": "LOW_CONFIDENCE_HOLD",
-        "needs_more_photos_for_analysis": True,
-        "missing_photo_types": [
-            "back cover",
-            "spine",
-            "title page",
-            "copyright/publication page",
-            "condition/flaws",
-        ],
-        "selected_photo_types": [],
-        "selected_image_count": None,
-        "skipped_image_count": None,
-        "skipped_image_reasons": [],
-        "deep_analysis_image_selection_available": False,
-    }
+    evidence = body["operator_photo_evidence"]
+    assert evidence["intake_quality_status"] == "LOW_CONFIDENCE_HOLD"
+    assert evidence["needs_more_photos_for_analysis"] is True
+    assert evidence["missing_required_photo_types"] == [
+        "back cover",
+        "spine",
+        "condition/flaws",
+        "title page",
+        "copyright/publication page",
+    ]
+    assert evidence["missing_photo_types"] == evidence["missing_required_photo_types"]
+    assert evidence["missing_recommended_photo_types"] == []
+    assert evidence["selected_photo_types"] == []
+    assert evidence["selected_image_count"] is None
+    assert evidence["skipped_image_count"] is None
+    assert evidence["skipped_image_reasons"] == []
+    assert evidence["deep_analysis_image_selection_available"] is False
     assert body["no_ebay_mutation_performed"] is True
     assert body["no_publish_performed"] is True
     assert body["manual_approval_required"] is True
@@ -294,13 +295,14 @@ def test_correction_report_v2_no_external_provider_called_false_when_real_provid
     assert body["no_publish_performed"] is True
     assert body["manual_approval_required"] is True
     assert body["read_only"] is True
-    assert body["operator_photo_evidence"] == {
-        "intake_quality_status": "READY_FOR_DEEP_ANALYSIS",
-        "needs_more_photos_for_analysis": False,
-        "missing_photo_types": [],
-        "selected_photo_types": [],
-        "selected_image_count": 0,
-        "skipped_image_count": 0,
-        "skipped_image_reasons": [],
-        "deep_analysis_image_selection_available": True,
-    }
+    evidence = body["operator_photo_evidence"]
+    assert evidence["intake_quality_status"] == "READY_FOR_DEEP_ANALYSIS"
+    assert evidence["needs_more_photos_for_analysis"] is False
+    assert evidence["missing_photo_types"] == []
+    assert evidence["missing_required_photo_types"] == []
+    assert evidence["missing_recommended_photo_types"] == []
+    assert evidence["selected_photo_types"] == []
+    assert evidence["selected_image_count"] == 0
+    assert evidence["skipped_image_count"] == 0
+    assert evidence["skipped_image_reasons"] == []
+    assert evidence["deep_analysis_image_selection_available"] is True

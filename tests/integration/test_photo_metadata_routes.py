@@ -69,7 +69,13 @@ def test_get_photo_metadata_works_without_stored_labels(monkeypatch, tmp_path):
     assert body["no_publish_performed"] is True
     assert body["manual_approval_required"] is True
     assert [photo["image_path"] for photo in body["photos"]] == ["front-cover.jpg", "spine.jpg", "flaw.jpg"]
+    assert body["category_family"] == "books"
     assert {"value": "title_page", "label": "Title page"} in body["photo_type_options"]
+    labels = [entry["label"] for entry in body["photo_type_options"]]
+    assert "Tag/tush tag" not in labels
+    assert "Hardware" not in labels
+    assert "Soles" not in labels
+    assert "Serial/date code" not in labels
 
 
 def test_patch_photo_metadata_labels_front_cover_spine_and_flaw(monkeypatch, tmp_path):
@@ -111,6 +117,60 @@ def test_patch_photo_metadata_accepts_friendly_title_page_label(monkeypatch, tmp
     assert resp.status_code == 200
     photos = {photo["image_path"]: photo for photo in resp.json()["photos"]}
     assert photos["front-cover.jpg"]["photo_type"] == "title_page"
+
+
+def test_get_photo_metadata_returns_clothing_specific_options(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    _seed_item(
+        sku="CL-ROUTE",
+        category_key="clothing",
+        category_label="Clothing",
+        image_paths=["front.jpg", "brand-tag.jpg"],
+    )
+
+    with _client() as client:
+        resp = client.get("/api/items/CL-ROUTE/photos/metadata")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    labels = [entry["label"] for entry in body["photo_type_options"]]
+    values = [entry["value"] for entry in body["photo_type_options"]]
+    assert body["category_family"] == "clothing"
+    assert "Brand tag" in labels
+    assert "Size tag" in labels
+    assert "Material/care tag" in labels
+    assert "brand_tag" in values
+    assert "size_tag" in values
+    assert "material_care_tag" in values
+
+
+def test_get_photo_metadata_returns_compact_generic_options_for_unknown_category(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    _seed_item(
+        sku="GEN-ROUTE",
+        category_key="mystery",
+        category_label="Mystery",
+        title_final="Strange object",
+        image_paths=["a.jpg"],
+    )
+
+    with _client() as client:
+        resp = client.get("/api/items/GEN-ROUTE/photos/metadata")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    labels = [entry["label"] for entry in body["photo_type_options"]]
+    assert body["category_family"] == "unknown"
+    assert labels == [
+        "Front / full object",
+        "Back / underside",
+        "Detail / close-up",
+        "Condition / defects",
+        "Measurement",
+        "Label / maker mark",
+        "Tag / code",
+        "Unknown / unlabeled",
+    ]
 
 
 def test_patch_photo_metadata_rejects_invalid_photo_type(monkeypatch, tmp_path):
