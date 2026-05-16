@@ -142,8 +142,19 @@ def render_bulk_reintake_markdown(response: dict) -> str:
         "## Top Missing Photo Types",
         *_format_counter_lines(summary.get("top_missing_photo_types") or {}),
         "",
+        "## Top Missing Label Types",
+        *_format_counter_lines(summary.get("top_missing_label_types") or {}),
+        "",
         "## Top Blocker Codes",
         *_format_counter_lines(summary.get("top_blocker_codes") or {}),
+        "",
+        "## Label Coverage",
+        f"- SKUs with no labeled photos: {summary.get('skus_with_no_labeled_photos_count', 0)}",
+        f"- SKUs with partial labels: {summary.get('skus_with_partial_labels_count', 0)}",
+        f"- SKUs whose missing-photo status improved from labels: {summary.get('skus_improved_by_labels_count', 0)}",
+        "",
+        "## Label Before Reanalysis",
+        *_format_sku_lines(summary.get("skus_recommended_for_labeling_before_reanalysis") or []),
         "",
         "## First Candidates To Improve",
         *_format_sku_lines(summary.get("first_safe_candidates_for_next_dry_run") or []),
@@ -168,6 +179,8 @@ def render_bulk_reintake_markdown(response: dict) -> str:
             f"intake_quality_status={result.get('intake_quality_status') or ''}; "
             f"needs_more_photos_for_analysis={result.get('needs_more_photos_for_analysis')}; "
             f"missing_photo_types={missing}; "
+            f"photo_metadata_status={result.get('photo_metadata_status') or ''}; "
+            f"photo_label_recommendation={_photo_label_recommendation(result)}; "
             f"workflow_lane={result.get('workflow_lane') or ''}; "
             f"primary_blocker_family={result.get('primary_blocker_family') or ''}; "
             f"blockers={blockers}; "
@@ -237,6 +250,7 @@ def _build_sku_preview(
 
     quality = evaluate_intake_quality(item).as_dict()
     photo_meta = load_photo_metadata(repo.session, item)
+    quality_before_labels = evaluate_intake_quality(item).as_dict()
     quality = evaluate_intake_quality(item, photo_meta=photo_meta).as_dict()
     pipeline = build_pipeline_snapshot(
         item,
@@ -246,6 +260,7 @@ def _build_sku_preview(
     readiness = evaluate_publish_readiness(item).as_dict()
     deep = (pipeline.get("stages") or {}).get("deep_analysis")
     metadata_rollup = photo_metadata_rollup(photo_meta)
+    missing_before_labels = list(quality_before_labels.get("missing_photo_types") or [])
     missing_after_labels = list(quality.get("missing_photo_types") or [])
     return {
         "sku": sku,
@@ -255,6 +270,7 @@ def _build_sku_preview(
         "intake_quality_status": quality.get("intake_quality_status"),
         "needs_more_photos_for_analysis": bool(quality.get("needs_more_photos_for_analysis")),
         "missing_photo_types": list(quality.get("missing_photo_types") or []),
+        "missing_photo_types_before_labels": missing_before_labels,
         "missing_photo_types_after_labels": missing_after_labels,
         "correction_report_v2_summary": {
             "available": True,
@@ -330,6 +346,12 @@ def _build_summary(results: list[dict]) -> dict:
         for result in results
         for photo_type in result.get("missing_photo_types") or []
     ])
+    missing_label_counts = counter_dict([
+        photo_type
+        for result in results
+        if result.get("photo_metadata_status") != "fully_labeled"
+        for photo_type in result.get("missing_photo_types_after_labels") or []
+    ])
     blocker_counts = counter_dict([
         blocker
         for result in results
@@ -348,6 +370,26 @@ def _build_summary(results: list[dict]) -> dict:
         for result in results
         if result.get("workflow_lane") in high_risk_lanes
     ][:20]
+    no_labeled = [
+        result["sku"]
+        for result in results
+        if result.get("photo_metadata_status") == "no_labels"
+    ]
+    partial_labeled = [
+        result["sku"]
+        for result in results
+        if result.get("photo_metadata_status") == "partial_labels"
+    ]
+    improved_by_labels = [
+        result["sku"]
+        for result in results
+        if len(result.get("missing_photo_types_after_labels") or []) < len(result.get("missing_photo_types_before_labels") or [])
+    ]
+    recommend_labeling = [
+        result["sku"]
+        for result in results
+        if _photo_label_recommendation(result) == "Label photos before reanalysis."
+    ]
     return {
         "total_skus": len(results),
         "found": sum(1 for result in results if result.get("found")),
@@ -364,9 +406,17 @@ def _build_summary(results: list[dict]) -> dict:
         "image_hosting_candidate_count": lane_counts.get("image_hosting_candidate", 0),
         "unknown_manual_review_count": lane_counts.get("unknown_manual_review", 0),
         "top_missing_photo_types": dict(sorted(missing_photo_counts.items(), key=lambda item: (-item[1], item[0]))[:10]),
+        "top_missing_label_types": dict(sorted(missing_label_counts.items(), key=lambda item: (-item[1], item[0]))[:10]),
         "top_blocker_codes": dict(sorted(blocker_counts.items(), key=lambda item: (-item[1], item[0]))[:10]),
         "first_safe_candidates_for_next_dry_run": first_safe,
         "highest_risk_skus_to_defer": high_risk,
+        "skus_with_no_labeled_photos": no_labeled,
+        "skus_with_no_labeled_photos_count": len(no_labeled),
+        "skus_with_partial_labels": partial_labeled,
+        "skus_with_partial_labels_count": len(partial_labeled),
+        "skus_improved_by_labels": improved_by_labels,
+        "skus_improved_by_labels_count": len(improved_by_labels),
+        "skus_recommended_for_labeling_before_reanalysis": recommend_labeling,
     }
 
 
@@ -445,8 +495,8 @@ def _lane_table_lines(results: list[dict]) -> list[str]:
     lines: list[str] = []
     for lane, lane_results in grouped.items():
         lines.append(f"### {lane}")
-        lines.append("| SKU | Status | Intake Quality | Primary Family | Blockers | Next Safest Action |")
-        lines.append("| --- | --- | --- | --- | --- | --- |")
+        lines.append("| SKU | Status | Intake Quality | Photo Metadata | Primary Family | Blockers | Next Safest Action |")
+        lines.append("| --- | --- | --- | --- | --- | --- | --- |")
         for result in lane_results:
             blockers = ", ".join(result.get("blockers") or []) or "none"
             lines.append(
@@ -455,6 +505,7 @@ def _lane_table_lines(results: list[dict]) -> list[str]:
                     str(result.get("sku") or ""),
                     str(result.get("current_local_status") or ""),
                     str(result.get("intake_quality_status") or ""),
+                    _photo_label_recommendation(result),
                     str(result.get("primary_blocker_family") or ""),
                     blockers,
                     str(result.get("next_safest_action") or ""),
@@ -463,3 +514,13 @@ def _lane_table_lines(results: list[dict]) -> list[str]:
             )
         lines.append("")
     return lines
+
+
+def _photo_label_recommendation(result: dict) -> str:
+    status = str(result.get("photo_metadata_status") or "")
+    missing_after = list(result.get("missing_photo_types_after_labels") or [])
+    if status in {"no_labels", "partial_labels"} and missing_after:
+        return "Label photos before reanalysis."
+    if status == "fully_labeled":
+        return "Labels already in place."
+    return "No photo-label action yet."

@@ -6,6 +6,7 @@ from sqlmodel import Session, create_engine
 
 from apps.api.src.routes import items
 from apps.api.src.services.bulk_reintake_preview import build_bulk_reintake_preview
+from apps.api.src.services.photo_metadata import upsert_photo_labels
 from packages.core.src import config as core_config
 from packages.core.src.constants import ItemStatus
 from packages.data.src.db import sqlite as sqlite_db
@@ -277,3 +278,52 @@ def test_bulk_reintake_preview_api_accepts_status_filters(monkeypatch, tmp_path)
     assert body["summary"]["total_skus"] == 1
     assert body["per_sku_results"][0]["sku"] == "BK-API-LISTED"
     assert body["per_sku_results"][0]["workflow_lane"] == "already_listed_or_sync_review"
+
+
+def test_bulk_reintake_preview_includes_photo_metadata_rollups(monkeypatch, tmp_path):
+    _configure_temp_db(monkeypatch, tmp_path)
+    _block_mutations(monkeypatch)
+    _seed_item(
+        sku="BK-LABELS",
+        image_paths=["a.jpg", "b.jpg", "c.jpg", "d.jpg", "e.jpg"],
+    )
+    _seed_item(
+        sku="BK-NO-LABELS",
+        image_paths=["front-cover.jpg", "spine.jpg"],
+    )
+
+    with Session(sqlite_db.engine) as session:
+        labeled_item = ItemRepository(session).get_by_sku("BK-LABELS")
+        assert labeled_item is not None
+        upsert_photo_labels(
+            session,
+            labeled_item,
+            [
+                {"image_path": "a.jpg", "photo_type": "front"},
+                {"image_path": "b.jpg", "photo_type": "back"},
+                {"image_path": "c.jpg", "photo_type": "spine"},
+            ],
+        )
+        preview = build_bulk_reintake_preview(
+            session,
+            skus=["BK-LABELS", "BK-NO-LABELS"],
+            statuses=[],
+            report_dir=tmp_path / "reports",
+        )
+
+    labeled = next(result for result in preview["per_sku_results"] if result["sku"] == "BK-LABELS")
+    no_labels = next(result for result in preview["per_sku_results"] if result["sku"] == "BK-NO-LABELS")
+    assert labeled["labeled_photo_count"] >= 3
+    assert labeled["user_labeled_photo_types"] == ["back", "front", "spine"]
+    assert labeled["photo_metadata_status"] == "partial_labels"
+    assert no_labels["photo_metadata_status"] == "no_labels"
+    summary = preview["summary"]
+    assert summary["skus_with_no_labeled_photos_count"] == 1
+    assert summary["skus_with_partial_labels_count"] == 1
+    assert "BK-LABELS" in summary["skus_improved_by_labels"]
+    assert "BK-NO-LABELS" in summary["skus_recommended_for_labeling_before_reanalysis"]
+    markdown = preview["report_markdown"]
+    assert "## Label Coverage" in markdown
+    assert "## Label Before Reanalysis" in markdown
+    assert "Label photos before reanalysis." in markdown
+    assert "photo_metadata_status=partial_labels" in markdown
